@@ -225,3 +225,10 @@ Read with the core skill's `references/implementer-checklist.md`.
 - Follow the area's delivery mechanism. theme-assets — get the renderer through a typed argument, the view-model registry or the ViewModel; inline only small critical code; external + defer by default; preload only what first paint needs; the module declares `hryvinskyi/magento2-theme-assets` and every module whose fileId it renders. Config and wording printed escaped (`JsonHexTag`, `escapeHtmlAttr`), parsed by the script; nothing private in cacheable output; no timing assumptions the project's script optimizers break.
 - Domain and use-case modules import no Knockout, Alpine or `mage/*`; Knockout view models and Alpine objects only bind, render and choose wording.
 - Declared dependencies include the `module.xml` sequence.
+
+## Plan review on this stack
+
+What the `pipeline:devils-advocate` browser-code checks look for in Magento's spelling.
+
+- **Delivery is justified:** the area's mechanism is followed, theme-assets render mode / load strategy / preload fit the asset (nothing large inlined, only first-paint resources preloaded), config and wording printed escaped, nothing private in cacheable output, the module declares the package and every module whose asset it renders.
+- **Dependency rule:** Knockout is an outer concrete: a domain or use-case module that imports it depends on the delivery mechanism.

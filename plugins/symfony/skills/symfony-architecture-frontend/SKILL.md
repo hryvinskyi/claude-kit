@@ -208,3 +208,10 @@ Read with the core skill's `references/implementer-checklist.md`.
 
 - Controllers are humble; values/targets are the contract; `disconnect()` undoes `connect()`; wording arrives translated from Twig; the package registers its own controllers, asset path and importmap entries; islands are mounted/unmounted by a host controller.
 - Domain and use-case modules import no Stimulus.
+
+## Plan review on this stack
+
+What the `pipeline:devils-advocate` browser-code checks look for in Symfony's spelling.
+
+- **Delivery is justified:** controllers registered by their own package, values/targets as the contract, `disconnect()` undoing `connect()`, wording translated in Twig.
+- **Dependency rule:** Stimulus is an outer concrete: a domain or use-case module that imports it depends on the delivery mechanism.

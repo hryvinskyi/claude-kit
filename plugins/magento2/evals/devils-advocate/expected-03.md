@@ -9,7 +9,7 @@ points at the same defect, however phrased.
 
 The plan names `.ts` files, so the guard hook `plan_skill_gate.py` refuses every write under
 `.claude/plans/` until the run has loaded **both** rubrics — `architecture:clean-architecture-php` with
-`magento2.md`, and `architecture:clean-architecture-js` with `magento2-frontend.md`. A run that produced
+`magento2:magento2-architecture-php`, and `architecture:clean-architecture-js` with `magento2:magento2-architecture-frontend`. A run that produced
 `_devils_advocate.md` or any `[APPLIED]` edit therefore loaded them; a run that stopped at a
 denial it could not get past is a failure of the agent definition, recorded as such.
 

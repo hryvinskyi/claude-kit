@@ -23,10 +23,18 @@ are linted against the `YYYY-MM-DD slug.md` + `type: decision` template only in 
 overwhelmingly follow it: a vault with a convention of its own is not held to somebody else's.
 
 A code span is read as a path when its first segment exists at the project root, or — in a note named
-for a package — inside that package (`packages/<note>/`, `plugins/<note>/`, `vendor/*/<note>/`, or
-`app/code/<Vendor>/<Module>/` for a `Vendor_Module` note). A class name is looked up, case-insensitively,
+for a package — inside that package (`packages/<note>/`, `plugins/<note>/`, `vendor/*/<note>/`, or a
+directory a configured note-base rule derives from the note's name). A class name is looked up, case-insensitively,
 as a PHP file name in the repository, then as a whole word in its non-Markdown files, then as a PHP file
 name under `vendor/`. A git-ignored path is machine state, never a finding.
+
+**Note-base rules** add package layouts beyond those three. Each rule is one line,
+`<regex> <path template>`: the regex must match a note's stem in full, and the template names the
+directory, with `{1}`, `{2}`… standing for the regex's groups — for example
+`([A-Z][A-Za-z0-9]*)_([A-Z][A-Za-z0-9]*) modules/{1}/{2}/`. Rules are read from the multi-valued git
+config key `vault-check.noteBase` as git reads it in the vault, and from
+`${XDG_CONFIG_HOME:-~/.config}/claude-kit/vault-check.conf`, one rule per line, `#` starting a comment
+line. Both sources apply. A rule that does not parse is reported once per run and skipped.
 
 Strike a name through when the sentence is about its retirement (~~`OldName`~~), write a PHP built-in
 fully qualified (`\DateTimeImmutable`), write a convention with its wildcard (`packages/*/src/`). That
@@ -48,7 +56,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import vaultlib  # noqa: E402
@@ -69,7 +77,8 @@ STRUCK = re.compile(r"~~.+?~~", re.S)
 SPAN = re.compile(r"`([^`\n]+)`")
 NAME = re.compile(r"[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+")
 PATH = re.compile(r"([^\s/:#`@\\]+(?:/[^\s:#`\\]+)+?)/?(?::\d+(?:-\d+)?)?(?:#\S*)?")
-MAGENTO_MODULE = re.compile(r"([A-Z][A-Za-z0-9]*)_([A-Z][A-Za-z0-9]*)")
+TEMPLATE_GROUP = re.compile(r"\{(\d+)\}")
+NOTE_BASE_KEY = "vault-check.noteBase"
 WIKILINK = re.compile(r"\[\[([^\]]*)\]\]")
 DECISION_FILE = re.compile(r"(\d{4}-\d{2}-\d{2}) \S.*")
 SUPERSEDED = re.compile(r"superseded by \[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
@@ -205,17 +214,101 @@ def lint_decision(filename: str, text: str, records: set[str]) -> list[str]:
     return problems
 
 
-def package_bases(note: str, vendor_dirs: list[str]) -> list[str]:
-    """The directories a package note's relative paths may start from."""
+@dataclass(frozen=True)
+class NoteBase:
+    """A package layout: a note whose stem the pattern matches in full lives at the template's directory."""
+
+    pattern: re.Pattern
+    template: str
+
+    def base_for(self, stem: str) -> Optional[str]:
+        """The directory this layout gives a note stem, or None when the stem is not of its shape."""
+        match = self.pattern.fullmatch(stem)
+        if match is None:
+            return None
+        return TEMPLATE_GROUP.sub(lambda group: match.group(int(group.group(1))), self.template)
+
+
+def parse_note_base(line: str) -> tuple[Optional[NoteBase], str]:
+    """Read one `<regex> <path template>` rule.
+
+    The template is the last whitespace-separated field, so a regex may itself contain spaces.
+
+    @param line The rule, without its comment marker or line ending.
+    @return (the rule, "") when it parses, else (None, why it does not).
+    """
+    fields = line.strip().rsplit(None, 1)
+    if len(fields) != 2:
+        return None, "expected `<regex> <path template>`"
+    source, template = fields
+    try:
+        pattern = re.compile(source)
+    except re.error as error:
+        return None, f"the regex does not compile ({error})"
+    groups = [int(g) for g in TEMPLATE_GROUP.findall(template)]
+    if any(g < 1 or g > pattern.groups for g in groups):
+        return None, f"the template names a group the regex does not have ({pattern.groups} group(s))"
+    if template.startswith("/") or ".." in Path(template).parts:
+        return None, "the template must be a path inside the project"
+    return NoteBase(pattern, template if template.endswith("/") else template + "/"), ""
+
+
+def user_rules_file() -> Path:
+    """The per-user rule file: `$XDG_CONFIG_HOME/claude-kit/vault-check.conf`, `~/.config` when unset."""
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "claude-kit" / "vault-check.conf"
+
+
+def load_note_bases(vault_dir: Path) -> tuple[list[NoteBase], list[str]]:
+    """The note-base rules that apply to a vault, and one problem line per rule that does not parse.
+
+    @param vault_dir The vault directory; its git config is read as git reads it there.
+    @return (the rules, in source order without repeats; the problems).
+    """
+    lines: list[tuple[str, str]] = []
+    code, out = vaultlib.git_out(vault_dir, "config", "--get-all", NOTE_BASE_KEY, timeout=10)
+    if code == 0:
+        lines += [(f"git config {NOTE_BASE_KEY}", value) for value in out.splitlines() if value.strip()]
+    problems: list[str] = []
+    conf = user_rules_file()
+    try:
+        text = conf.read_text(encoding="utf-8") if conf.is_file() else ""
+    except (OSError, UnicodeDecodeError) as error:
+        text = ""
+        problems.append(f"{conf} could not be read ({error.__class__.__name__}), so no rule from it applies")
+    for number, raw in enumerate(text.splitlines(), start=1):
+        if raw.strip() and not raw.lstrip().startswith("#"):
+            lines.append((f"{conf}:{number}", raw))
+    rules: list[NoteBase] = []
+    seen: set[tuple[str, str]] = set()
+    for origin, raw in lines:
+        rule, why = parse_note_base(raw)
+        if rule is None:
+            problems.append(f"note-base rule `{raw.strip()}` ({origin}) is skipped: {why}")
+        elif (rule.pattern.pattern, rule.template) not in seen:
+            seen.add((rule.pattern.pattern, rule.template))
+            rules.append(rule)
+    return rules, problems
+
+
+def package_bases(note: str, vendor_dirs: list[str], note_bases: Sequence[NoteBase] = ()) -> list[str]:
+    """The directories a package note's relative paths may start from.
+
+    @param note The note's path inside the vault.
+    @param vendor_dirs The directories under the project's `vendor/`.
+    @param note_bases The configured layouts beyond the built-in ones.
+    @return The bases, the built-in ones first.
+    """
     parts = Path(note).parts
     if not parts or parts[0] not in PACKAGE_FOLDERS:
         return []
     stem = Path(note).stem
     bases = [f"packages/{stem}/", f"plugins/{stem}/"]
     bases += [f"vendor/{v}/{stem}/" for v in vendor_dirs]
-    magento = MAGENTO_MODULE.fullmatch(stem)
-    if magento:
-        bases.append(f"app/code/{magento.group(1)}/{magento.group(2)}/")
+    for rule in note_bases:
+        base = rule.base_for(stem)
+        if base is not None and base not in bases:
+            bases.append(base)
     return bases
 
 
@@ -401,6 +494,7 @@ class Report:
     names: int = 0
     anchors: int = 0
     findings: list[Finding] = field(default_factory=list)
+    config_problems: list[str] = field(default_factory=list)
 
     @property
     def hard(self) -> list[Finding]:
@@ -499,8 +593,9 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
         return report
 
     vendor_dirs = repo.vendor_dirs()
+    note_bases, report.config_problems = load_note_bases(vault.path)
     root_entries = {p.name for p in vault.root.iterdir()}
-    bases = {rel: package_bases(rel, vendor_dirs) for rel in living}
+    bases = {rel: package_bases(rel, vendor_dirs, note_bases) for rel in living}
     exists = lambda rel: (vault.root / rel).exists()  # noqa: E731
 
     index = repo.php_index()
@@ -574,7 +669,8 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
 
 
 def render(report: Report, quiet: bool) -> list[str]:
-    lines = [] if quiet else [f"{f.level}  {f.note}: {f.message}" for f in report.findings]
+    lines = [f"vault-check: {problem}" for problem in report.config_problems]
+    lines += [] if quiet else [f"{f.level}  {f.note}: {f.message}" for f in report.findings]
     lines.append(f"vault-check: {report.living} living notes · {report.names} cited names · "
                  f"{report.anchors} anchors · {len(report.hard)} hard · "
                  f"{len(report.soft_notes)} note(s) to review")
@@ -592,6 +688,9 @@ def brief_lines(report: Report) -> list[str]:
     if report.soft_notes:
         lines.append(f"[VAULT] {len(report.soft_notes)} note(s) cite code that changed since they "
                      f"described it — review, then --stamp · vault-check")
+    if report.config_problems:
+        lines.append(f"[VAULT] {len(report.config_problems)} note-base rule problem(s) — a rule that does not "
+                     f"parse is skipped · vault-check")
     return lines
 
 

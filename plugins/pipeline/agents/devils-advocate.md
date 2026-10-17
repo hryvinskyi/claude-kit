@@ -51,24 +51,31 @@ environment, say so in your report and `Read` the skill's `SKILL.md` directly in
 substitute silence.
 
 - **PHP** (a `composer.json` at the root): `architecture:clean-architecture-php`, then `clean-architecture.md`,
-  `solid.md`, `ddd.md`, the stack reference (`symfony.md` / `magento2.md`), and
+  `solid.md`, `ddd.md`, the stack skill (below), and
   `integration-patterns.md` when the plan publishes or consumes a message, calls another system,
   spans more than one transaction, or caches a port.
 - **JavaScript / TypeScript** — a JS/TS project (a `package.json` or `tsconfig.json` and no
   `composer.json`), or a plan in any project that orders work on `.js`/`.mjs`/`.cjs`/`.ts`/`.tsx`/
-  `.jsx` files, Stimulus controllers, React components or islands, Magento `view/<area>/web/`
-  assets, RequireJS/Knockout/Alpine code, or templates that load scripts and styles
-  (`AssetRendererInterface` from hryvinskyi/magento2-theme-assets, `stimulus_controller`,
-  `importmap`): `architecture:clean-architecture-js`, then `solid.md`, `javascript.md`,
-  the host reference (`react.md`; `magento2-frontend.md` on Magento; `symfony-frontend.md` on
-  Symfony), `typescript.md` for TypeScript, `ddd.md` when the plan models domain types or state,
+  `.jsx` files, browser controllers or widgets, React components or islands, a module's web
+  assets, or templates that load scripts and styles (the stack skill names what these look like
+  on its stack): `architecture:clean-architecture-js`, then `solid.md`, `javascript.md`,
+  the host reference (`react.md` for React; on a project a stack plugin covers, its frontend
+  skill), `typescript.md` for TypeScript, `ddd.md` when the plan models domain types or state,
   `clean-architecture.md` when a boundary, port or feature placement is in play, and
   `integration-patterns.md` when the plan calls the network, caches, retries, or prints data into
   full-page-cached HTML.
-- **A Magento or Symfony plan with browser work loads both skills.** The guard hook `plan_skill_gate.py`
-  refuses a write under `.claude/plans/` until the session shows each skill the plan needs.
-- **On other stacks**, apply the same lenses — dependency rule, SOLID, DDD — in that stack's idiom,
-  and say in the report which rubric you used.
+- **The stack skill.** On a project a stack plugin covers, load that plugin's architecture skill
+  beside each core skill you load — its PHP skill with `architecture:clean-architecture-php`, its
+  frontend skill with `architecture:clean-architecture-js`. The Skill tool lists the installed
+  ones, and the guard's denial names the one it wants. Each stack skill's section *Plan review on
+  this stack* says what the checks below look for in that framework's spelling; every item of it
+  is part of the check it names.
+- **A plan in a PHP project with browser work loads both skills**, and the stack skills beside them.
+  The guard hook `plan_skill_gate.py` refuses a write under `.claude/plans/` until the session
+  shows each skill the plan needs.
+- **On other stacks**, or with no stack plugin for the project's framework, apply the same
+  lenses — dependency rule, SOLID, DDD — in that stack's idiom, and say in the report which rubric
+  you used.
 
 ---
 
@@ -96,17 +103,17 @@ Apply **every item of the project's plan-review checklist** (found in Step 2) as
 
 ### Clean Architecture / SOLID / DDD checks
 
-12. **Dependency rule** — any Domain/Application class or module depending on an outer concrete (ORM, framework request/response, HTTP client, framework base class; in JS/TS: React, Stimulus, Knockout, the DOM, `fetch`, storage, `process.env`, an adapter module — type imports included)? The fix is a port owned by the inner layer plus explicit wiring (DI config, a composition root, a context provider).
+12. **Dependency rule** — any Domain/Application class or module depending on an outer concrete (ORM, framework request/response, HTTP client, framework base class; in JS/TS: React, a browser framework's controller or component base, the DOM, `fetch`, storage, `process.env`, an adapter module — type imports included)? The fix is a port owned by the inner layer plus explicit wiring (DI config, a composition root, a context provider).
 13. **Anemic model / logic placement** — invariants inside entities/aggregates, or stranded in `*Service`/listeners? Flag setter-driven state changes that should be intention-revealing methods.
 14. **In-scope tech debt must be remediated (MANDATORY)** — the plan must fix debt within its blast radius. The blast radius is **the files the plan touches plus their direct collaborators in the same module** (one hop: what they call and what calls them); it widens to the whole module only when the module is small (about fifteen classes or files) or the change already touches most of it. In that set: dependency-rule violations, anemic models, god/Helper classes, boundary leaks, fat interfaces, missing or mocked-DB tests, suppressed static-analysis errors, `switch`/`elseif` behavioral dispatch. Untouched in-scope debt is at least an **Important** finding (Critical if it will break a gate). Debt outside that set belongs in the plan's *Logged for later* plus one line on the vault's TODO board — never a finding that widens the plan into a module refactor.
 15. **No `switch`/`elseif` behavioral dispatch (MANDATORY)** — any planned (or in-scope existing) behavioral branching on a `type`/`kind`/`method` field must become injected polymorphic strategies resolved from a registry idiomatic to the stack (tagged services, DI-wired strategy map, plugin pool; in JS/TS a registry for an open set, an exhaustive handler map typed over the union for a closed one, a component map in React). `match`/lookup tables for pure value mapping and guard clauses are fine.
 16. **Ports, DIP wiring & over-abstraction** — cross-boundary deps expressed as injected interfaces with real wiring? Conversely, flag single-implementation ports protecting no real axis of change.
-17. **Sideways naming** — does any task text, comment wording, identifier, `data-*`/CSS hook, event name or opt-out attribute the plan prescribes name a module, vendor or product the target module does not declare as a dependency (`module.xml` sequence, `composer.json` require, `package.json` dependencies)? Plans may discuss the neighbour; the code and comments the plan orders must describe the situation neutrally, or the plan must add the dependency first. Important; the fix is a reworded task text.
+17. **Sideways naming** — does any task text, comment wording, identifier, `data-*`/CSS hook, event name or opt-out attribute the plan prescribes name a module, vendor or product the target module does not declare as a dependency (its package manifest — `composer.json` require, `package.json` dependencies — and the framework's module manifest)? Plans may discuss the neighbour; the code and comments the plan orders must describe the situation neutrally, or the plan must add the dependency first. Important; the fix is a reworded task text.
 18. **Browser code (MANDATORY when the plan ships JS/TS)** — checked against `architecture:clean-architecture-js`:
     - components, controllers, widgets and templates are humble; rules and calculations sit in pure modules a Node test can reach; no rule the server owns is decided only in the browser;
     - untrusted input (API bodies, JSON config, `data-*`, storage) is parsed into domain types — no `as` over parsed JSON, no `any`, no suppressions, no loosened `tsconfig`;
     - every network call goes through a port or client with a deadline and cancellation; stale responses cannot win; retries only for repeatable calls; writes that must happen once carry an idempotency key;
-    - delivery is justified: Magento — the area's mechanism is followed, theme-assets render mode / load strategy / preload fit the asset (nothing large inlined, only first-paint resources preloaded), config and wording printed escaped, nothing private in cacheable output, the module declares the package and every module whose asset it renders; Symfony — controllers registered by their own package, values/targets as the contract, `disconnect()` undoing `connect()`, wording translated in Twig; React — no derived state synced by effects, server state in the data layer with complete cache keys, islands mounted and unmounted by the host;
+    - delivery is justified: on a project a stack plugin covers, by every delivery check its frontend skill's *Plan review on this stack* lists; React — no derived state synced by effects, server state in the data layer with complete cache keys, islands mounted and unmounted by the host;
     - user-facing strings live in the presentation layer, in every locale the project ships.
     Severity: Important; Critical when it breaks a gate, leaks private data into cached HTML, or opens an XSS sink.
 

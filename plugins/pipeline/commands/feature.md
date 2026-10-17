@@ -21,7 +21,7 @@ The split is deliberate: **planning, adversarial review, and final verification 
 
 **The rule.** A task goes to **Opus** when any of these holds; otherwise to **Sonnet**:
 
-1. It creates or moves a seam: a port/interface, a class another module consumes, a cross-module contract, a public API or `Api/Data` type, a service registration other code resolves. *(Opus-only)*
+1. It creates or moves a seam: a port/interface, a class another module consumes, a cross-module contract, a public API or a module's published data contract, a service registration other code resolves. *(Opus-only)*
 2. It touches the domain model: an entity, value object, aggregate, state machine, or an invariant the plan states. *(Opus-only)*
 3. It fixes in-scope debt that needs a redesign (stranded business rules moved into the model, a `switch` replaced by a strategy set, a god class split) — not a rename or a typed signature.
 4. It is on a risky path: money, auth/sessions, PII, tenancy, crypto/secrets, file upload/exec, data migration of existing rows, concurrency, idempotency, retries, a message published or consumed, a cache in front of a port. *(Opus-only)*
@@ -54,12 +54,14 @@ Tell the user you created it and where — do not silently invent a vault.
 **before you read the code you are about to plan against, and before `_plan.md` exists**:
 `architecture:clean-architecture-php` on a PHP project (a `composer.json` at the root),
 `architecture:clean-architecture-js` when the feature ships JavaScript or TypeScript (a `package.json`/`tsconfig.json` project, or browser
-work in a Magento or Symfony project — scripts, Stimulus controllers, React islands, templates that
-load assets), **both** when it does both. Applying the lenses from memory is not this step: each
-skill carries a reference set your recollection does not — PHP: `clean-architecture.md`, `solid.md`,
-`ddd.md`, `integration-patterns.md`, `symfony.md`, `magento2.md`; JS/TS: `solid.md`,
-`javascript.md`, `typescript.md`, `react.md`, `magento2-frontend.md`, `symfony-frontend.md`,
-`ddd.md`, `clean-architecture.md`, `integration-patterns.md`. If no `Skill` call for it appears in
+work in a PHP project — scripts, browser controllers, React islands, templates that
+load assets), **both** when it does both. On a project a stack plugin covers, load that plugin's
+architecture skill beside each core skill (the Skill tool lists the installed ones; the hook's
+denial names the one it wants); it says what browser work looks like on its stack. Applying the
+lenses from memory is not this step: each skill carries a reference set your recollection does
+not — PHP: `clean-architecture.md`, `solid.md`, `ddd.md`, `integration-patterns.md`; JS/TS:
+`solid.md`, `javascript.md`, `typescript.md`, `react.md`, `ddd.md`, `clean-architecture.md`,
+`integration-patterns.md`; and the stack skill's own sections. If no `Skill` call for it appears in
 this session's transcript, the plan is not ready to be written — a hook enforces this on writes under
 `.claude/plans/`, including the JS skill for a plan that names JS/TS files. On other stacks, load
 that stack's equivalent rubric if the project declares one, and say in the plan that you did not.
@@ -106,15 +108,16 @@ that stack's equivalent rubric if the project declares one, and say in the plan 
 - **Discover the gates first** — read `composer.json` scripts / `package.json` scripts / Makefile / CI workflow, and check whether the project runs under DDEV, Docker, or the host (including any documented pre-step, e.g. a file-sync before in-container runs). Run every gate that exists; never invoke a gate the project doesn't define.
   - If the project defines **no** automated gates, say so plainly in the final report and fall back to what is available (targeted test run, linter, static analysis if installed) — do not report a clean run that never happened.
 - Review the complete `git diff` yourself against the plan and that project's repo law (boundaries, tests at both levels, comment scope, and its own i18n/locale obligations). Small fixes: apply directly. Structural misses: re-dispatch to the owning implementer with a precise correction — on a Sonnet task, that is an escalation to Opus (Phase 4).
-  - **An implementer's report is not a review, and neither is a green gate.** Gates check types, boundaries and tests. They do not check whether a controller builds `new TranslatableMessage('key', [], 'domain')` at every call site, or types a helper on a concrete class. That has shipped past every gate. Nothing is committed until you have **read** the diff of every touched source file.
+  - **An implementer's report is not a review, and neither is a green gate.** Gates check types, boundaries and tests. They do not check whether a controller builds a framework's message object with `new` at every call site, or types a helper on a concrete class. That has shipped past every gate. Nothing is committed until you have **read** the diff of every touched source file.
   - **Frozen contracts hold** — run `shasum -a 256 -c` over every `.claude/plans/<slug>/_contract-*.sha256` before the sweep; a line that is not `OK` blocks the commit until it is explained and resolved.
-  - **Mechanical sweep first, then the reading.** Run the architectural skill's detection recipes (`solid.md` §Detection recipes, the stack reference's §Detection recipes) over **every touched file in full**, not only the changed lines, and list each hit with its verdict in the Phase 6 report. A file an implementer touched brings its whole content into scope: an English literal or `$e->getMessage()` shown to a user beside the changed line is in-scope debt, not "outside this ticket". On a PHP project the minimum is (non-test files; `throw new` and a factory's own implementation are the only innocent `new`):
-    `git diff --name-only | grep -E '\.php$' | grep -v /tests/ | xargs rg -nP '(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(|addFlash\(|getMessage\(\)|function \w+\([^)]*\b(TranslatableMessage|Translator|EventDispatcher)\b\s+\$|\bswitch\s*\(|\belse\s?if\b'`
+  - **Mechanical sweep first, then the reading.** Run the architectural skill's detection recipes (`solid.md` §Detection recipes, the stack skill's detection recipes) over **every touched file in full**, not only the changed lines, and list each hit with its verdict in the Phase 6 report. A file an implementer touched brings its whole content into scope: an English literal or `$e->getMessage()` shown to a user beside the changed line is in-scope debt, not "outside this ticket". On a PHP project the minimum is (non-test files; `throw new` and a factory's own implementation are the only innocent `new`):
+    `git diff --name-only | grep -E '\.php$' | grep -v /tests/ | xargs rg -nP '(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(|getMessage\(\)|\bswitch\s*\(|\belse\s?if\b'`
+    On a project a stack plugin covers, its PHP skill's *Finding things* adds the framework's own alternatives to that pattern — its side channel and the concrete types a helper must not be typed on — and they run in the same sweep.
     Use the ripgrep binary, not a shell function: `xargs` cannot call a function, and a sweep that never ran reads as zero hits. Check the file list is non-empty.
     A hit you cannot clear by the recipe's *innocent when* column is a defect: fix it or re-dispatch it before the commit.
 - **Independent adversarial code review** — you audited a pipeline you also managed; now get fresh eyes. Run `/code-review` on the working diff if available in this environment; otherwise spawn a reviewer subagent with a clean context, prompted to *refute* the diff against the plan and repo law. Verify each finding before acting (a plausible-sounding finding is not yet a real one); fix confirmed ones most-severe-first.
 - **Conditional security pass** — if the diff touches auth/sessions, money movement, PII, tenancy/RLS, crypto/secrets, or file-upload/exec paths: run `/security-review` (or a security-focused subagent if unavailable) before calling the feature done. Note in the final report that it ran and what it found — or explicitly that it wasn't needed and why.
-- **Sideways-naming review** — a module names only what it depends on (the engineering standards in your user `CLAUDE.md`, *Architecture and tech debt*). List the vendors present in the project (`ls app/code vendor` on Magento; the vendor half of `packages/*/composer.json` names on a monorepo; the scopes and names in `package.json` dependencies on a JS project) and grep the diff of each touched module for those names that its own `composer.json` / `module.xml` / `package.json` does not declare:
+- **Sideways-naming review** — a module names only what it depends on (the engineering standards in your user `CLAUDE.md`, *Architecture and tech debt*). List the vendors present in the project (where a framework keeps them, the stack skill's *Finding things* says; the vendor half of `packages/*/composer.json` names on a monorepo; the scopes and names in `package.json` dependencies on a JS project) and grep the diff of each touched module for those names that its own package manifest (`composer.json`, `package.json`) or the framework's module manifest does not declare:
   `git diff -U0 -- <module path> | grep -nE '^\+.*\b(Vendor1|Vendor2|…)\b'`
   Read every hit with judgment — a plain word that happens to match a vendor is not a violation; a comment or identifier that explains a workaround by the neighbour's name is. Reword such lines to the situation and move the neighbour's name into the Phase 6 vault note. No hook does this: the check needs a reader.
 - **Plan-reference gate** — the plan dies in Phase 6, so nothing in the tree may point at it. Run over the working tree (not just the diff — earlier tasks leak too):

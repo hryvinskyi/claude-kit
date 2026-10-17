@@ -40,6 +40,24 @@ Anything outside a Claude Code session — a scheduled job, a git hook, a projec
 them through the shims the kit's `bin/install-shims.sh` writes into `~/.local/bin`, which run the copy
 in the kit clone and survive plugin updates.
 
+## Package layouts for `vault-check`
+
+A note under `Modules/`, `Bridges/`, `Plugins/`, `Kernel/`, `Packages/` or `Services/` is named for a
+package, and a relative path its prose cites may start inside that package: `packages/<note>/`,
+`plugins/<note>/` or `vendor/*/<note>/`. A project laid out another way adds a **note-base rule**, one
+line `<regex> <path template>`: the regex matches the note's file name without `.md` in full, and the
+template names the package's directory with `{1}`, `{2}`… for the regex's groups.
+
+```
+# ${XDG_CONFIG_HOME:-~/.config}/claude-kit/vault-check.conf — one rule per line
+([A-Z][A-Za-z0-9]*)_([A-Z][A-Za-z0-9]*) modules/{1}/{2}/
+```
+
+The rule file applies to every vault of the user. For one vault only, set the multi-valued git key
+`vault-check.noteBase` there: `git -C <vault> config --add vault-check.noteBase '<regex> <template>'`.
+Both sources apply. A rule that does not parse is named once per run, on the `vault-check` output
+and the session brief, and skipped; the check itself runs on.
+
 ## Merge drivers
 
 A vault shared by several people collides in a few files: the TODO board, the inbox, lists of

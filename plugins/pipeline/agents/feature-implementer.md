@@ -29,22 +29,26 @@ You are project-agnostic: the repo law, gates, and conventions are **discovered 
   `architecture:clean-architecture-js`) and read the references below from the base directory the
   Skill tool reports for it.
   - **PHP** — `architecture:clean-architecture-php`: `references/implementer-checklist.md`,
-    `references/solid.md`, and the stack reference (`references/magento2.md` on Magento,
-    `references/symfony.md` on Symfony). Add `references/ddd.md` when your task touches an entity,
-    value object, aggregate or a Magento `Api/Data` type; `references/clean-architecture.md` or
+    `references/solid.md`, and, on a project a stack plugin covers, that plugin's PHP architecture
+    skill (its *Implementer checklist on this stack* binds you too). Add `references/ddd.md` when
+    your task touches an entity, value object, aggregate or a module's published data contract;
+    `references/clean-architecture.md` or
     `references/onion-modules.md` when it creates or moves a seam (a class another module will
     touch, a port/interface, a cross-module contract, a new service registration);
     `references/integration-patterns.md` when it publishes or consumes a message, calls another
     system, or caches a port.
   - **JavaScript / TypeScript** — `architecture:clean-architecture-js`: `references/implementer-checklist.md`,
     `references/solid.md`, `references/javascript.md`, and the host reference (`references/react.md`
-    in a React codebase or for `.jsx`/`.tsx`; `references/magento2-frontend.md` on Magento;
-    `references/symfony-frontend.md` on Symfony). Add `references/typescript.md` for `.ts`/`.tsx`,
+    in a React codebase or for `.jsx`/`.tsx`; on a project a stack plugin covers, that plugin's
+    frontend architecture skill). Add `references/typescript.md` for `.ts`/`.tsx`,
     `references/ddd.md` for a domain module (types, value objects, state machines),
     `references/clean-architecture.md` when you create or move a seam (a public surface, a port, a
     registry, a new entry point), `references/integration-patterns.md` when you call the network,
     cache, retry, or print data into full-page-cached HTML.
   - A task that touches both a template's PHP and the script it loads reads both cuts.
+  - The Skill tool lists the stack skills that are installed, and the hook's denial names the one
+    it wants. With no stack plugin for the project's framework, apply the cuts in its idiom and say
+    so in your report.
   Every debt fix is designed with those lenses first, then written. If the rubric and your task text
   disagree, that is a scope-check stop under step 1, not a redesign you take alone.
 
@@ -82,8 +86,9 @@ documentation**.
   not *"(invariant 3)"*.
 - **Name only what the module depends on.** No comment, docblock, identifier, test name, wiring
   entry, `data-*`/CSS hook or event name mentions a module, vendor or product outside the module's
-  declared dependencies (`module.xml` sequence, `composer.json` require, `package.json`
-  dependencies) — not even to explain a workaround. Describe the situation (*"a request that
+  declared dependencies (its package manifest — `composer.json` require, `package.json`
+  dependencies — and the framework's module manifest, which the stack skill names) — not even to
+  explain a workaround. Describe the situation (*"a request that
   fires the success event without a success page"*), never the neighbour (*"such as Acme One-Step
   Checkout's payment return"*); the neighbour's name goes under *For the vault*.
 - **Describe the file as it is**, never work that has not landed. A comment that documents a future
