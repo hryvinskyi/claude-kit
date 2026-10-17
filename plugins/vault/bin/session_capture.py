@@ -4,7 +4,8 @@
 Usage:
     vault-capture              # the SessionEnd hook: reads its JSON, hands off, returns
     vault-capture --worker F   # the detached half, run on the payload saved in F
-    vault-capture --brief      # the inbox and backup lines for the SessionStart brief
+    vault-capture --update     # the SessionStart fetch and fast-forward, and why it did not happen
+    vault-capture --brief      # the inbox, conflict and backup lines for the SessionStart brief
 
 A project that ships its own SessionEnd hook is left to it, and so is a project that keeps no vault.
 Otherwise the hook saves its payload in the project's state directory and starts a detached worker —
@@ -18,23 +19,36 @@ a SessionEnd hook is given seconds. The worker:
    git says — hash, subject, tickets from `Refs` — and nothing is ever written into `Journal/` or
    `Decisions/`: promoting an entry is a person's call.
 2. **Refreshes `vault_check.py`'s stamps and cache.**
-3. **Commits and pushes the vault — only when the vault is a git repository of its own.** A project's
-   repository is never committed, whoever owns it.
+3. **Commits the vault, then integrates and pushes it — only when the vault is a git repository of
+   its own.** A project's repository is never committed, whoever owns it. The commit comes first and
+   the rebase onto the remote after it, never a stash. A push the remote refuses is retried after a
+   fresh fetch and rebase, a few times, with jittered waits. Notes that do not rebase are pushed to a
+   `conflict/<handle>/<UTC time>` branch, and the clone steps back to the remote only when nothing in
+   it is uncommitted. How it ended is left in the state directory for the next brief.
 4. **Refreshes the project's qmd index** (`vault_search.py refresh`).
 
 Where the inbox lives follows `vaultlib`: beside the notes for a vault that is its own repository or
 ignored by the project, otherwise in `~/.claude/state/vaults/<project>/`. The brief names the file.
 Every step is best-effort; failures go to `session-capture.log` in the state directory.
+
+The inbox of a vault that is its own repository is shared by everybody who clones it, and each entry
+names a `claude --resume` only its author can run, so an entry records its author (`- by: <handle>`)
+and the brief counts the reader's own. The session start brings such a vault up to date only by a
+fast-forward, and never mid-way: under the same lock as the session end, without uncommitted edits
+and without commits of its own.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
+import random
 import re
 import sys
-from datetime import date, datetime, timedelta
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import vaultlib  # noqa: E402
@@ -207,11 +221,78 @@ def session_commits(root: Path, started: Optional[float], hashes: set[str], subj
 # --- the inbox ----------------------------------------------------------------
 
 
+# An entry opens with its session marker, which may carry its author (`<!-- session:<id> by:<handle> -->`);
+# an entry written without one names its author on a `- by: <handle>` line, and one written before
+# entries recorded an author has neither.
+ENTRY = re.compile(r"<!-- session:(?P<id>[A-Za-z0-9-]+)(?: by:(?P<marker>[a-z0-9-]+))? -->\n"
+                   r"(?P<body>.*?)<!-- /session -->", re.S)
+BY_LINE = re.compile(r"^- by: (?P<by>[a-z0-9-]+)[ \t]*$", re.M)
+DAY = re.compile(r"\A## (\d{4}-\d{2}-\d{2})")
+UNCOMMITTED = "0" * 40
+
+
 def _entry_pattern(session_id: str) -> "re.Pattern[str]":
-    return re.compile(r"<!-- session:%s -->\n.*?<!-- /session -->\n?" % re.escape(session_id), re.S)
+    return re.compile(r"<!-- session:%s(?: by:[a-z0-9-]+)? -->\n.*?<!-- /session -->\n?" % re.escape(session_id),
+                      re.S)
 
 
-def render_entry(session_id: str, day: str, commits: list[dict]) -> str:
+def inbox_entries(text: str) -> list[dict]:
+    """Every entry of an inbox: its session, the day its heading names, and its author when it records one."""
+    found = []
+    for m in ENTRY.finditer(text):
+        day = DAY.match(m.group("body"))
+        by = BY_LINE.search(m.group("body"))
+        found.append({"session": m.group("id"), "day": day.group(1) if day else None,
+                      "author": m.group("marker") or (by.group("by") if by else None)})
+    return found
+
+
+def blamed_sessions(repo: Path, rel: str, email: str) -> Optional[set[str]]:
+    """The sessions whose inbox marker line this person's commits wrote, or that nobody committed yet.
+
+    None when git cannot tell, as for an inbox it does not track.
+    """
+    code, out = vaultlib.git_out(repo, "blame", "--line-porcelain", "--", rel, timeout=20)
+    if code != 0:
+        return None
+    mine: set[str] = set()
+    sha, mail = "", ""
+    for line in out.splitlines():
+        if line.startswith("\t"):
+            m = re.match(r"\t<!-- session:([A-Za-z0-9-]+)", line)
+            if m and (sha == UNCOMMITTED or (email and mail.lower() == f"<{email.lower()}>")):
+                mine.add(m.group(1))
+        elif re.match(r"[0-9a-f]{40} ", line):
+            sha = line[:40]
+        elif line.startswith("author-mail "):
+            mail = line[len("author-mail "):].strip()
+    return mine
+
+
+def own_days(text: str, reader: Optional[str], unattributed: Callable[[], Optional[set[str]]]) -> list[str]:
+    """The days of the reader's entries — every entry when there is no reader to tell them apart.
+
+    An entry without an author is the reader's when `unattributed` names its session, or when it
+    cannot say whose it is.
+    """
+    days: list[str] = []
+    legacy: Optional[set[str]] = None
+    asked = False
+    for entry in inbox_entries(text):
+        if not entry["day"]:
+            continue
+        if reader is not None and entry["author"] is not None and entry["author"] != reader:
+            continue
+        if reader is not None and entry["author"] is None:
+            if not asked:
+                legacy, asked = unattributed(), True
+            if legacy is not None and entry["session"] not in legacy:
+                continue
+        days.append(entry["day"])
+    return days
+
+
+def render_entry(session_id: str, day: str, commits: list[dict], author: str = "") -> str:
     tickets = sorted({t for c in commits for t in c["tickets"]}, key=int)
     heading = f"## {day} · {len(commits)} commit{'s' if len(commits) != 1 else ''}"
     if tickets:
@@ -220,6 +301,8 @@ def render_entry(session_id: str, day: str, commits: list[dict]) -> str:
     for c in commits:
         refs = f" — Refs {', '.join('#' + t for t in c['tickets'])}" if c["tickets"] else ""
         lines.append(f"- `{c['sha'][:9]}` {c['subject']}{refs}")
+    if author:
+        lines.append(f"- by: {author}")
     lines += [f"- the conversation: `claude --resume {session_id}`", "<!-- /session -->", ""]
     return "\n".join(lines)
 
@@ -246,7 +329,8 @@ def capture(vault: vaultlib.Vault, session_id: str, lines: list[str], day: str,
     hashes, subjects = commit_evidence(lines)
     commits = session_commits(vault.root, min(stamps) if stamps else None, hashes, subjects)
     if commits and not journal_written(lines, vault.path, session_days(lines, today)):
-        updated, filed = upsert_entry(text, session_id, render_entry(session_id, day, commits)), True
+        entry = render_entry(session_id, day, commits, vaultlib.handle(vault.path))
+        updated, filed = upsert_entry(text, session_id, entry), True
     else:
         updated, filed = remove_entry(text, session_id), False
     if updated != text:
@@ -256,13 +340,48 @@ def capture(vault: vaultlib.Vault, session_id: str, lines: list[str], day: str,
 
 
 # --- the vault's copy ---------------------------------------------------------
+#
+# Every git operation on the vault — the commit, the rebase and push that follow it, the session
+# start's fetch and fast-forward — runs under one lock file in the state directory, so two sessions
+# of one machine never rebase the same clone at once. A session end commits first and integrates
+# after; it never stashes, so a stash that would not re-apply can never leave conflict markers for
+# the next commit to publish.
+
+LOCK_STALE = 300
+CAPTURE_WAIT = 600.0
+BRIEF_WAIT = 3.0
+PUSH_ATTEMPTS = 3
+SYNC_STATE = "vault-sync.json"
+REGENERATE = "vault-regenerate"
+TWO_VERSIONS = r"^[[:space:]]*<!-- vault-merge: two versions.*-->[[:space:]]*$"
 
 
-def commit_vault(vault: vaultlib.Vault, session_id: str) -> bool:
+def lock_path(vault: vaultlib.Vault) -> Path:
+    return vault.state / "vault-commit.lock"
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def shown_time(moment: datetime) -> str:
+    return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def net(vault: vaultlib.Vault, *args: str, timeout: int, connect: int = 20) -> tuple[int, str]:
+    """Run a git command that talks to the remote, never waiting on a prompt."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0",
+               GIT_SSH_COMMAND=f"ssh -o BatchMode=yes -o ConnectTimeout={connect}")
+    return vaultlib.run(["git", "-C", str(vault.path), *args], timeout=timeout, env=env)
+
+
+def commit_vault(vault: vaultlib.Vault, session_id: str, wait: float = 0.0, sleep=time.sleep) -> bool:
     """Commit what changed in a vault that is its own repository; never anything else."""
-    if vault.mode != "own-repo" or not vaultlib.take_lock(vault.state / "vault-commit.lock", 300):
+    if vault.mode != "own-repo":
         return False
-    try:
+    with vaultlib.holding(lock_path(vault), wait, LOCK_STALE, sleep=sleep) as held:
+        if held is None:
+            return False
         code, status = vaultlib.git_out(vault.path, "status", "--porcelain")
         if code != 0 or not status.strip():
             return False
@@ -274,8 +393,6 @@ def commit_vault(vault: vaultlib.Vault, session_id: str) -> bool:
             vaultlib.log(vault, "session-capture.log", f"vault commit failed: {out.strip()[:300]}")
             return False
         return True
-    finally:
-        (vault.state / "vault-commit.lock").unlink(missing_ok=True)
 
 
 def vault_remote(vault: vaultlib.Vault) -> bool:
@@ -287,13 +404,260 @@ def unpushed(vault: vaultlib.Vault) -> Optional[int]:
     return int(out.strip()) if code == 0 and out.strip().isdigit() else None
 
 
-def push_vault(vault: vaultlib.Vault) -> None:
-    if vault.mode != "own-repo" or not vault_remote(vault) or unpushed(vault) == 0:
-        return
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20")
-    code, out = vaultlib.run(["git", "-C", str(vault.path), "push", "--quiet", "origin", "HEAD"], timeout=180, env=env)
+def current_branch(vault: vaultlib.Vault) -> Optional[str]:
+    code, out = vaultlib.git_out(vault.path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    return out.strip() if code == 0 and out.strip() else None
+
+
+def ref_exists(vault: vaultlib.Vault, ref: str) -> bool:
+    return vaultlib.git_out(vault.path, "rev-parse", "--verify", "--quiet", ref)[0] == 0
+
+
+def contains(vault: vaultlib.Vault, ancestor: str, descendant: str = "HEAD") -> bool:
+    return vaultlib.git_out(vault.path, "merge-base", "--is-ancestor", ancestor, descendant)[0] == 0
+
+
+def count(vault: vaultlib.Vault, revisions: str) -> int:
+    code, out = vaultlib.git_out(vault.path, "rev-list", "--count", revisions)
+    return int(out.strip()) if code == 0 and out.strip().isdigit() else 0
+
+
+def changes(vault: vaultlib.Vault, untracked: bool = True) -> bool:
+    """Whether the work tree holds anything uncommitted (an unreadable status counts as changes)."""
+    args = ["status", "--porcelain"] + ([] if untracked else ["--untracked-files=no"])
+    code, out = vaultlib.git_out(vault.path, *args)
+    return code != 0 or bool(out.strip())
+
+
+def git_dir(vault: vaultlib.Vault) -> Optional[Path]:
+    code, out = vaultlib.git_out(vault.path, "rev-parse", "--absolute-git-dir")
+    return Path(out.strip()) if code == 0 and out.strip() else None
+
+
+def rebasing(vault: vaultlib.Vault) -> bool:
+    found = git_dir(vault)
+    return found is not None and ((found / "rebase-merge").exists() or (found / "rebase-apply").exists())
+
+
+def read_state(vault: vaultlib.Vault) -> dict:
+    """What the last integration left for the brief: conflict branches still to merge, and one notice."""
+    try:
+        state = json.loads((vault.state / SYNC_STATE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"conflicts": [], "notice": None}
+    conflicts = state.get("conflicts") if isinstance(state, dict) else None
+    notice = state.get("notice") if isinstance(state, dict) else None
+    return {"conflicts": [c for c in conflicts or [] if isinstance(c, dict) and isinstance(c.get("branch"), str)],
+            "notice": notice if isinstance(notice, str) else None}
+
+
+def write_state(vault: vaultlib.Vault, state: dict) -> None:
+    path = vault.state / SYNC_STATE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(state, indent=1), encoding="utf-8")
+        os.replace(str(temporary), str(path))
+    except OSError:
+        pass
+
+
+def settle(vault: vaultlib.Vault, outcome: str, notice: Optional[str], conflict: Optional[dict] = None) -> str:
+    """Record how an integration ended for the next brief, and answer its outcome."""
+    state = read_state(vault)
+    state["notice"] = notice
+    if conflict:
+        state["conflicts"].append(conflict)
+    write_state(vault, state)
+    if notice:
+        vaultlib.log(vault, "session-capture.log", notice)
+    return outcome
+
+
+def free_branch(vault: vaultlib.Vault, base: str) -> str:
+    name, n = base, 1
+    while ref_exists(vault, f"refs/heads/{name}") or ref_exists(vault, f"refs/remotes/origin/{name}"):
+        n += 1
+        name = f"{base}-{n}"
+    return name
+
+
+def park_conflict(vault: vaultlib.Vault, branch: str, held: vaultlib.HeldLock, now) -> str:
+    """Move notes that will not rebase onto a branch of their own on the remote, and step aside."""
+    vaultlib.git_out(vault.path, "rebase", "--abort")
+    moment = now()
+    name = free_branch(vault, f"conflict/{vaultlib.handle(vault.path)}/{moment.strftime('%Y%m%d-%H%M')}")
+    vaultlib.git_out(vault.path, "branch", name, "HEAD")
+    held.refresh()
+    code, out = net(vault, "push", "--quiet", "origin", f"refs/heads/{name}:refs/heads/{name}", timeout=180)
+    when = shown_time(moment)
     if code != 0:
-        vaultlib.log(vault, "session-capture.log", f"vault push failed: {out.strip()[:300]}")
+        vaultlib.log(vault, "session-capture.log", f"conflict branch push failed: {out.strip()[:300]}")
+        return settle(vault, "conflict-unpushed",
+                      f"[VAULT CONFLICT] your notes from {when} do not rebase onto the remote and their branch "
+                      f"{name} could not be pushed — they stay on this clone's {branch}")
+    entry = {"branch": name, "onto": branch, "time": when, "reset": False}
+    if changes(vault):
+        return settle(vault, "conflict-dirty", None, entry)
+    vaultlib.git_out(vault.path, "reset", "--hard", "--quiet", f"refs/remotes/origin/{branch}")
+    entry["reset"] = True
+    return settle(vault, "conflict", None, entry)
+
+
+def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
+                    jitter=random.uniform, now=utc_now) -> str:
+    """Bring this clone's vault commits onto the remote: fetch, rebase, push, a few times if refused."""
+    if vault.mode != "own-repo" or not vault_remote(vault):
+        return "no-remote"
+    with vaultlib.holding(lock_path(vault), wait, LOCK_STALE, sleep=sleep) as held:
+        if held is None:
+            vaultlib.log(vault, "session-capture.log", "vault not integrated: another process held the lock")
+            return "busy"
+        branch = current_branch(vault)
+        if branch is None:
+            vaultlib.log(vault, "session-capture.log", "vault not integrated: it is not on a branch")
+            return "detached"
+        if unpushed(vault) == 0:
+            return settle(vault, "current", None)
+        upstream = f"refs/remotes/origin/{branch}"
+        for attempt in range(1, PUSH_ATTEMPTS + 1):
+            if attempt > 1:
+                sleep(jitter(1.0, 4.0))
+            held.refresh()
+            code, out = net(vault, "fetch", "--quiet", "--prune", "origin", timeout=60)
+            when = shown_time(now())
+            if code != 0:
+                vaultlib.log(vault, "session-capture.log", f"vault fetch failed: {out.strip()[:300]}")
+                return settle(vault, "offline", f"[VAULT] the vault's remote could not be reached at {when} — "
+                                                "the notes are committed on this machine; the next session end "
+                                                "pushes them")
+            if ref_exists(vault, upstream) and not contains(vault, upstream):
+                if changes(vault, untracked=False):
+                    return settle(vault, "deferred", f"[VAULT] the remote had new vault commits at {when} while "
+                                                     "this clone had uncommitted edits — not rebased; the next "
+                                                     "session end integrates them")
+                held.refresh()
+                code, out = vaultlib.run(["git", "-C", str(vault.path), "rebase", "--no-autostash", "--quiet",
+                                          upstream], timeout=180)
+                if code != 0:
+                    if rebasing(vault):
+                        return park_conflict(vault, branch, held, now)
+                    vaultlib.log(vault, "session-capture.log", f"vault rebase failed: {out.strip()[:300]}")
+                    return settle(vault, "unrebased", f"[VAULT] the vault could not be rebased onto its remote "
+                                                      f"at {when} — {vault.shown(vault.state)}/session-capture.log "
+                                                      "says why")
+            held.refresh()
+            code, out = net(vault, "push", "--quiet", "-u", "origin", f"refs/heads/{branch}:refs/heads/{branch}",
+                            timeout=180)
+            if code == 0:
+                return settle(vault, "pushed", None)
+            vaultlib.log(vault, "session-capture.log", f"vault push attempt {attempt} failed: {out.strip()[:300]}")
+            if "rejected" not in out:
+                return settle(vault, "offline", f"[VAULT] the vault's remote could not be reached at {when} — "
+                                                "the notes are committed on this machine; the next session end "
+                                                "pushes them")
+        return settle(vault, "rejected", f"[VAULT] the vault's remote refused {PUSH_ATTEMPTS} pushes at {when} — "
+                                         "the notes are committed on this machine; the next session end retries")
+
+
+def resolved_conflicts(vault: vaultlib.Vault, conflicts: list[dict]) -> list[dict]:
+    """The conflict branches still waiting: gone from the remote or merged into their branch, they are done."""
+    waiting = []
+    for conflict in conflicts:
+        remote = f"refs/remotes/origin/{conflict['branch']}"
+        onto = f"refs/remotes/origin/{conflict.get('onto') or ''}"
+        if not ref_exists(vault, remote):
+            continue
+        if ref_exists(vault, onto) and contains(vault, remote, onto):
+            continue
+        waiting.append(conflict)
+    return waiting
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'s' if n != 1 else ''}"
+
+
+def update_vault(vault: vaultlib.Vault, wait: float = BRIEF_WAIT, sleep=time.sleep) -> list[str]:
+    """Bring the vault up to date at session start — fetch, then fast-forward or say why not. Never rebases."""
+    if vault.mode != "own-repo" or not vault_remote(vault):
+        return []
+    with vaultlib.holding(lock_path(vault), wait, LOCK_STALE, sleep=sleep) as held:
+        if held is None:
+            return ["[VAULT] not brought up to date — another session is syncing the vault"]
+        if rebasing(vault):
+            return [f"[VAULT] the vault is in the middle of a rebase — finish it or "
+                    f"git -C \"{vault.rel}\" rebase --abort"]
+        branch = current_branch(vault)
+        if branch is None:
+            return ["[VAULT] not brought up to date — the vault is not on a branch"]
+        code, _ = net(vault, "fetch", "--quiet", "--prune", "origin", timeout=10, connect=5)
+        if code != 0:
+            return ["[VAULT] the vault's remote could not be reached — this session reads the local copy"]
+        state = read_state(vault)
+        waiting = resolved_conflicts(vault, state["conflicts"])
+        if waiting != state["conflicts"]:
+            state["conflicts"] = waiting
+            write_state(vault, state)
+        upstream = f"refs/remotes/origin/{branch}"
+        if not ref_exists(vault, upstream):
+            return []
+        behind = count(vault, f"HEAD..{upstream}")
+        if not behind:
+            return []
+        news = f"the remote has {plural(behind, 'vault commit')} this clone lacks"
+        if changes(vault):
+            return [f"[VAULT] {news} — not merged: the vault has uncommitted edits; the next session end "
+                    f"integrates them"]
+        ahead = count(vault, f"{upstream}..HEAD")
+        if ahead:
+            return [f"[VAULT] {news} — not merged: this clone has {plural(ahead, 'commit')} of its own; the next "
+                    f"session end rebases them"]
+        code, _ = vaultlib.git_out(vault.path, "merge", "--ff-only", "--quiet", upstream)
+        if code != 0:
+            return [f"[VAULT] {news} — the fast-forward failed; the next session end integrates them"]
+        return [f"[VAULT] brought up to date — {plural(behind, 'commit')} from the remote"]
+
+
+def sync_lines(vault: vaultlib.Vault) -> list[str]:
+    """What the last integration left behind: conflict branches to merge and the notice of a failed one."""
+    state = read_state(vault)
+    lines = []
+    for conflict in state["conflicts"]:
+        line = f"[VAULT CONFLICT] your notes from {conflict.get('time')} are on branch {conflict['branch']} — merge them"
+        if not conflict.get("reset"):
+            line += (f" · this clone's {conflict.get('onto')} still holds them too: the vault had unsaved edits, "
+                     f"so it was not reset to the remote")
+        lines.append(line)
+    if state["notice"]:
+        lines.append(state["notice"])
+    return lines
+
+
+def merge_lines(vault: vaultlib.Vault) -> list[str]:
+    """What the merge drivers reported: notes whose generated facts need refreshing, rows kept twice."""
+    lines = []
+    found = git_dir(vault) if vault.mode == "own-repo" else None
+    if found is not None:
+        try:
+            listed = (found / REGENERATE).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            listed = []
+        notes = list(dict.fromkeys(line.strip() for line in listed if line.strip()))
+        if notes:
+            more = f" (+{len(notes) - 5} more)" if len(notes) > 5 else ""
+            lines.append(f"[VAULT] regenerate: {', '.join(notes[:5])}{more} — refresh their generated facts, "
+                         f"then delete {vault.shown(found / REGENERATE)}")
+        code, out = vaultlib.git_out(vault.path, "grep", "-c", "-I", "-E", TWO_VERSIONS, timeout=20)
+        if code == 0:
+            counts = [(name, int(n)) for name, _, n in (line.rpartition(":") for line in out.splitlines())
+                      if n.isdigit()]
+            total = sum(n for _, n in counts)
+            if total:
+                rows = "1 row has" if total == 1 else f"{total} rows have"
+                lines.append(f"[VAULT] {rows} two versions — keep one · "
+                             + ", ".join(f"{name} ({n})" for name, n in counts))
+    return lines
 
 
 # --- entry points -------------------------------------------------------------
@@ -313,16 +677,19 @@ def worker(payload_path: Path) -> int:
     if not SESSION_ID.fullmatch(session_id) or vault is None:
         return 0
     transcript = Path(str(payload.get("transcript_path") or ""))
-    try:
-        capture(vault, session_id, read_lines(transcript_files(transcript, session_id)),
-                datetime.now().strftime("%Y-%m-%d"))
-    except Exception as exc:  # a detached worker has no caller; the log is its only reader
-        vaultlib.log(vault, "session-capture.log", f"inbox capture failed for {session_id}: {exc!r}")
+    lines = read_lines(transcript_files(transcript, session_id))
+    # Under the lock, so a session start's fast-forward cannot land between reading the inbox and
+    # writing it back — the write would quietly undo the entries the fast-forward brought.
+    with vaultlib.holding(lock_path(vault), CAPTURE_WAIT, LOCK_STALE):
+        try:
+            capture(vault, session_id, lines, datetime.now().strftime("%Y-%m-%d"))
+        except Exception as exc:  # a detached worker has no caller; the log is its only reader
+            vaultlib.log(vault, "session-capture.log", f"inbox capture failed for {session_id}: {exc!r}")
     here = Path(__file__).resolve().parent
     vaultlib.run([sys.executable, str(here / "vault_check.py"), "--quiet", "--root", str(vault.root)],
                  cwd=vault.root, timeout=900)
-    commit_vault(vault, session_id)
-    push_vault(vault)
+    commit_vault(vault, session_id, wait=CAPTURE_WAIT)
+    integrate_vault(vault, wait=CAPTURE_WAIT)
     vaultlib.run([sys.executable, str(here / "vault_search.py"), "refresh", "--root", str(vault.root)],
                  cwd=vault.root, timeout=3600)
     return 0
@@ -375,14 +742,17 @@ def backup_line(vault: vaultlib.Vault, has_remote: bool, ahead: Optional[int], u
 
 
 def brief_lines(vault: vaultlib.Vault, inbox_text: str, has_remote: bool, ahead: Optional[int],
-                uncommitted: int) -> list[str]:
+                uncommitted: int, reader: Optional[str] = None,
+                unattributed: Callable[[], Optional[set[str]]] = lambda: None) -> list[str]:
+    """The inbox and the vault's off-machine copy as the brief shows them; the inbox counts the reader's own."""
     lines: list[str] = []
-    days = re.findall(r"<!-- session:[A-Za-z0-9-]+ -->\n## (\d{4}-\d{2}-\d{2})", inbox_text)
+    days = own_days(inbox_text, reader, unattributed)
     if days:
         count = len(days)
+        mine = f" — yours are the entries by {reader}" if reader else ""
         lines.append(f"[INBOX] {count} session{'s' if count != 1 else ''} committed work with no journal "
                      f"entry (oldest {min(days)}) — /vault:journal it, then delete the entry · "
-                     f"{vault.shown(vault.machine_file('Inbox.md'))}")
+                     f"{vault.shown(vault.machine_file('Inbox.md'))}{mine}")
     backup = backup_line(vault, has_remote, ahead, uncommitted)
     if backup:
         lines.append(backup)
@@ -398,11 +768,26 @@ def brief(vault: vaultlib.Vault) -> None:
     if vault.mode == "tracked":
         _, status = vaultlib.git_out(vault.root, "status", "--porcelain", "--", vault.rel)
         uncommitted = len([line for line in status.splitlines() if line.strip()])
-    for line in brief_lines(vault, text, has_remote, ahead, uncommitted):
+    reader: Optional[str] = None
+    unattributed: Callable[[], Optional[set[str]]] = lambda: None
+    if vault.mode == "own-repo":
+        # A vault of its own is shared through its remote, so its inbox holds every member's sessions.
+        reader = vaultlib.handle(vault.path)
+        email = vaultlib.git_out(vault.path, "config", "user.email", timeout=10)[1].strip()
+        unattributed = functools.partial(blamed_sessions, vault.path, "Inbox.md", email)
+    for line in sync_lines(vault) + merge_lines(vault):
+        print(line)
+    for line in brief_lines(vault, text, has_remote, ahead, uncommitted, reader, unattributed):
         print(line)
 
 
 def main(argv: list[str]) -> int:
+    if "--update" in argv:
+        vault = None if vaultlib.disabled() else vaultlib.locate()
+        if vault:
+            for line in update_vault(vault):
+                print(line)
+        return 0
     if "--brief" in argv:
         vault = None if vaultlib.disabled() else vaultlib.locate()
         if vault:

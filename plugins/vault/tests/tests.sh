@@ -69,6 +69,25 @@ case "$OUT" in *"[VAULT]"*) ko "brief: CLAUDE_NO_VAULT_TOOLS should silence the 
 OUT=$(cd "$TMP/p1" && "$SB")
 case "$OUT" in *"[BOARD QUEUE]"*) ko "brief: board queue line without an origin remote" ;; *) ok ;; esac
 
+# A vault that is a repository of its own is brought up to date before the board is read: a row
+# another member pushed is on the brief of the session that starts next.
+(
+  export GIT_CONFIG_GLOBAL="$TMP/empty-gitconfig" GIT_CONFIG_NOSYSTEM=1
+  : > "$GIT_CONFIG_GLOBAL"
+  git init -q --bare -b main "$TMP/remote.git"
+  mkvault "$TMP/seed" "kb"
+  cd "$TMP/seed/kb" && git init -q -b main && git -c user.name=T -c user.email=t@example.com add -A \
+    && git -c user.name=T -c user.email=t@example.com commit -q -m seed \
+    && git remote add origin "$TMP/remote.git" && git push -q origin main
+  mkdir -p "$TMP/p8" && printf 'Knowledge-base directory: `kb/`\n' > "$TMP/p8/CLAUDE.md"
+  git clone -q "$TMP/remote.git" "$TMP/p8/kb"
+  printf '## Now\n- [ ] pushed by a teammate\n## Next\n## Done\n' > "$TMP/seed/kb/To DO.md"
+  cd "$TMP/seed/kb" && git -c user.name=T -c user.email=t@example.com commit -q -am teammate && git push -q origin main
+) >/dev/null 2>&1
+OUT=$(cd "$TMP/p8" && GIT_CONFIG_GLOBAL="$TMP/empty-gitconfig" GIT_CONFIG_NOSYSTEM=1 "$SB")
+case "$OUT" in *"[VAULT] brought up to date — 1 commit from the remote"*"[NOW]  pushed by a teammate"*) ok ;;
+  *) ko "brief: an own-repo vault was not fast-forwarded before the board was read" ;; esac
+
 # The board-queue line. A temp state directory and a temp configuration keep the
 # real queue out of it; the remote is spelled in capitals because the queue stores
 # a repository lower-cased and the hook has to match it.

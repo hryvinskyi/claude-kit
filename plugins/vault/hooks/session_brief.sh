@@ -27,6 +27,14 @@ BOARD="$VAULT/To DO.md"
 [ -f "$BOARD" ] || exit 0
 
 echo "=== Knowledge-vault brief ($VAULT/) ==="
+
+# A vault that is a repository of its own is brought up to date before anything below reads it:
+# a fetch and a fast-forward, under the lock the session end takes, and a line saying why when it
+# could not — never a merge or a rebase, so a session never starts inside one.
+if command -v python3 >/dev/null 2>&1 && [ -z "${CLAUDE_NO_VAULT_TOOLS:-}" ]; then
+    python3 "$PLUGIN_ROOT/bin/session_capture.py" --update 2>/dev/null
+fi
+
 ITEMS=$(awk '
   /^## Now$/  { s = 1; next }
   /^## Next$/ { s = 2; next }
@@ -47,9 +55,9 @@ last_journal=$(ls -1 "$VAULT/Journal/"*.md 2>/dev/null | sort | tail -1)
 last_decision=$(ls -1 "$VAULT/Decisions/"*.md 2>/dev/null | grep -viE '(readme| MOC)' | sort | tail -1)
 [ -n "${last_decision:-}" ] && echo "[DECISION] latest: $(basename "$last_decision" .md)"
 
-# Prose that stopped matching the code, sessions nobody journaled, whether the vault has a copy off
-# this machine — a cache and local reads, so none of it waits — and a search index of the project's
-# own, started in the background the first time.
+# Prose that stopped matching the code, sessions nobody journaled, notes that did not merge and
+# whether the vault has a copy off this machine — a cache and local reads, so none of it waits — and
+# a search index of the project's own, started in the background the first time.
 if command -v python3 >/dev/null 2>&1 && [ -z "${CLAUDE_NO_VAULT_TOOLS:-}" ]; then
     python3 "$PLUGIN_ROOT/bin/vault_check.py" --brief 2>/dev/null
     python3 "$PLUGIN_ROOT/bin/session_capture.py" --brief 2>/dev/null
