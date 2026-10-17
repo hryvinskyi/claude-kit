@@ -27,7 +27,7 @@
       "description": "Guard hooks: refuse catastrophic shell commands, source and plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and edits inside generated regions; lint edited PHP. Personal policies are read from one TOML file."
     },
     {
-"name": "vault",
+      "name": "vault",
       "source": "./plugins/vault",
       "description": "A project knowledge vault kept beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index, and the decision, journal, todo and wiki-sync commands with a wiki-updater agent."
     },
