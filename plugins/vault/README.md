@@ -32,10 +32,48 @@ The plugin's `bin/` is on the Bash tool's search path while the plugin is enable
 | `vault-check [--check \| --quiet \| --brief \| --stamp NOTE…]` | `bin/vault_check.py`: holds the notes to the code — a cited class or path that exists nowhere, or a broken link, is a hard finding; a cited file that changed since its paragraph was stamped is a soft one |
 | `vault-capture [--brief]` | `bin/session_capture.py` |
 | `vault-search ensure \| refresh` | `bin/vault_search.py`: a `qmd` search index of the vault in `<project>/.qmd/` |
+| `vault-merge <driver> %O %A %B %P` | `bin/vault_merge/`: the git merge drivers below |
+| `vault-merge selfcheck FILE…` | reads each file as the `keyed` driver does and fails unless it writes back byte for byte; prints counts only |
 
 Anything outside a Claude Code session — a scheduled job, a git hook, a project's own script — calls
 them through the shims the kit's `bin/install-shims.sh` writes into `~/.local/bin`, which run the copy
 in the kit clone and survive plugin updates.
+
+## Merge drivers
+
+A vault shared by several people collides in a few files: the TODO board, the inbox, lists of
+records, the review stamps and the notes a tool regenerates. `vault-merge` gives git three drivers
+for them (Python 3.9+, standard library only):
+
+| Driver | For | What it does |
+|---|---|---|
+| `keyed` | line-item Markdown | Merges row by row. A row is a `- ` line at column 0 with its indented lines; its key is the first issue reference in its leading bold span with its repository (`example-org/example-repo#42` and `#42` are two rows), else that bold text, else its first 120 characters. An inbox entry keys by its `<!-- session:<id> -->` marker, a heading by its text, a `###` heading together with its body. Edits to different rows never conflict; a row moved to another section moves; a retitled row without an issue reference is still one row. A row changed differently on both sides (or added twice with different text) is kept twice, the second preceded by `<!-- vault-merge: two versions of this row; keep one -->` — delete the version you do not want and the line. The merge never stops on these; git prints how many rows have two versions |
+| `stamps` | `.anchors.json` | Merges per note and cited file, and never drops an entry either side has (`vault-check` would stamp a missing one afresh, recording a review nobody made). Changed differently on both sides, the base stamp is kept; added differently on both, the older review — the stamp whose commit is an ancestor of the other's in the project the vault belongs to — else the current side's. Written by `vault-check`'s own writer |
+| `generated` | notes with a region a tool writes | git's text merge; conflicts that all lie inside a generated region take the incoming side and the note's path is appended to `<git dir>/vault-regenerate` for the tool to rewrite. Any other conflict is left with git's markers |
+
+Every rule is written in terms of the base, the current version (`%A`) and the incoming one (`%B`),
+because `git pull --rebase` swaps which of them is yours. A driver that fails falls back to
+`git merge-file`'s result and exit status, so a fault surfaces as an ordinary conflict; `%A` is only
+ever replaced whole. Run `vault-merge selfcheck` on each keyed file before enabling the drivers.
+
+Wiring, in the vault's clone (a clone without it falls back to git's text merge, which is safe).
+`.gitattributes` patterns cannot hold a space, so it is written `[[:space:]]`:
+
+```gitattributes
+/To[[:space:]]DO.md merge=vault-keyed
+/Inbox.md merge=vault-keyed
+/.anchors.json merge=vault-stamps
+/Modules/*.md merge=vault-generated
+```
+
+```sh
+for d in keyed stamps generated; do
+  git config merge.vault-$d.driver "$HOME/.local/bin/vault-merge $d %O %A %B %P"
+done
+git config vault-merge.generatedBegin '<!--\s*example:generated:start\s*-->'   # Python regular expressions
+git config vault-merge.generatedEnd   '<!--\s*example:generated:end\s*-->'
+git check-attr merge -- "To DO.md"                                                # vault-keyed
+```
 
 ## Where things are written
 
@@ -76,6 +114,7 @@ Kill switches: `CLAUDE_NO_VAULT_TOOLS=1` for every tool, `CLAUDE_NO_JOURNAL_NUDG
 
 ```sh
 plugins/vault/tests/tests.sh        # the hooks and commands as Claude Code runs them, then the unit tests
+                                    # (the merge drivers' among them, with real git repositories)
 ```
 
 The board-queue cases of the brief run when the `board-queue` plugin beside this one has had `npm ci`.

@@ -38,6 +38,7 @@ SHIMS=(
   "vault-check:plugins/vault/bin/vault-check"
   "vault-capture:plugins/vault/bin/vault-capture"
   "vault-search:plugins/vault/bin/vault-search"
+  "vault-merge:plugins/vault/bin/vault-merge"
 )
 
 FAILED=0

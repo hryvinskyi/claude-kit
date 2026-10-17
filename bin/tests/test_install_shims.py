@@ -19,7 +19,8 @@ import unittest
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent.parent
-SHIMS = ("board-queue", "board-queue-mcp", "find-vault", "vault-check", "vault-capture", "vault-search")
+SHIMS = ("board-queue", "board-queue-mcp", "find-vault", "vault-check", "vault-capture", "vault-search",
+         "vault-merge")
 
 
 def fake_clone(where: Path) -> Path:
@@ -80,6 +81,10 @@ class InstallShimsTests(unittest.TestCase):
         checked = self.run_shim("vault-check", "--check", "--root", str(project))
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
         self.assertIn("vault-check:", checked.stdout)
+        board = project / "kb" / "To DO.md"
+        merged = self.run_shim("vault-merge", "selfcheck", str(board))
+        self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
+        self.assertIn("identical", merged.stdout)
 
     def test_the_queue_shims_reach_the_queue_entry_points_in_the_clone(self) -> None:
         self.install()

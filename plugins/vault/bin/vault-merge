@@ -1,0 +1,11 @@
+#!/bin/sh
+# vault-merge <keyed|stamps|generated> %O %A %B %P | selfcheck FILE… — git merge drivers for a
+# vault's busiest files; see vault_merge/ beside it.
+# Its own directory, through any links that lead here.
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in /*) SELF=$LINK ;; *) SELF=$(dirname "$SELF")/$LINK ;; esac
+done
+HERE=$(cd "$(dirname "$SELF")" && pwd)
+exec python3 -I "$HERE/vault_merge/__main__.py" "$@"
