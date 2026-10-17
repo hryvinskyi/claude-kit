@@ -1,0 +1,10 @@
+[Unit]
+Description=board-queue: one pass of the board's single writer
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh {{LAUNCHER}}
+WorkingDirectory={{WORKDIR}}
+Environment=PATH={{PATH}}
+StandardOutput=append:{{LOG}}
+StandardError=append:{{LOG}}

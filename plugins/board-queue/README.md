@@ -1,0 +1,367 @@
+# board-queue
+
+A durable queue and a single writer for shared GitHub Projects boards.
+
+Sessions and scripts **file** work — set these fields on that issue, post this comment, close it — and a
+worker drains the queue on a schedule. Nothing else writes to the boards. That is the whole idea: the boards
+sit behind one hourly API allowance that every session on the account shares, and the only way to stay
+inside it is for one process to spend it serially, read what each answer says is left, and stop early
+rather than find out by being refused.
+
+## Boards and the repositories they carry
+
+The configuration lists the boards, and under each board the repositories whose issues are written to it:
+
+```json
+"boards": [
+  { "owner": "example-org",  "number": 1, "ownerType": "organization",
+    "repos": ["example-org/example-repo", "example-user/another-repo"] },
+  { "owner": "example-user", "number": 2, "ownerType": "user",
+    "repos": ["example-user/third-repo"] }
+]
+```
+
+Every action is routed by its repository to the one board that names it; nothing compares an owner by
+name. A repository belongs to exactly one board — one named twice, or a board listed twice, is refused when
+the configuration is read, before anything is filed. A repository no board names is refused as it is
+filed, with the list of the ones that are; work already in the queue for a repository that has since left
+the configuration is blocked when the worker reaches it, with the same list.
+
+Each board keeps its own field catalog (two boards' fields and options carry different ids, even where
+their names agree), its own one-minute listing, and the credential of the account that owns it. The
+allowance is not divided: it is one account's, so the pacing below is the same however many boards there
+are. The older single-board shape (`"board": {…}` beside a flat `"repos"`) is no longer read; the refusal
+names what is wrong.
+
+## What it costs
+
+A targeted GraphQL call — find an issue, add it to the board, set one field, read one row back — costs
+about a point each, and the whole board read as one paginated walk costs three to five; a complete
+set-fields is therefore about six points against an hourly allowance of five thousand. The expensive thing
+was never the writing but the listing that preceded it: a command line `project item-list --limit 800`
+costs upwards of thirteen hundred points per invocation, which is why an afternoon of them left every
+session refused.
+
+REST is a separate allowance (`core`, five thousand an hour of its own). The pacing policy watches the
+GraphQL one only: comments and closes are cheap, they are billed elsewhere, and a policy that mixed the
+two would stop the queue for an allowance it is not spending. What REST answers is recorded and shown in
+`status`, and a refusal from either side pauses the queue.
+
+## Membership is written, never read
+
+Whether an issue is on the board is established by adding it — the add is idempotent and hands back the row
+that is already there — or by looking for it in the board's own walk. It is never asked of the issue: an
+issue's board items were measured answering *empty* for rows that are demonstrably on the board whenever
+the repository's owner and the board's owner differ, which reads exactly like "not on the board" and would
+make this system add a second row or refuse to write.
+
+## The kinds
+
+Four sorts of work, each a class with its own payload, its own merging rule and its own way of confirming
+what it did. The repository is always written `owner/name` and must be one the configuration names; the
+board written to is the one that carries it.
+
+`board.set-fields` — set single-select fields on an issue's row.
+
+```json
+{ "kind": "board.set-fields",
+  "payload": { "repo": "example-org/example-repo", "issue": 412,
+               "fields": { "status": "In progress", "severity": "S2", "module": "Checkout" } } }
+```
+
+Wanted texts are matched against the board's live options: exactly, then ignoring case, then as a prefix
+that fits one option only — so `S2` reaches `S2 · broken · no workaround`. A text that fits nothing, or
+several, blocks the action and reports what the field accepts. Two of these waiting on the same issue merge
+into one, the later values winning.
+
+`board.verify` — read a row back and compare it with what you expect; writes nothing.
+
+```json
+{ "kind": "board.verify",
+  "payload": { "repo": "example-org/example-repo", "issue": 412, "expect": { "status": "Done" } } }
+```
+
+Any status may be expected here, including one that writes refuse. `"onBoard": false` asserts the issue is
+deliberately absent, and is the one form that needs no `expect` at all.
+
+A comment body, and the comment an `issue.close` posts first, are capped at 65 536 characters — GitHub's
+own limit. A longer one comes back as a 422, which reads as a fault of the moment and would be retried five
+times before the action gave up, so the length is refused where it was typed.
+
+`issue.comment` — post one comment, once.
+
+```json
+{ "kind": "issue.comment",
+  "payload": { "repo": "example-org/example-repo", "issue": 412, "body": "verified on staging" } }
+```
+
+The comment carries an invisible marker naming the action, so a retry after a failure whose post had
+already landed adopts that comment instead of posting a second one.
+
+`issue.close` — close an issue, posting the evidence comment first when one is given.
+
+```json
+{ "kind": "issue.close",
+  "payload": { "repo": "example-org/example-repo", "issue": 412, "reason": "completed",
+               "comment": "shipped in 2.14.0" } }
+```
+
+Closing is also how a row reaches the board's final column: the board's own automation moves it. **This
+queue never writes the status `Done` itself** — the same automation would close the issue in reaction, and
+it would do so before the evidence comment exists. Enqueue refuses it, and execution refuses it again after
+the prefix has been resolved.
+
+## The life of an action
+
+```
+              ┌──── release ────┐
+   held ──────┘                 ↓
+   enqueue ──────────────→ queued ──claim──→ running ──→ done
+                             ↑  ↑               │
+             backoff ────────┘  └── requeue ────┤   (a refusal that was not this action's fault)
+                                                ├──→ blocked ──retry──→ queued
+                                                └──→ failed  ──retry──→ queued
+   queued | held | blocked | failed ──cancel──→ cancelled
+```
+
+- Actions on the same issue run in the order they were filed, so a comment filed before a close is posted
+  before the issue closes. No dependency has to be declared for that.
+- A write is done only once reading it back agrees with it; a mismatch is a failure carrying both values.
+- An action a run died holding — the machine went down, the process was killed — is put back at the start
+  of the next run, with the attempt it was charged returned. Nothing else would free it: `cancel` and
+  `retry` both refuse a running action, and no later action on the same issue may run while it sits there.
+  Running it again is safe by design: a post looks for its own marker first, adding a board row hands back
+  the row that is already there, and a close reads the issue's state before changing it.
+- **Blocked** means a person has to change something outside this system — add the option to the board,
+  restore a missing issue. Nothing retries a blocked action on its own; `retry` gives it its attempts back
+  and keeps the error, which is the record of what was fixed. The one exception is an option that appears
+  in a fresh catalog of its own board: the decision was made when somebody added it, and pressing the button again is not a
+  second decision.
+- `notBefore` pushes an action into the future, up to thirty days; beyond that it is refused, because work
+  nothing will touch for a year is work nobody sees again. `status` and the session brief list what is
+  waiting and when it comes round, so a delay is never silent.
+- **Held** is for work that waits on something outside the queue — a move that is only true once a deploy
+  is live. A held request never merges into a waiting one, because the merged values would run at the next
+  tick with nothing saying so. `release` is what runs it.
+- A transient failure (5xx, a network error) waits out a backoff and comes back, up to five attempts, then
+  it is **failed**.
+- Every write is guarded by the row's version: two writers, and the second one to arrive is told the row
+  changed rather than overwriting a decision it never saw.
+
+## The rate-limit policy
+
+Every answer carries what is left of the allowance, and that is the only source trusted — the dedicated
+rate-limit endpoint was measured answering stale numbers. The worker reads the headers on every call and:
+
+- never starts an action while GraphQL remaining is below the floor (500 by default — the allowance is
+  shared with every session on the account, and a worker that spends it to the last point leaves the people
+  working alongside it unable to read a single issue);
+- never runs more than the per-tick cap (40) and leaves at least 1500 ms between two mutations;
+- treats a refusal with remaining 0 as exhaustion and pauses until the reset the header names;
+- treats a refusal with remaining above 0 as the burst limiter and pauses for `retry-after`, or 120 s,
+  doubling per consecutive refusal up to an hour. A tick that completed an action resets the doubling;
+- counts a rate-limit refusal against the queue, never against the action: it goes back untouched, because
+  spending an action's attempts on refusals it had no part in would give up on work that was never wrong.
+
+A 2xx is a success whatever its remaining header says. The policy stops the *next* action instead.
+
+## The audit
+
+`board-queue audit` reads every board and says what does not add up; `--json` gives the same report as
+data. Per configured repository it asks GitHub for the open issues, walks the board that carries it once,
+and lists three
+disagreements: an open issue with no board row, a row with one of the managed fields left blank (an empty
+Status counts), and an issue closed in the last 14 days whose row never reached a status the board's own
+automation sets. The pass files nothing, ever — which module an issue belongs to and how badly it hurts are
+judgements it cannot make, and a guessed value routes triage wrongly while looking exactly like a chosen
+one. Read it and decide.
+
+The closed-issue window over-includes on purpose: the REST listing filters on when an issue was last
+updated, not on when it was closed, so an issue closed months ago and commented on yesterday comes back
+with the rest. It costs one row in a board walk that was happening anyway, and the finding is dropped as
+soon as that row turns out to carry a finished status.
+
+The worker runs the same pass by itself after a tick, at most every `worker.auditEveryHours` (6) and only
+while the GraphQL allowance is above `worker.auditMinRemaining` (1000): the report is work nobody is
+waiting for, and it must never compete with the queue. It runs under the same single lock the writing does
+and never while the queue is waiting out a refusal — the report and the writes spend one allowance between
+them. The last report is kept as `audit.json` in the state directory, one file, replaced each time;
+`board-queue status` shows the counts and when it was taken. A pass a rate limit cuts short still writes
+what it found, says so in the report, and leaves that summary alone so the next tick looks again. A pass
+that fails outright stamps the attempt, so a report that cannot be written waits out the same six hours
+rather than being asked for again every five minutes.
+
+## From a session
+
+The MCP server offers `board_enqueue`, `board_queue`, `board_status`, `board_release`, `board_cancel`,
+`board_retry` and `board_show`. Every tool but the last reads or writes the database only and costs no
+allowance; `board_show` reads the whole board that carries the repository in one walk and reuses it for a
+minute, and is refused while the queue is waiting out a rate limit — it spends exactly what the queue is
+waiting for.
+
+The tool descriptions carry the rules a caller needs — which repositories are allowed and which board
+carries each, why `Done` is refused, what `hold` is for, what a warning in the answer means. A session does
+not need this file.
+
+## From a shell
+
+`board-queue` below is the command in `bin/`: on the search path of every session while the plugin is
+enabled, and at `~/.local/bin/board-queue` once the kit's shims are installed (see *Installing*). A
+script, a scheduled job or a hook calls it there, or by `$BOARD_QUEUE_CLI` when it is set, and never
+by a path into the plugin cache, which moves on every plugin update.
+
+```
+board-queue enqueue --repo example-org/example-repo --issue 412 --status "In progress" --severity S2
+echo '{"kind":"issue.comment","payload":{"repo":"example-org/example-repo","issue":412,"body":"…"}}' \
+  | board-queue enqueue
+board-queue list [--state queued,held] [--repo owner/name] [--issue N] [--kind K] [--json]
+board-queue status [--json]
+board-queue release <id> | cancel <id> | retry <id> | retry --blocked
+board-queue show example-org/example-repo 412
+board-queue tick            # refused unless BOARD_QUEUE_SCHEDULED=1 — the launcher sets it
+board-queue audit [--json]
+board-queue brief --repo example-org/example-repo
+board-queue install-launchd   # macOS
+board-queue install-systemd   # Linux
+board-queue help
+```
+
+The words build a `board.set-fields` request; any other kind is piped in as
+`{"kind": …, "payload": {…}}`, optionally with `origin`, `hold` and `notBefore`. `--json` prints the same
+answer as the values a script reads. An unknown command exits 2, a refusal exits 1 with one sentence on the
+error stream and no stack.
+
+`brief --repo` is what a session-start hook calls. It reads the database and nothing else, returns in a few
+tens of milliseconds, and prints
+
+```
+[BOARD QUEUE] queued 3 · held 1 (oldest 6.2d) · blocked 1 · failed 0
+[BOARD QUEUE] blocked example-org/example-repo#412 — Severity has no option matching "S9"; it accepts: …
+```
+
+— the second line only when something is blocked, and nothing at all when the repository has no
+outstanding work. A repository this queue does not carry is silent, which is what lets one hook ask on
+behalf of every project.
+
+## Installing
+
+The plugin carries the code and nothing `npm ci` installs, so it runs from a **clone** of the kit, added as a
+local-directory marketplace (which Claude Code loads in place, `node_modules` included):
+
+```sh
+git clone https://github.com/hryvinskyi/claude-kit.git ~/src/claude-kit
+claude plugin marketplace add ~/src/claude-kit
+claude plugin install board-queue@claude-kit
+npm ci --prefix ~/src/claude-kit/plugins/board-queue
+~/src/claude-kit/bin/install-shims.sh ~/src/claude-kit      # ~/.local/bin/board-queue, board-queue-mcp, …
+mkdir -p ~/.config/board-queue
+cp ~/src/claude-kit/plugins/board-queue/config.example.json ~/.config/board-queue/config.json
+                                                             # name the boards, their repositories, the fields
+board-queue install-launchd                                  # macOS; install-systemd on Linux
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.board-queue.plist
+launchctl kickstart -k gui/$(id -u)/com.user.board-queue
+```
+
+The plugin starts the MCP server itself (`.mcp.json`, as `plugin:board-queue:board-queue`; its tools are
+`mcp__plugin_board-queue_board-queue__board_enqueue` and so on). Do not also register a user-scope
+`board-queue` server with `claude mcp add`: the plugin's server replaces it, and a user-scope definition
+outranks a plugin's, so a stale one would keep answering in its place. A copy of the plugin without its
+dependencies — a marketplace added from GitHub is copied into the plugin cache — hands every call to
+`~/.local/bin/board-queue` and `board-queue-mcp`, so the clone's installed copy answers; without one it
+stops with the `npm ci` line that fixes it.
+
+The configuration is read from `${XDG_CONFIG_HOME:-~/.config}/board-queue/config.json` (or
+`$BOARD_QUEUE_CONFIG`). A configuration found only at its previous place, `~/.claude/tools/board-queue/
+config.json`, is read from there once, copied to the current one, and a line on the error stream says it
+moved and the old file can go.
+
+`install-launchd` writes the job description and the small launcher it runs
+(`board-queue-tick.sh` in the state directory); `install-systemd` writes a one-shot
+`board-queue.service` and a `board-queue.timer` under `${XDG_CONFIG_HOME:-~/.config}/systemd/user/` and the
+same launcher, and prints `systemctl --user daemon-reload` and `systemctl --user enable --now
+board-queue.timer`. Every path is absolute and baked in — a scheduled job starts with neither a checkout's
+directory nor a person's search path — and the launcher runs the pass through `~/.local/bin/board-queue`,
+so it keeps working when the plugin moves. Both commands refuse while that command is not installed, and
+print what to run without running it. The launcher also sets `BOARD_QUEUE_SCHEDULED=1`,
+and `tick` refuses to run without it: the per-pass cap only spreads the writes over five-minute windows
+if nobody runs passes back to back, and a session that empties the queue by hand is spending the
+allowance every other session shares. A person operating the schedule sets the variable by hand
+(`BOARD_QUEUE_SCHEDULED=1 board-queue tick`); a session reads `status` and waits. Run it again whenever an
+upgrade moves the Node binary; until then the launcher falls back to whichever `node` the job's own path
+finds. The job runs every 300 seconds and appends to `launchd.log` in the state directory. `launchctl print
+gui/$(id -u)/com.user.board-queue` shows what the system thinks of it; `launchctl bootout` removes it
+(`systemctl --user status board-queue.timer` and `disable --now` on Linux).
+
+### One queue per person
+
+Each person runs their own queue and worker, with their own credential. The GraphQL allowance belongs to
+an account, so one worker per person does not compete with anyone else's. A teammate needs no App: without
+a credential file the queue uses the token their own `gh` login holds. An App's private key is never
+copied to another person's machine.
+
+This changes what "single writer" means. One worker is the only writer **of its person's actions**; with
+several people, several workers write to the same board, each pacing against its own allowance. Every write
+is still guarded by the row's version, so two of them meeting on one row is a refusal, never an overwrite.
+Work that represents the whole team rather than one person — anything that copies another system's state
+onto the board — belongs in exactly one person's worker; enabled in two, it is filed twice.
+
+**The credential.** A scheduled pass (`board-queue tick`) and the MCP server source an environment file when
+one exists: `$BOARD_QUEUE_ENV`, else `${XDG_CONFIG_HOME:-~/.config}/board-queue/board-queue.env`, else the
+older `~/.claude/secrets/board-queue.env` (`chmod 600`, never tracked — a file any other account can read is
+skipped with a line on the error stream). Every other command uses what the environment already holds. It
+may set `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` — and
+`GITHUB_APP_INSTALLATION_ID` to skip the installation lookup — in which case the queue mints an
+installation token and the board writes cost the App's allowance rather than the person's.
+
+An installation belongs to one account, so the credential is chosen per board: each board, and the issues
+of the repositories it carries, are reached with an installation token of the account that owns the board,
+looked up under `/orgs/<owner>` or `/users/<owner>` as its `ownerType` says. Two boards of one account share
+one cached token. `GITHUB_APP_INSTALLATION_ID` names a single installation and so is used only while every
+configured board belongs to one account; with boards under several accounts each one looks its own
+installation up.
+
+`GITHUB_APP_PRIVATE_KEY_PATH` is the **path** to the App's PEM file, itself `chmod 600`. The key text
+never belongs in an environment variable, where every child process inherits it and the first message that
+mentions it copies it into a log. The older `GITHUB_APP_PRIVATE_KEY` is still read as a path, but a value
+carrying a key rather than a path is refused by the variable's name, and no message here ever repeats what
+either variable holds.
+
+Without that file the queue falls back to the token the GitHub command line tool holds, and says so once in
+the log — which allowance the writes are billed to is otherwise invisible for weeks. `gh auth status` must
+then show the **`project`** scope: without it GitHub answers `INSUFFICIENT_SCOPES`, which this queue reads
+as a credential that will never get in — it pauses the queue, and the log line names the permission the
+answer asked for. The token is cached with a lifetime, fetched only when a gateway first needs one, dropped
+and re-minted once on a 401, and never reaches a log line, an error message or the database.
+
+## Where things live
+
+`~/.claude/state/board-queue/` — never tracked, created on demand, and the owner's alone (the directory is
+`0700`, the files in it `0600`): between them they hold the text of every comment this system is about to
+post and everything the API answered with.
+
+| file | what it is |
+|---|---|
+| `queue.db` | the queue itself (SQLite, WAL) |
+| `worker.log` | structured lines from the worker and the tools, credentials redacted |
+| `audit.json` | the last report-only pass over every board |
+| `launchd.log` | whatever the scheduled job printed |
+
+| `board-queue-tick.sh` | the launcher a scheduled job runs |
+
+`$BOARD_QUEUE_STATE_DIR` moves all of it; `$BOARD_QUEUE_CONFIG` names another configuration file. Both are
+what the tests use, and what a second installation would use. The configuration and the credential file
+live under `${XDG_CONFIG_HOME:-~/.config}/board-queue/` (see *Installing*).
+
+## Adding a kind
+
+Write a class implementing `ActionKind` in `src/domain/kinds/` — a name, a zod schema for its payload, the
+issue it is about, whether two of them merge, and what it does when it runs — and add it to `defaultKinds()`
+in `src/domain/kinds/default-kinds.ts`. That is the whole registration: nothing dispatches on a kind's name
+anywhere, so no other file learns about it. The MCP tool's description and the CLI's accepted kinds both
+come from the registry.
+
+## Working on it
+
+TypeScript run directly by Node; there is no build step. `npm ci` installs the dependencies (the plugin
+carries none), `npm test` runs the suite, `npm run typecheck` runs the compiler over everything. Tests use in-memory doubles for the gateways and a real temporary
+SQLite database for the queue: what the queue promises is proved against the store it actually runs on.

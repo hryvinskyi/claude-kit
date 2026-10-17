@@ -1,0 +1,17 @@
+#!/bin/sh
+# board-queue <command> — the queue's command line; see board-queue.ts beside it.
+# A scheduled pass (`tick`) runs with the optional App credential, as the
+# board's writer; every other command uses what the environment already holds.
+# Its own directory, through any links that lead here.
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in /*) SELF=$LINK ;; *) SELF=$(dirname "$SELF")/$LINK ;; esac
+done
+HERE=$(cd "$(dirname "$SELF")" && pwd)
+. "$HERE/../lib/launch.sh"
+board_queue_require_dependencies "$HERE/.." "$HOME/.local/bin/board-queue" "$@"
+[ "${1:-}" = tick ] && board_queue_load_credentials
+NODE=${BOARD_QUEUE_NODE:-}
+[ -n "$NODE" ] && [ -x "$NODE" ] || NODE=node
+exec "$NODE" "$HERE/board-queue.ts" "$@"

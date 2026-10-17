@@ -1,0 +1,10 @@
+[Unit]
+Description=board-queue: a pass of the board's single writer every {{INTERVAL}} seconds
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec={{INTERVAL}}s
+Unit={{SERVICE}}
+
+[Install]
+WantedBy=timers.target

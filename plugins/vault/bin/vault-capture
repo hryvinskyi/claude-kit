@@ -1,0 +1,10 @@
+#!/bin/sh
+# vault-capture [--brief | --worker F] — the session-end capture; see session_capture.py beside it.
+# Its own directory, through any links that lead here.
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in /*) SELF=$LINK ;; *) SELF=$(dirname "$SELF")/$LINK ;; esac
+done
+HERE=$(cd "$(dirname "$SELF")" && pwd)
+exec python3 "$HERE/session_capture.py" "$@"

@@ -1,0 +1,3 @@
+#!/bin/sh
+# claude-kit shim for {{NAME}}: runs the copy in the kit clone. Written by install-shims.sh.
+exec "{{TARGET}}" "$@"

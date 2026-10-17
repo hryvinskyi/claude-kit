@@ -1,0 +1,27 @@
+#!/bin/sh
+# One pass of the queue's single writer, run on a schedule.
+#
+# The schedule runs this rather than the program itself, so that a pass is
+# always started the same way: through the `board-queue` command installed at a
+# path that does not move when the program does, with the variable that tells
+# the program the schedule started it. The command reads the optional
+# credentials itself; see the package README for where they live.
+#
+# Both absolute paths below are written when this file is installed, because a
+# scheduled job starts with neither a checkout's directory nor a person's search
+# path. A package manager moves its binaries on every upgrade, so a vanished
+# Node falls back to whatever the search path in the job description finds;
+# re-run the install command to pin the new one exactly.
+NODE="{{NODE}}"
+COMMAND="{{COMMAND}}"
+
+[ -x "$NODE" ] || NODE="$(command -v node)"
+BOARD_QUEUE_NODE="$NODE"
+export BOARD_QUEUE_NODE
+
+# This is what tells the program the schedule started it; a pass run from a
+# shell without it is refused, so sessions read the queue instead of draining it.
+BOARD_QUEUE_SCHEDULED=1
+export BOARD_QUEUE_SCHEDULED
+
+exec "$COMMAND" tick

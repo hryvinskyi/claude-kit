@@ -1,0 +1,29 @@
+{
+  "boards": [
+    {
+      "owner": "example-org",
+      "number": 1,
+      "ownerType": "organization",
+      "repos": ["example-org/example-repo", "example-user/another-repo"]
+    },
+    {
+      "owner": "example-user",
+      "number": 2,
+      "ownerType": "user",
+      "repos": ["example-user/third-repo"]
+    }
+  ],
+  "fields": ["Status", "Severity", "Module", "Environment", "Defect type"],
+  "refusedStatus": ["Done"],
+  "worker": {
+    "graphqlFloor": 500,
+    "perTickCap": 40,
+    "paceMs": 1500,
+    "secondaryBaseSec": 120,
+    "secondaryCapSec": 3600,
+    "maxAttempts": 5,
+    "catalogTtlSec": 3600,
+    "auditEveryHours": 6,
+    "auditMinRemaining": 1000
+  }
+}
