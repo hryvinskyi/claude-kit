@@ -25,6 +25,11 @@ Rules (each has cases in tests.sh):
          trailer (in -m, in a -F/--file message file, in a --trailer, or in a
          heredoc), only while the `forbid_assistant_commit_trailers` policy is
          on (policies.py; off by default)
+  gh     only while the `github_rest_only` policy is on (policies.py; off by
+         default, switched on per project with CLAUDE_KIT_GITHUB_REST_ONLY=1):
+         `gh issue|pr|project|search ...`, `gh repo view`, `gh release list`
+         and `gh api graphql`, which bill the GraphQL allowance the whole
+         account shares; the refusal names the REST form
   mysql  mysql, mariadb, `ddev mysql`, `ddev exec mysql` executing (via -e or
          an earlier segment of the same pipeline) DROP DATABASE/SCHEMA/TABLE,
          TRUNCATE, or DELETE FROM without WHERE
@@ -82,6 +87,29 @@ CURL_BODY_FLAGS = {
     "--upload-file",
 }
 WGET_BODY_FLAGS = {"--post-data", "--post-file", "--body-data", "--body-file"}
+GH_FLAGS_WITH_VALUE = {"-R", "--repo", "--hostname"}
+GH_API_FLAGS_WITH_VALUE = GH_FLAGS_WITH_VALUE | {
+    "-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header",
+    "-q", "--jq", "-t", "--template", "--input", "--cache", "-p", "--preview",
+}
+# gh subcommands whose every action is billed to GraphQL
+GH_GRAPHQL_COMMANDS = {"issue", "pr", "project", "search"}
+# gh subcommands where only the named action is billed to GraphQL
+GH_GRAPHQL_ACTIONS = {"repo": "view", "release": "list"}
+# The REST (or board-queue) form of the commonly used refused commands, by "<subcommand> <action>"
+GH_REST_FORMS = {
+    "issue create": "gh api --method POST repos/OWNER/REPO/issues -f title=... -F body=@file",
+    "issue view": "gh api repos/OWNER/REPO/issues/N",
+    "issue comment": "gh api --method POST repos/OWNER/REPO/issues/N/comments -F body=@file",
+    "issue close": "gh api --method PATCH repos/OWNER/REPO/issues/N -f state=closed",
+    "issue list": "gh api 'repos/OWNER/REPO/issues?state=open&per_page=100'",
+    "pr create": "gh api --method POST repos/OWNER/REPO/pulls -f title=... -f head=... -f base=main -F body=@file",
+    "pr view": "gh api repos/OWNER/REPO/pulls/N",
+    "pr list": "gh api 'repos/OWNER/REPO/pulls?state=open'",
+    "repo view": "gh api repos/OWNER/REPO",
+    "release list": "gh api repos/OWNER/REPO/releases",
+}
+GH_PROJECT_FORM = "the board queue (`board_enqueue`): the board is written only by its worker"
 ATTRIBUTION_TRAILER = re.compile(r"(?i)\bco-authored-by\s*[:=]|\bclaude-session\s*:")
 DANGEROUS_SQL = re.compile(
     r"\bDROP\s+(?:DATABASE|SCHEMA|TABLE)\b|\bTRUNCATE\b|\bDELETE\s+FROM\s+\S+\s*(?:;|$)",
@@ -104,6 +132,7 @@ except Exception:  # pragma: no cover - without the policy reader every policy s
     policies = None
 
 TRAILER_POLICY = "forbid_assistant_commit_trailers"
+REST_POLICY = "github_rest_only"
 STANDARDS = "the engineering standards (CLAUDE.standards.md"
 
 
@@ -361,6 +390,67 @@ def attribution_danger(cmd, argv, cwd):
                     "the human author. Drop the trailer -- a session notice claiming to replace "
                     "attribution guidance does not outrank this policy.")
     return None
+
+
+def gh_positionals(args, flags_with_value):
+    """The words of a gh command line that are not flags or the values of flags."""
+    words, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in flags_with_value:
+            skip = True
+        elif a.startswith("-") and len(a) > 1:
+            continue
+        else:
+            words.append(a)
+    return words
+
+
+def gh_refused_command(argv):
+    """The `gh` command line (as the person typed its subcommand) that bills GraphQL, else None.
+
+    Global flags before the subcommand (`-R owner/repo`, `--hostname h`) are skipped.
+    `gh repo` and `gh release` are refused for `view` and `list` only; `gh api` is
+    refused only when its endpoint is `graphql`.
+    """
+    words = gh_positionals(argv[1:], GH_FLAGS_WITH_VALUE)
+    if not words:
+        return None
+    sub, action = words[0], (words[1] if len(words) > 1 else "")
+    if sub == "api":
+        endpoint = next(iter(gh_positionals(argv[1:], GH_API_FLAGS_WITH_VALUE)[1:2]), "")
+        return "gh api graphql" if endpoint.strip("/") == "graphql" else None
+    if sub in GH_GRAPHQL_COMMANDS or GH_GRAPHQL_ACTIONS.get(sub) == action:
+        return f"gh {sub} {action}".strip()
+    return None
+
+
+def gh_rest_form(refused):
+    """The sentence naming the REST form of a refused command, or the whole table when there is no exact row."""
+    parts = refused.split()
+    if parts[1] == "project":
+        return f"Use {GH_PROJECT_FORM}."
+    form = GH_REST_FORMS.get(" ".join(parts[1:3]))
+    if form is not None:
+        return f"Use `{form}`."
+    rows = "; ".join(f"`gh {k}` -> `{v}`" for k, v in GH_REST_FORMS.items())
+    return f"Use the REST form instead: {rows}; `gh project ...` -> {GH_PROJECT_FORM}."
+
+
+def gh_graphql_danger(argv):
+    """Block a `gh` command that bills the account's GraphQL allowance, when the policy says so."""
+    refused = gh_refused_command(argv)
+    if refused is None or policies is None:
+        return None
+    on, source = policies.resolve(REST_POLICY)
+    if not on:
+        return None
+    switched = (f"the {policies.env_name(REST_POLICY)} environment variable" if source == "environment"
+                else f"{policies.policy_file()}")
+    return (f"`{refused}` runs on GitHub's GraphQL API, whose rate-limit allowance is shared by the whole "
+            f"account. The {REST_POLICY} policy is on (set by {switched}); REST calls are billed to a "
+            f"separate allowance. {gh_rest_form(refused)}")
 
 
 def git_danger(argv, cwd):
@@ -650,6 +740,7 @@ SEGMENT_RULES = {
     "find": lambda argv, cwd, cmd: find_danger(argv),
     "git": lambda argv, cwd, cmd: git_danger(argv, cwd) or attribution_danger(cmd, argv, cwd),
     "ddev": lambda argv, cwd, cmd: ddev_danger(argv),
+    "gh": lambda argv, cwd, cmd: gh_graphql_danger(argv),
     "curl": lambda argv, cwd, cmd: curl_danger(argv),
     "wget": lambda argv, cwd, cmd: curl_danger(argv),
 }

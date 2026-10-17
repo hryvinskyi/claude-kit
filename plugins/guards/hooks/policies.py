@@ -10,6 +10,13 @@ top-level boolean:
 
 A policy that is absent, not a boolean, or in a file that cannot be read or
 parsed takes its default, so a missing or broken file never blocks anything.
+
+The environment overrides the file, so a project can switch a policy on for
+itself (in its `.claude/settings.json` `env` block) without touching the
+person's machine-wide file: `CLAUDE_KIT_<NAME IN CAPITALS>`, for example
+`CLAUDE_KIT_GITHUB_REST_ONLY=1`. `1`/`true` turn the policy on and `0`/`false`
+turn it off, in any case; any other value is ignored and the file decides.
+
 On Python 3.11+ the file is parsed with tomllib; older interpreters read the
 top-level `key = true|false` lines and nothing else.
 
@@ -28,7 +35,12 @@ except ImportError:  # Python < 3.11
 # Every policy the hooks read, with the value it takes when the file says nothing
 DEFAULTS = {
     "forbid_assistant_commit_trailers": False,
+    "github_rest_only": False,
 }
+
+ENV_PREFIX = "CLAUDE_KIT_"
+ENV_ON = {"1", "true"}
+ENV_OFF = {"0", "false"}
 
 BOOLEAN_LINE = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=\s*(true|false)\s*(?:#.*)?$")
 TABLE_LINE = re.compile(r"^\s*\[")
@@ -69,14 +81,41 @@ def load() -> dict:
         return {}
 
 
-def enabled(name: str) -> bool:
+def env_name(name: str) -> str:
+    """The environment variable that overrides the named policy."""
+    return ENV_PREFIX + name.upper()
+
+
+def resolve(name: str, environ=None) -> tuple:
+    """Resolve the named policy and say where the value came from.
+
+    The environment variable wins when it holds a recognised value, then the
+    policy file, then the default.
+
+    @param name    A key of DEFAULTS.
+    @param environ Mapping to read the variable from; os.environ when omitted.
+    @return (value, source) where source is "environment", "file" or "default".
+    """
+    env = os.environ if environ is None else environ
+    raw = (env.get(env_name(name)) or "").strip().lower()
+    if raw in ENV_ON:
+        return True, "environment"
+    if raw in ENV_OFF:
+        return False, "environment"
+    value = load().get(name)
+    if isinstance(value, bool):
+        return value, "file"
+    return DEFAULTS.get(name, False), "default"
+
+
+def enabled(name: str, environ=None) -> bool:
     """Report whether the named policy is on.
 
-    @param name A key of DEFAULTS.
-    @return The file's boolean for it, else its default.
+    @param name    A key of DEFAULTS.
+    @param environ Mapping to read the override from; os.environ when omitted.
+    @return The environment's boolean for it, else the file's, else its default.
     """
-    value = load().get(name)
-    return value if isinstance(value, bool) else DEFAULTS.get(name, False)
+    return resolve(name, environ)[0]
 
 
 def main(argv) -> int:
