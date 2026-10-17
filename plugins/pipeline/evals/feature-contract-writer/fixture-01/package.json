@@ -1,0 +1,13 @@
+{
+  "name": "acme-store-storefront",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:js": "node --test 'app/code/*/*/Test/Js/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

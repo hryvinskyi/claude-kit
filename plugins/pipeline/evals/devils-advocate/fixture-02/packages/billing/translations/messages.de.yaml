@@ -1,0 +1,4 @@
+invoice.title: Rechnung
+invoice.payment_method.card: Karte
+invoice.payment_method.bank: Überweisung
+invoice.payment_method.store_credit: Guthaben

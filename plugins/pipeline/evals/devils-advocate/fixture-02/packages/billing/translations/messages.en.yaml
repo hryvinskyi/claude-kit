@@ -1,0 +1,4 @@
+invoice.title: Invoice
+invoice.payment_method.card: Card
+invoice.payment_method.bank: Bank transfer
+invoice.payment_method.store_credit: Store credit

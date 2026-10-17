@@ -1,0 +1,16 @@
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    # Api/ is inside the glob on purpose: a tagged Api/ interface only registers its
+    # implementations when the interface itself is loaded as a resource.
+    Acme\Billing\:
+        resource: '../../'
+        exclude:
+            - '../../Entity/'
+            - '../../Migrations/'
+            - '../../Resources/'
+
+    Acme\Billing\Api\InvoiceRepositoryInterface:
+        alias: Acme\Billing\Repository\DoctrineInvoiceRepository

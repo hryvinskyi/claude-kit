@@ -1,0 +1,9 @@
+{
+  "name": "qa",
+  "version": "0.1.0",
+  "description": "Quality skills: bug-hunt walks a live site in a real browser and proves what breaks; tighten shortens text without losing meaning.",
+  "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
+  "repository": "https://github.com/hryvinskyi/claude-kit",
+  "license": "MIT",
+  "keywords": ["qa", "playwright", "bug-hunting", "writing"]
+}

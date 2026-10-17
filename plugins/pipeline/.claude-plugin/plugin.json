@@ -1,0 +1,10 @@
+{
+  "name": "pipeline",
+  "version": "0.1.0",
+  "description": "Plan, review and implement features: the feature and bug-fix commands, the devils-advocate reviewer, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents.",
+  "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
+  "repository": "https://github.com/hryvinskyi/claude-kit",
+  "license": "MIT",
+  "keywords": ["planning", "code-review", "agents", "evals", "tdd"],
+  "dependencies": ["architecture"]
+}

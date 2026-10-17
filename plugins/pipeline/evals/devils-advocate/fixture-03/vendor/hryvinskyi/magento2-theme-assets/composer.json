@@ -1,0 +1,30 @@
+{
+    "name": "hryvinskyi/magento2-theme-assets",
+    "version": "1.0.1",
+    "description": "Provides asset rendering functionality for scripts, stylesheets and asset path resolution",
+    "type": "magento2-module",
+    "require": {
+        "php": "^8.1",
+        "magento/framework": "*",
+        "hryvinskyi/magento2-head-tag-manager": "*"
+    },
+    "require-dev": {
+        "roave/security-advisories": "dev-latest"
+    },
+    "authors": [
+        {
+            "name": "Volodymyr Hryvinskyi"
+        }
+    ],
+    "license": [
+        "MIT"
+    ],
+    "autoload": {
+        "files": [
+            "registration.php"
+        ],
+        "psr-4": {
+            "Hryvinskyi\\ThemeAssets\\": ""
+        }
+    }
+}

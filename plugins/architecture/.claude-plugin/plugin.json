@@ -1,0 +1,9 @@
+{
+  "name": "architecture",
+  "version": "0.1.0",
+  "description": "Clean Architecture, SOLID and DDD rubrics for PHP (Symfony, Magento 2) and JavaScript/TypeScript, with an implementer's cut and stack references.",
+  "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
+  "repository": "https://github.com/hryvinskyi/claude-kit",
+  "license": "MIT",
+  "keywords": ["architecture", "clean-architecture", "solid", "ddd", "php", "symfony", "magento", "typescript", "react"]
+}

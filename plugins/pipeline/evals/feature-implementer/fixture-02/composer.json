@@ -1,0 +1,19 @@
+{
+    "name": "acme/store",
+    "description": "Eval fixture — Magento 2 store with TypeScript storefront widgets",
+    "type": "project",
+    "authors": [
+        {
+            "name": "Acme Developers",
+            "email": "dev@example.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.3",
+        "magento/framework": "*"
+    },
+    "scripts": {
+        "phpstan": "phpstan analyse --level=10 app/code",
+        "test": "phpunit"
+    }
+}

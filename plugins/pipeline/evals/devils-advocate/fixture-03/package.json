@@ -1,0 +1,14 @@
+{
+  "name": "acme-store-storefront",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build/esbuild.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:js": "node --test 'app/code/*/*/Test/Js/*.test.ts'"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  }
+}
