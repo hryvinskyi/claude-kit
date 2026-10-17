@@ -17,7 +17,10 @@ rules (`CLAUDE.md`/`AGENTS.md`, its gates, its layout) and follows them.
 `pipeline` depends on `architecture` (its agents load the rubric before they write code), and so
 does each stack plugin. The dependency is declared in the manifests, so Claude Code installs and
 enables `architecture` along with any of them. A stack plugin does not depend on `guards`: without
-it, the stack's skills load but nothing is gated.
+it, the stack's skills load but nothing is gated. The other way round, `guards` with no stack plugin
+gates by the core rules alone and cannot tell a server-rendered PHP application from a React app: on a
+Symfony project whose `package.json` depends on React, every JS/TS file needs `react.md`, a Stimulus
+controller included. Enable the project's stack plugin as well to get its rules.
 
 ## Install
 
@@ -31,15 +34,21 @@ git clone https://github.com/hryvinskyi/claude-kit.git ~/.local/share/claude-kit
 
 `install.sh` writes the command shims (below), runs `npm ci` in `plugins/board-queue` (skip it with
 `--skip-npm`), adds the clone as a local-directory marketplace and installs and enables the plugins
-at user scope (all of them, or `--plugins architecture,pipeline,…`), imports the engineering
-standards into your user `CLAUDE.md`, and writes `${XDG_CONFIG_HOME:-~/.config}/claude-kit/policies.toml`
-with every policy at its default when there is none. It needs `git`, `python3` 3.9 or newer, the
-`claude` command, and Node 26 or newer with `npm` when `board-queue` is among the plugins. It is
-idempotent: a second run changes nothing, and anything it did not write that stands in its way —
-a file at a shim's path, a marketplace of the same name from another place, standards written into
-your `CLAUDE.md` by hand — is refused and named, never overwritten. `--check` exits 1 when something
-is missing and 2 when a step is refused. It works on the profile the `claude` command uses
-(`CLAUDE_CONFIG_DIR` when that is set).
+at user scope (which ones: below), imports the engineering standards into your user `CLAUDE.md`, and
+writes `${XDG_CONFIG_HOME:-~/.config}/claude-kit/policies.toml` with every policy at its default when
+there is none. It needs `git`, `python3` 3.9 or newer, the `claude` command, and Node 26 or newer
+with `npm` when `board-queue` is among the plugins. It is idempotent: a second run changes nothing,
+and anything it did not write that stands in its way — a file at a shim's path, a marketplace of the
+same name from another place, standards written into your `CLAUDE.md` by hand — is refused and
+named, never overwritten. `--check` exits 1 when something is missing and 2 when a step is
+refused. It works on the profile the `claude` command uses (`CLAUDE_CONFIG_DIR` when that is set).
+
+Which plugins: by default every plugin of the marketplace except the stack plugins (a stack plugin
+is one that ships a `stack.json`), so a project gets no framework's idiom it does not run on. The
+installer names the stack plugins it left out; `--stack symfony` (or `--stack magento2`, or both,
+comma-separated) adds the one your project runs on, and the standards import then covers that stack
+plugin's standards file too. `--plugins architecture,pipeline,…` names the exact list instead and
+overrides both; a stack plugin in that list gets its standards import, one left out gets none.
 
 Or by hand, from GitHub:
 
@@ -49,6 +58,7 @@ claude plugin install architecture@claude-kit
 claude plugin install pipeline@claude-kit
 claude plugin install qa@claude-kit
 claude plugin install guards@claude-kit
+claude plugin install symfony@claude-kit      # the stack plugin of your project, if there is one
 ```
 
 Or from a local clone, which is also how you work on the plugins:

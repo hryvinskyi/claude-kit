@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 KIT = Path(__file__).resolve().parent.parent
 FAKES = Path(__file__).resolve().parent / "fakes"
 PLUGINS = ["architecture", "pipeline", "qa", "guards", "vault", "board-queue"]
+STACK_PLUGINS = ["symfony", "magento2"]
 SHIMS = ["board-queue", "board-queue-mcp", "find-vault", "vault-check", "vault-capture", "vault-search", "vault-merge"]
 
 NPM = """#!/bin/sh
@@ -107,6 +108,10 @@ class InstallTests(unittest.TestCase):
     def policy_file(self) -> Path:
         return self.home / ".config" / "claude-kit" / "policies.toml"
 
+    def memory(self) -> str:
+        path = self.home / ".claude" / "CLAUDE.md"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
     def test_a_check_in_a_fresh_home_reports_every_step_and_writes_nothing(self) -> None:
         done = self.install("--check")
 
@@ -130,8 +135,10 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.enabled(), sorted("%s@claude-kit" % p for p in PLUGINS))
         self.assertIn(["plugin", "marketplace", "add", str(self.clone), "--scope", "user"], self.claude_calls())
         self.assertIn(["plugin", "install", "board-queue@claude-kit", "--scope", "user"], self.claude_calls())
-        memory = (self.home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        memory = self.memory()
         self.assertEqual(memory.count("CLAUDE.standards.md"), 1)
+        for stack in STACK_PLUGINS:
+            self.assertNotIn("CLAUDE.standards.%s.md" % stack, memory)
         policies = self.policy_file().read_text(encoding="utf-8")
         self.assertIn("forbid_assistant_commit_trailers = false\n", policies)
         self.assertIn("github_rest_only = false\n", policies)
@@ -149,6 +156,80 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(self.npm_log.exists())
         self.assertEqual(snapshot(self.home), home_after)
         self.assertEqual(snapshot(self.clone), kit_after)
+
+    def test_no_stack_plugin_is_enabled_by_default_and_the_way_to_add_one_is_printed(self) -> None:
+        checked = self.install("--check")
+        done = self.install()
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for out in (checked.stdout, done.stdout):
+            self.assertIn("stack plugins not enabled: symfony magento2 (add the one your project runs on with --stack NAME)", out)
+        for stack in STACK_PLUGINS:
+            self.assertNotIn("%s@claude-kit" % stack, self.enabled())
+            self.assertFalse(any("%s@claude-kit" % stack in call for call in self.mutating_calls()), stack)
+
+    def test_a_named_stack_is_enabled_with_its_standards_and_the_other_is_not(self) -> None:
+        checked = self.install("--check", "--stack", "symfony")
+        done = self.install("--stack", "symfony")
+
+        self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+        self.assertIn("would install and enable symfony@claude-kit", checked.stdout)
+        self.assertIn("would add @%s" % (self.clone / "plugins" / "symfony" / "standards" / "CLAUDE.standards.symfony.md"),
+                      checked.stdout)
+        self.assertNotIn("magento2@claude-kit", checked.stdout)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.enabled(), sorted("%s@claude-kit" % p for p in PLUGINS + ["symfony"]))
+        self.assertIn("stack plugins not enabled: magento2", done.stdout)
+        memory = self.memory()
+        self.assertEqual(memory.count("CLAUDE.standards.md"), 1)
+        self.assertEqual(memory.count("CLAUDE.standards.symfony.md"), 1)
+        self.assertNotIn("CLAUDE.standards.magento2.md", memory)
+
+        again = self.install("--check", "--stack", "symfony")
+
+        self.assertEqual(again.returncode, 0, again.stdout)
+        self.assertIn("imports @%s" % (self.clone / "plugins" / "symfony" / "standards" / "CLAUDE.standards.symfony.md"),
+                      again.stdout)
+
+    def test_both_stacks_can_be_named(self) -> None:
+        done = self.install("--stack", "symfony,magento2")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.enabled(), sorted("%s@claude-kit" % p for p in PLUGINS + STACK_PLUGINS))
+        self.assertNotIn("stack plugins not enabled", done.stdout)
+        memory = self.memory()
+        for stack in STACK_PLUGINS:
+            self.assertEqual(memory.count("CLAUDE.standards.%s.md" % stack), 1, stack)
+
+    def test_a_stack_the_marketplace_does_not_have_is_refused(self) -> None:
+        for name in ("nonesuch", "pipeline"):
+            done = self.install("--stack", name)
+
+            self.assertEqual(done.returncode, 2, name)
+            self.assertIn("no stack plugin is named %s (stack plugins: symfony magento2)" % name, done.stderr)
+        self.assertEqual(self.claude_calls(), [])
+        self.assertEqual(self.memory(), "")
+
+    def test_plugins_without_a_stack_import_no_stack_standards(self) -> None:
+        done = self.install("--plugins", "architecture,guards", "--skip-npm")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.enabled(), ["architecture@claude-kit", "guards@claude-kit"])
+        memory = self.memory()
+        self.assertEqual(memory.count("CLAUDE.standards.md"), 1)
+        for stack in STACK_PLUGINS:
+            self.assertNotIn("CLAUDE.standards.%s.md" % stack, memory)
+
+    def test_plugins_naming_a_stack_import_its_standards(self) -> None:
+        done = self.install("--plugins", "architecture,magento2", "--stack", "symfony")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("--stack is left aside", done.stderr)
+        self.assertNotIn("stack plugins not enabled", done.stdout)
+        self.assertEqual(self.enabled(), ["architecture@claude-kit", "magento2@claude-kit"])
+        memory = self.memory()
+        self.assertEqual(memory.count("CLAUDE.standards.magento2.md"), 1)
+        self.assertNotIn("CLAUDE.standards.symfony.md", memory)
 
     def test_a_policy_file_that_exists_is_never_overwritten(self) -> None:
         self.policy_file().parent.mkdir(parents=True)

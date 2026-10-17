@@ -7,8 +7,13 @@
 #   ./install.sh                  install, or bring an earlier install up to date
 #   ./install.sh --check          report every step and change nothing; exit 1 when something is
 #                                 missing, 2 when a step is refused
-#   --plugins a,b,...             the plugins to enable (default: every plugin the marketplace lists)
+#   --stack a,b,...               also enable these stack plugins (a stack plugin ships a stack.json)
+#   --plugins a,b,...             the plugins to enable, exactly; overrides the default and --stack
 #   --skip-npm                    leave the board queue's dependencies alone
+#
+# By default every plugin the marketplace lists is enabled except the stack plugins, which add one
+# framework's idiom each and are enabled only by name. The standards import covers the standards
+# file of each stack plugin that ends up enabled.
 #
 # The Claude Code profile is the one the `claude` command uses (CLAUDE_CONFIG_DIR when it is set).
 # Idempotent: a run that finds every step done changes nothing. A step that finds something it
@@ -28,13 +33,16 @@ MIN_NODE=26
 MODE=apply
 SKIP_NPM=0
 PLUGINS_ARG=""
+STACK_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE=check ;;
     --skip-npm) SKIP_NPM=1 ;;
     --plugins) [ $# -ge 2 ] || { echo "--plugins needs a comma-separated list" >&2; exit 2; }; PLUGINS_ARG="$2"; shift ;;
     --plugins=*) PLUGINS_ARG="${1#--plugins=}" ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    --stack) [ $# -ge 2 ] || { echo "--stack needs a comma-separated list" >&2; exit 2; }; STACK_ARG="$2"; shift ;;
+    --stack=*) STACK_ARG="${1#--stack=}" ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -50,15 +58,22 @@ step() { printf '\n== %s\n' "$*"; }
 indent() { sed 's/^/        /'; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# The marketplace's own name and its plugins, from its manifest.
+# The marketplace's own name, its plugins, or those of its plugins that are stack plugins (one that
+# ships a stack.json beside its manifest), from its manifest.
 manifest() {
   python3 -I - "$MARKETPLACE_FILE" "$1" <<'EOF'
-import json, sys
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-if sys.argv[2] == "name":
+import json, os, sys
+path, what = sys.argv[1], sys.argv[2]
+data = json.load(open(path, encoding="utf-8"))
+root = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+if what == "name":
     print(data["name"])
 else:
-    print("\n".join(p["name"] for p in data.get("plugins", [])))
+    for plugin in data.get("plugins", []):
+        source = plugin.get("source")
+        is_stack = isinstance(source, str) and os.path.isfile(os.path.join(root, source, "stack.json"))
+        if what == "plugins" or is_stack:
+            print(plugin["name"])
 EOF
 }
 
@@ -240,22 +255,44 @@ step_plugins() {
   done
 }
 
+# The importer's --stack argument: each enabled stack plugin that ships a standards file.
+standards_args() {
+  local stack list=""
+  for stack in ${ENABLED_STACKS[@]+"${ENABLED_STACKS[@]}"}; do
+    [ -f "$CLONE/plugins/$stack/standards/CLAUDE.standards.$stack.md" ] && list="${list:+$list,}$stack"
+  done
+  [ -z "$list" ] || printf '%s\n' --stack "$list"
+}
+
 step_standards() {
   step "Engineering standards in the user CLAUDE.md"
-  local out state target line
-  out="$(python3 -I "$IMPORTER" --check 2>&1)" || true
-  state="${out%% *}"
-  # "<state> <CLAUDE.md>: <detail>"; the file name ends at its first colon.
+  local out args=() lines target index=0 line state absent=0 refused=0
+  while IFS= read -r line; do args+=("$line"); done < <(standards_args)
+  if ! lines="$(python3 -I "$IMPORTER" --print-line ${args[@]+"${args[@]}"} 2>&1)"; then
+    printf '%s\n' "$lines" | indent; bad "a standards file of this clone is missing"; return
+  fi
+  out="$(python3 -I "$IMPORTER" --check ${args[@]+"${args[@]}"} 2>&1)" || true
+  # One "<state> <CLAUDE.md>: <detail>" line per import line, in the same order; the file name ends
+  # at its first colon.
   target="$(printf '%s\n' "$out" | sed -n '1s/^[a-z]* *\([^:]*\): .*$/\1/p')"
-  line="$(python3 -I "$IMPORTER" --print-line)"
-  case "$state" in
-    present) ok "$target imports $line" ;;
-    absent)
-      if [ "$MODE" = check ]; then todo "would add $line to $target"; return; fi
-      if out="$(python3 -I "$IMPORTER" 2>&1)"; then ok "added $line to $target"
-      else printf '%s\n' "$out" | indent; bad "the import could not be added to $target"; fi ;;
-    *) printf '%s\n' "$out" | indent; bad "$target cannot take the import as it is; see above" ;;
-  esac
+  while IFS= read -r line; do
+    index=$((index + 1))
+    state="$(printf '%s\n' "$out" | sed -n "${index}p")"
+    case "${state%% *}" in
+      present) ok "$target imports $line" ;;
+      absent) absent=1; [ "$MODE" = apply ] || todo "would add $line to $target" ;;
+      *) refused=1 ;;
+    esac
+  done <<<"$lines"
+  if [ "$refused" -ne 0 ]; then
+    printf '%s\n' "$out" | indent; bad "${target:-the user CLAUDE.md} cannot take the import as it is; see above"; return
+  fi
+  [ "$absent" -eq 1 ] && [ "$MODE" = apply ] || return 0
+  if out="$(python3 -I "$IMPORTER" ${args[@]+"${args[@]}"} 2>&1)"; then
+    printf '%s\n' "$out" | sed -n 's/^added *\([^:]*\): \(.*\)$/  ok    added \2 to \1/p'
+  else
+    printf '%s\n' "$out" | indent; bad "the import could not be added to $target"
+  fi
 }
 
 policy_file() {
@@ -303,8 +340,12 @@ have python3 || { echo "python3 is not installed ($MIN_PYTHON or newer)" >&2; ex
 MARKETPLACE="$(manifest name)"
 LISTED=()
 while IFS= read -r name; do [ -n "$name" ] && LISTED+=("$name"); done < <(manifest plugins)
+STACKS=()
+while IFS= read -r name; do [ -n "$name" ] && STACKS+=("$name"); done < <(manifest stacks)
+is_stack() { case " ${STACKS[*]:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 PLUGINS=()
 if [ -n "$PLUGINS_ARG" ]; then
+  [ -z "$STACK_ARG" ] || echo "--stack is left aside: --plugins names every plugin to enable" >&2
   IFS=, read -r -a REQUESTED <<<"$PLUGINS_ARG"
   for name in ${REQUESTED[@]+"${REQUESTED[@]}"}; do
     [ -n "$name" ] || continue
@@ -314,12 +355,27 @@ if [ -n "$PLUGINS_ARG" ]; then
     esac
   done
 else
-  PLUGINS=(${LISTED[@]+"${LISTED[@]}"})
+  for name in ${LISTED[@]+"${LISTED[@]}"}; do is_stack "$name" || PLUGINS+=("$name"); done
+  IFS=, read -r -a REQUESTED <<<"$STACK_ARG"
+  for name in ${REQUESTED[@]+"${REQUESTED[@]}"}; do
+    [ -n "$name" ] || continue
+    is_stack "$name" || { echo "no stack plugin is named $name (stack plugins: ${STACKS[*]:-none})" >&2; exit 2; }
+    case " ${PLUGINS[*]:-} " in *" $name "*) ;; *) PLUGINS+=("$name") ;; esac
+  done
 fi
+ENABLED_STACKS=()
+LEFT_OUT=()
+for name in ${STACKS[@]+"${STACKS[@]}"}; do
+  case " ${PLUGINS[*]:-} " in *" $name "*) ENABLED_STACKS+=("$name") ;; *) LEFT_OUT+=("$name") ;; esac
+done
 [ "${#PLUGINS[@]}" -gt 0 ] || { echo "no plugin to enable" >&2; exit 2; }
 WITH_BOARD_QUEUE=0
 case " ${PLUGINS[*]} " in *" board-queue "*) WITH_BOARD_QUEUE=1 ;; esac
 printf 'marketplace: %s\nplugins: %s\n' "$MARKETPLACE" "${PLUGINS[*]}"
+# An explicit --plugins list is the person's whole choice; the hint is for the default.
+if [ -z "$PLUGINS_ARG" ] && [ "${#LEFT_OUT[@]}" -gt 0 ]; then
+  printf 'stack plugins not enabled: %s (add the one your project runs on with --stack NAME)\n' "${LEFT_OUT[*]}"
+fi
 
 for each in "${STEPS[@]}"; do
   "$each"
