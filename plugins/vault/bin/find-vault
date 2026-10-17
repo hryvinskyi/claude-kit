@@ -1,0 +1,10 @@
+#!/bin/sh
+# find-vault [project-root] — the vault resolver as a command; see find-vault.sh beside it.
+# Its own directory, through any links that lead here.
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in /*) SELF=$LINK ;; *) SELF=$(dirname "$SELF")/$LINK ;; esac
+done
+HERE=$(cd "$(dirname "$SELF")" && pwd)
+exec "$HERE/find-vault.sh" "$@"

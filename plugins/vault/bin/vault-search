@@ -1,0 +1,10 @@
+#!/bin/sh
+# vault-search ensure|refresh [--root DIR] — the vault's search index; see vault_search.py beside it.
+# Its own directory, through any links that lead here.
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in /*) SELF=$LINK ;; *) SELF=$(dirname "$SELF")/$LINK ;; esac
+done
+HERE=$(cd "$(dirname "$SELF")" && pwd)
+exec python3 "$HERE/vault_search.py" "$@"

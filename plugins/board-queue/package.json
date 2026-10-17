@@ -1,0 +1,24 @@
+{
+  "name": "board-queue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Durable queue and single writer for shared GitHub Projects boards",
+  "scripts": {
+    "test": "node --test 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "mcp": "node bin/board-queue-mcp.ts",
+    "cli": "node bin/board-queue.ts"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "typescript": "^5.9.3"
+  }
+}

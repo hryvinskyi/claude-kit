@@ -4,7 +4,7 @@
     "name": "Volodymyr Hryvinskyi",
     "url": "https://github.com/hryvinskyi"
   },
-  "description": "Project-agnostic Claude Code plugins: architecture rubrics, a plan-review-implement pipeline with agent evals, QA skills, and guard hooks.",
+  "description": "Project-agnostic Claude Code plugins: architecture rubrics, a plan-review-implement pipeline with agent evals, QA skills, guard hooks, a project knowledge vault, and a paced queue for GitHub Projects boards.",
   "plugins": [
     {
       "name": "architecture",
@@ -25,6 +25,16 @@
       "name": "guards",
       "source": "./plugins/guards",
       "description": "Guard hooks: refuse catastrophic shell commands, source and plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and edits inside generated regions; lint edited PHP. Personal policies are read from one TOML file."
+    },
+    {
+"name": "vault",
+      "source": "./plugins/vault",
+      "description": "A project knowledge vault kept beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index, and the decision, journal, todo and wiki-sync commands with a wiki-updater agent."
+    },
+    {
+      "name": "board-queue",
+      "source": "./plugins/board-queue",
+      "description": "A durable queue and single writer for shared GitHub Projects boards: sessions and scripts file field changes, comments and closes; one scheduled worker per person applies them within the GraphQL allowance and reads every row back."
     }
   ]
 }

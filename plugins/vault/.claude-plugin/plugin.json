@@ -1,0 +1,9 @@
+{
+  "name": "vault",
+  "version": "0.1.0",
+  "description": "A project knowledge vault kept beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index, and the decision, journal, todo and wiki-sync commands with a wiki-updater agent.",
+  "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
+  "repository": "https://github.com/hryvinskyi/claude-kit",
+  "license": "MIT",
+  "keywords": ["knowledge-base", "obsidian", "decisions", "journal", "documentation"]
+}
