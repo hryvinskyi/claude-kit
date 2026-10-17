@@ -1,4 +1,4 @@
-# SOLID in PHP (Symfony & Magento 2)
+# SOLID in PHP
 
 The five principles are the class-level mechanics that make the dependency rule (`clean-architecture.md`) and DDD (`ddd.md`) hold. **DIP** is the load-bearing one — it is how every boundary is crossed. Diagnose in this order when reviewing: DIP → SRP → OCP → ISP → LSP.
 
@@ -119,34 +119,7 @@ final class ShippingCostCalculator
 }
 ```
 
-**Wire the collection so new strategies register themselves (from any module):**
-
-Symfony — tag the interface, inject a tagged iterator (`#[AutoconfigureTag]`):
-```php
-#[AutoconfigureTag('acme.shipping_rate')]
-interface ShippingRate { /* ... */ }
-```
-```yaml
-# services.yaml — a new module drops in a class implementing ShippingRate; it auto-joins the pool
-services:
-    _instanceof:
-        Acme\Shipping\Api\ShippingRate:
-            tags: ['acme.shipping_rate']
-    Acme\Shipping\Model\ShippingCostCalculator:
-        arguments: [!tagged_iterator acme.shipping_rate]
-```
-
-Magento 2 — inject a pool/array via `di.xml` (add an `<item>` to extend, no code edit to the resolver):
-```xml
-<type name="Acme\Shipping\Model\ShippingCostCalculator">
-    <arguments>
-        <argument name="rates" xsi:type="array">
-            <item name="flat"   xsi:type="object">Acme\Shipping\Model\Rate\FlatRate</item>
-            <item name="weight" xsi:type="object">Acme\Shipping\Model\Rate\WeightRate</item>
-        </argument>
-    </arguments>
-</type>
-```
+**Wire the collection so new strategies register themselves (from any module):** the container collects every implementation of the interface — by a tag on the interface, or by a pool argument a module adds an item to — and injects the collection into the resolver. A new module drops in a class implementing `ShippingRate` and it joins the pool; nothing in the resolver is edited. The stack skill shows its framework's form.
 
 **For pure value→value mapping** (no behavior), a `match` or a lookup array is fine and preferred — it is not the anti-pattern:
 ```php
@@ -154,7 +127,7 @@ $symbol = match ($currency->code()) { 'USD' => '$', 'EUR' => '€', 'GBP' => '£
 ```
 The smell is specifically **selecting behavior by type** through `switch`/`elseif`. Sequential validation reads best as **guard clauses** (`if (...) { throw; }` / early `return`) — never an `if/else if/else` ladder.
 
-**Other OCP extension points:** Symfony compiler-pass/tagged services, event subscribers; Magento plugins & `events.xml` observers. Prefer adding a tagged strategy over an `around` plugin — plugins are powerful but obscure control flow (see `magento2.md`).
+**Other OCP extension points:** services collected at container build time, event subscribers and observers, method interception. Prefer adding a tagged strategy over intercepting a method — interception is powerful but obscures control flow. The stack skill names its framework's mechanisms.
 
 **Review cue:** grep the blast radius for `switch`, `elseif`, `else if`, and `instanceof` ladders. Each behavioral one is debt to convert to an injected strategy (mandatory in-scope — see `SKILL.md` Plan mode).
 
@@ -189,7 +162,7 @@ interface ProductWriter { public function save(Product $product): void; }
 
 final class CatalogCache implements ProductReader { /* only reads — honest */ }
 ```
-**Review cue:** a subtype whose method throws "not supported", ignores an argument the base honors, or narrows accepted input, is an LSP break. The fix is usually ISP (below). Magento: a plugin that changes a public method's documented contract for some callers is an LSP hazard.
+**Review cue:** a subtype whose method throws "not supported", ignores an argument the base honors, or narrows accepted input, is an LSP break. The fix is usually ISP (below). An interceptor that changes a public method's documented contract for some callers is an LSP hazard too.
 
 ---
 
@@ -212,7 +185,7 @@ interface OrderRepositoryInterface
 interface OrderReader { public function get(OrderId $id): Order; }
 interface OrderStore  { public function save(Order $order): void; }
 ```
-In a modular monolith, build tagged/pluggable systems by putting the **narrow** capability interface under `Api/` and tagging it — a consumer depends on exactly that role. Magento's Service Contracts are deliberately split (`OrderRepositoryInterface` vs `OrderManagementInterface`) for the same reason.
+In a modular monolith, build tagged/pluggable systems by putting the **narrow** capability interface under `Api/` and tagging it — a consumer depends on exactly that role. A repository contract and a management contract for the same aggregate are split for the same reason.
 
 **Review cue:** an interface where implementations leave methods empty / throwing, or where most callers use one method, wants segregation.
 
@@ -228,7 +201,7 @@ final class RegisterUser
 {
     public function handle(string $email): void
     {
-        $mailer = new SymfonyMailer(/* transport */);       // concrete, un-swappable, un-testable
+        $mailer = new SmtpMailer(/* transport */);          // concrete, un-swappable, un-testable
         $mailer->send(/* welcome */);
     }
 }
@@ -243,9 +216,9 @@ final class RegisterUser
     public function handle(EmailAddress $email): void { /* ... */ $this->mailer->welcome($email); }
 }
 ```
-Wiring makes it real — Symfony `services.yaml` alias / autowire by interface; Magento `di.xml` `<preference>`. In tests you inject a fake `WelcomeMailer`; in prod, the real adapter. That swap is the proof DIP is satisfied. (Full boundary mechanics: `clean-architecture.md` §3, §5.)
+Wiring makes it real — the container binds the interface to the adapter (the stack skill's form). In tests you inject a fake `WelcomeMailer`; in prod, the real adapter. That swap is the proof DIP is satisfied. (Full boundary mechanics: `clean-architecture.md` §3, §5.)
 
-**Review cue:** any `new` of an infrastructure class, a static call to a framework service, or an `ObjectManager::get()` inside domain/application code is a DIP violation. Inject an interface instead.
+**Review cue:** any `new` of an infrastructure class, a static call to a framework service, or a service-locator call (`$container->get()`, the framework's object manager) inside domain/application code is a DIP violation. Inject an interface instead.
 
 ### No `new` — the container creates every object (DIP at every call site)
 
@@ -255,34 +228,37 @@ one of two shapes:
 - **a factory**, an injected `…FactoryInterface`, when a genuinely new instance is needed (a message with
   parameters, an entity being created, a value built from runtime data).
 
-**A factory is an interface; the container writes its implementation, never a person.** Magento
-generates a `…Factory` for any class, and its `create()` asks the ObjectManager. Symfony ships no
-generator: use the compile-time mechanism the project has, which its own docs name (`symfony.md` §10).
-If the project has none, that is a plan decision, not a licence to hand-write `new`.
+**A factory is an interface; the container writes its implementation, never a person.** How the
+container generates it is the framework's: the stack skill names the mechanism, or the project's own
+docs do. If the project has none, that is a plan decision, not a licence to hand-write `new`.
 **A factory method only creates**: one object per method, from its arguments, no computation. Whatever
 computes those arguments is a service or the value itself.
 **Exempt:** `throw new …Exception`, attribute metadata (`#[Assert\All([new Assert\NotBlank()])]`),
 **tests**, and the **composition root**: the one place that builds the container, before any exists
-(`new Kernel(...)` in the front controller or `bin/console`, Magento's bootstrap). It is not wiring code in general.
+(the front controller or console entry point that boots the kernel). It is not wiring code in general.
 
 A static named constructor that does `new self(...)` is still `new`: the caller is bound to the concrete
 class, and nothing can be substituted for it. It is not the clean alternative.
 
+The example below uses neutral names: `TranslatableText` stands for the framework's concrete
+translatable-message class, `TranslatableTextInterface` for its contract, and `flash()` for a
+controller base class's free-string notice channel. The stack skill gives its framework's names.
+
 ```php
 // ❌ The caller builds a concrete framework value from literals; the helper takes the concrete class
-$this->flashErrors($errors, new TranslatableMessage('catalog.attribute_group.created', [], 'catalog'));
+$this->flashErrors($errors, new TranslatableText('catalog.attribute_group.created', [], 'catalog'));
 
-private function flashErrors(array $errors, TranslatableMessage $success): void   // concrete, not the contract
+private function flashErrors(array $errors, TranslatableText $success): void      // concrete, not the contract
 {
-    if ($errors !== []) { $this->addFlash('error', $errors[0]); return; }         // free-string channel, mixed payload
-    $this->addFlash('success', $success);
+    if ($errors !== []) { $this->flash('error', $errors[0]); return; }            // free-string channel, mixed payload
+    $this->flash('success', $success);
 }
 
 // ❌ Also wrong: a named constructor hides the same `new`
 public static function groupCreated(): self { return new self('catalog.attribute_group.created'); }
 
 // ❌ Also wrong: a hand-written factory moves the `new`, it does not remove it
-public function groupCreated(): TranslatableInterface { return new TranslatableMessage('catalog.attribute_group.created', [], 'catalog'); }
+public function groupCreated(): TranslatableTextInterface { return new TranslatableText('catalog.attribute_group.created', [], 'catalog'); }
 ```
 
 ```php
@@ -292,31 +268,31 @@ final class AttributeNotices implements AttributeNoticesInterface
 {
     private const DOMAIN = 'catalog';
 
-    public function __construct(private readonly TranslatableMessageFactoryInterface $messages) {}
+    public function __construct(private readonly TranslatableTextFactoryInterface $messages) {}
 
-    public function groupCreated(): TranslatableInterface
+    public function groupCreated(): TranslatableTextInterface
     {
         return $this->messages->create('catalog.attribute_group.created', [], self::DOMAIN);
     }
 
-    public function codeTaken(string $code): TranslatableInterface
+    public function codeTaken(string $code): TranslatableTextInterface
     {
         return $this->messages->create('catalog.attribute_group.code_taken', ['%code%' => $code], self::DOMAIN);
     }
 }
 
 // The factory is only this interface; the container generates its implementation.
-interface TranslatableMessageFactoryInterface
+interface TranslatableTextFactoryInterface
 {
     /** @param array<string, string> $parameters */
-    public function create(string $message, array $parameters = [], ?string $domain = null): TranslatableInterface;
+    public function create(string $message, array $parameters = [], ?string $domain = null): TranslatableTextInterface;
 }
 
 // Api of the module that renders notices: it owns the channel's port, typed, no `mixed`
 interface NoticesInterface
 {
-    public function success(TranslatableInterface $sentence): void;
-    public function error(TranslatableInterface $sentence): void;
+    public function success(TranslatableTextInterface $sentence): void;
+    public function error(TranslatableTextInterface $sentence): void;
 }
 
 // controller: translate the request, delegate, tell. No `new`, no literal, no concrete type.
@@ -333,7 +309,7 @@ Four smells, one fix:
 - a side channel typed `(string, mixed)`.
 
 **Review cue:** in any touched file, a `new` of a class is a finding, other than `throw new`, attribute
-metadata, tests and the composition root. That includes a hand-written factory. A parameter typed on a concrete framework class is a finding too, and so is `addFlash(`/`->add('success'`.
+metadata, tests and the composition root. That includes a hand-written factory. A parameter typed on a concrete framework class is a finding too, and so is a call to the free-string notice channel (the stack skill spells it).
 Plan them out; don't copy them. The whole touched file is in scope.
 
 ---
@@ -344,13 +320,13 @@ Run these over the blast radius before the reading pass, in the diagnosis order 
 
 | Principle | Search | Cleared when |
 |---|---|---|
-| DIP | `new \\?(\w+\\)*\w*(Client\|Mailer\|Filesystem\|Repository)\(\|new \\?PDO\(` outside `Infrastructure/`, `Repository/`, `DependencyInjection/` and tests | never in written code: the container builds such a client from its service definition (`services.yaml`, `di.xml`). (`Connection` is left out on purpose: it is as often the name of a value object as of a socket) |
-| DIP | `::getInstance\(\)\|ObjectManager::\|\bglobal \$\|\$GLOBALS` | never in domain or application code |
-| DIP | `(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(` over production code (`-P`, `-g '!**/tests/**'`) | the line is `throw new`, attribute metadata (`#[…(new …)]`), or the composition root: the one place that builds the container, before any exists (`new Kernel(...)` in the front controller or `bin/console`). The regex doesn't match `(object) []`, which is PHP's literal for an empty JSON object (`{}` in a schema or payload): it's acceptable for exactly that, never as a way around the rule for anything else. **Everything else is a finding**, a hand-written factory's `new` included: a `new` binds the caller to a concrete class, and so does a named constructor's `new self`/`new static`. Objects come from the container, as a service or from a factory interface it implements |
+| DIP | `new \\?(\w+\\)*\w*(Client\|Mailer\|Filesystem\|Repository)\(\|new \\?PDO\(` outside `Infrastructure/`, `Repository/`, `DependencyInjection/` and tests | never in written code: the container builds such a client from its service definition. (`Connection` is left out on purpose: it is as often the name of a value object as of a socket) |
+| DIP | `::getInstance\(\)\|\bglobal \$\|\$GLOBALS`, plus the framework's service locator (the stack skill's row) | never in domain or application code |
+| DIP | `(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(` over production code (`-P`, `-g '!**/tests/**'`) | the line is `throw new`, attribute metadata (`#[…(new …)]`), or the composition root: the one place that builds the container, before any exists (the front controller or console entry point that boots the kernel). The regex doesn't match `(object) []`, which is PHP's literal for an empty JSON object (`{}` in a schema or payload): it's acceptable for exactly that, never as a way around the rule for anything else. **Everything else is a finding**, a hand-written factory's `new` included: a `new` binds the caller to a concrete class, and so does a named constructor's `new self`/`new static`. Objects come from the container, as a service or from a factory interface it implements |
 | DIP | `new \\?(\w+\\)*\w*(Message\|Response\|Email\|Envelope\|Notification\|Exception)\(\s*['"]` in `Controller/`, `Service/`, `Handler/` (`-P`) | never in written code. A framework value assembled from a string literal at a call site means the vocabulary (a translation key, a domain, a template id) has no owner and is repeated wherever it is used. The fix: one owner for the vocabulary, a service in the module with one method per value, which takes the object from an injected factory interface and returns the framework's *contract*. See §DIP *No `new` — the container creates every object* |
-| DIP | `function \w+\([^)]*\b(TranslatableMessage\|Translator\|EventDispatcher\|Session\|RequestStack\|Filesystem\|HttpClient)\b\s+\$` and the same types after `private readonly` (`-P`) | the framework ships no contract for it. A parameter or property typed on a concrete class when an interface exists (`TranslatableInterface`, `TranslatorInterface`, `EventDispatcherInterface`, `HttpClientInterface`) is a DIP break *inside the same file*, however small |
+| DIP | `function \w+\([^)]*\b(<concrete>)\b\s+\$` and the same types after `private readonly` (`-P`), where `<concrete>` is the alternation of the framework's concrete classes that have a contract (the stack skill's row spells it) | the framework ships no contract for it. A parameter or property typed on a concrete class when an interface exists (the translator's, the event dispatcher's, the HTTP client's) is a DIP break *inside the same file*, however small |
 | DIP | the same string literal as an argument at ≥3 call sites: `rg -o '\x27[a-z_]+\x27\)' <radius> \| sort \| uniq -c \| sort -rn` | a value→value map. A domain name, a channel name or a key prefix repeated across call sites is a concept with no owner. Give it one owner, and have the call sites ask that owner |
-| DIP | a framework base-class side channel called with a free string: `->addFlash\(\|->add\('(success\|error\|warning\|info)'` in `Controller/` | the project publishes no port for that channel yet. Then plan the port (a typed tone plus a typed sentence, owned by the module that shows it) rather than repeat the pattern. A `mixed` message parameter is how an exception's text reaches a person |
+| DIP | a framework base-class side channel called with a free string, in `Controller/` (the stack skill's row spells the call) | the project publishes no port for that channel yet. Then plan the port (a typed tone plus a typed sentence, owned by the module that shows it) rather than repeat the pattern. A `mixed` message parameter is how an exception's text reaches a person |
 | SRP | `class \w*(Helper\|Util\|Utils\|Manager\|Processor\|Handler)s?\b` | the name is the framework's (`MessageHandler`) and the class states one job without "and" |
 | SRP | `wc -l` over the radius, longest first; `rg -c 'private readonly' <file>` for constructor width | length alone proves nothing — above ~300 lines or ~7 collaborators, read for a second reason to change |
 | OCP | `\bswitch\s*\(\|\belse\s?if\b\|\belseif\b\|instanceof` | the branch maps value→value, is a guard clause with an early return, or narrows a type for the analyser. It is the smell only when each arm **does something different** for a `type`/`kind`/`method` |
@@ -367,4 +343,4 @@ A search that returns nothing clears only the spelling it looked for. SRP and LS
 - [ ] **OCP** — no `switch`/`elseif` behavioral dispatch; variants are injected strategies from a tagged collection/registry; `match`/maps only for value mapping.
 - [ ] **LSP** — no subtype throws "unsupported" or narrows a contract its supertype honors.
 - [ ] **ISP** — interfaces are role-sized; no implementation leaves methods empty/throwing.
-- [ ] **DIP** — inner code depends only on interfaces it owns; no `new`/static/`ObjectManager` reach for infrastructure; the container wires each port.
+- [ ] **DIP** — inner code depends only on interfaces it owns; no `new`/static/service-locator reach for infrastructure; the container wires each port.

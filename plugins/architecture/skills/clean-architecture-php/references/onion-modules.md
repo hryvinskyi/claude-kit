@@ -1,6 +1,6 @@
 # Onion Architecture — the module graph as rings
 
-Jeffrey Palermo's onion draws the same dependency rule as Clean Architecture — all coupling points toward the center — but this file applies it at a different altitude: **the module graph of a modular monolith is itself an onion.** Inside one module the rings order layers (`clean-architecture.md`); across modules they order the packages. Every rule below holds for Symfony local packages (`packages/{module}/`) and Magento modules (`Vendor_Module`) alike.
+Jeffrey Palermo's onion draws the same dependency rule as Clean Architecture — all coupling points toward the center — but this file applies it at a different altitude: **the module graph of a modular monolith is itself an onion.** Inside one module the rings order layers (`clean-architecture.md`); across modules they order the packages. Every rule below holds for local Composer packages (`packages/{module}/`) and for a framework's own module unit alike.
 
 ## 1. Rings at module altitude
 
@@ -27,8 +27,8 @@ Jeffrey Palermo's onion draws the same dependency rule as Clean Architecture —
 
 Three structural rules fall out:
 
-1. **Inward only.** A module depends only on the *public surfaces* (`Api/`, events, contracts) of modules in rings strictly inside its own. A capability never names a feature; a feature never names a bridge; the direction of every `composer.json` require / `module.xml` sequence entry is inward.
-2. **Same ring → bridge one ring out.** Two neighbors on the same ring never learn about each other. When they must cooperate, a thin bridge package one ring outward depends on both. (Magento core models this: `Magento_CatalogInventory`, `Magento_GroupedProduct` are bridges over `Catalog`+`Inventory`, `Catalog`+`Sales`.)
+1. **Inward only.** A module depends only on the *public surfaces* (`Api/`, events, contracts) of modules in rings strictly inside its own. A capability never names a feature; a feature never names a bridge; the direction of every `composer.json` require, and of every entry in the framework's module manifest, is inward.
+2. **Same ring → bridge one ring out.** Two neighbors on the same ring never learn about each other. When they must cooperate, a thin bridge package one ring outward depends on both.
 3. **Bridges are leaves.** Nothing may depend on a bridge. The moment something *wants* to, the wanted thing is misplaced — it belongs in one of the modules the bridge connects, or in a new capability module one ring in.
 
 ## 2. A zone owns *all* of its artifacts — resources are dependencies
@@ -49,7 +49,7 @@ Everything that describes a zone ships **inside that zone's package**: source, `
 | Y's template/JS hard-codes X's route names or DOM ids | a rename inside X silently breaks Y |
 | A "shared" bridge that other packages started requiring | a capability module trapped on the wrong ring |
 
-**Vocabulary is a dependency too.** A module's source — code, docblocks, comments, templates, `di.xml` — names only modules, vendors and products it declares. *"Works around Acme One-Step Checkout's payment return"* in a module that does not depend on Acme One-Step Checkout is a sideways edge with zero imports: it rots when that checkout is replaced, and it tells the reader the module knows something it cannot know. Write the situation (*"a request that fires the success event without rendering a success page"*) and put the neighbour's name in the vault.
+**Vocabulary is a dependency too.** A module's source — code, docblocks, comments, templates, container configuration — names only modules, vendors and products it declares. *"Works around Acme One-Step Checkout's payment return"* in a module that does not depend on Acme One-Step Checkout is a sideways edge with zero imports: it rots when that checkout is replaced, and it tells the reader the module knows something it cannot know. Write the situation (*"a request that fires the success event without rendering a success page"*) and put the neighbour's name in the vault.
 
 ## 3. The parable — the refactor that didn't happen
 
@@ -91,7 +91,7 @@ The concept now exists twice — once configurable, once frozen — and the copi
 
 ```php
 // packages/llm/src/Api/LlmFeatureInterface.php  (inner ring publishes the extension point)
-#[AutoconfigureTag('llm.feature')]
+// tagged 'llm.feature': the container collects every implementation into the llm module's registry
 interface LlmFeatureInterface
 {
     public function key(): string;        // 'leads_copilot', 'livechat_assist'
@@ -156,8 +156,11 @@ The test: **the promoted contract must be defensible without naming its first co
 
 The inner module publishes a contract; outer modules contribute instances; the container assembles them. The inner ring iterates *contributions*, never *contributors*.
 
-- **Symfony** — `#[AutoconfigureTag]` on an inner `Api/` interface + `!tagged_iterator` (or a locator) in the inner service; per-package discovery passes that collect each package's own `config-schema.yaml`, routes, translations.
-- **Magento 2** — `di.xml` array/pool arguments into an inner composite; `system.xml` sections shipped per module; extension attributes on inner DTOs; observers on inner events.
+- **Contributions to a registry** — a tag on an inner `Api/` interface, or a pool argument of an inner composite, collected by the container; the inner service iterates the collection (or a locator).
+- **Contributions of resources** — per-package discovery that collects each package's own config schema, routes, translations and admin sections at build time.
+- **Contributions to data and events** — extension points on inner DTOs; listeners on inner events.
+
+The stack skill names its framework's mechanism for each.
 
 Litmus: delete any single outer package → the inner module still compiles, boots, and merely lists one fewer contribution.
 
@@ -181,11 +184,11 @@ deptrac:
 
 - **`composer.json` honesty** — each package requires only inward packages; the require graph *is* the ring diagram, so review it like code.
 - **Cycle detection** — a ruleset that allows any `Api`→`Api` edge is blind to a cycle assembled from two individually-legal edges; run SCC detection over the real reference graph as a separate gate. Break a would-be cycle with a consumer-owned port or a scalar-id de-association, never with a mutual `Api` edge.
-- **Magento** — `module.xml` `<sequence>` + `composer.json` mirror the same inward edges; `@api` marks the public surface; no tool checks resource ownership, so grep for your module's config paths/table names in *other* modules' `etc/` during review.
+- **The framework's module manifest** — where the framework declares module order as well, that manifest and `composer.json` mirror the same inward edges; `@api` marks the public surface. No tool checks resource ownership, so grep for your module's config paths/table names in *other* modules' configuration during review.
 
 ## Review checklist
 
-- [ ] Every package sits on an identifiable ring; every dependency edge (composer require, `use` across packages, `module.xml` sequence) points strictly inward.
+- [ ] Every package sits on an identifiable ring; every dependency edge (composer require, `use` across packages, the framework's module manifest) points strictly inward.
 - [ ] No two same-ring modules reference each other — cooperation goes through a bridge one ring out.
 - [ ] Nothing depends on a bridge; bridges depend on exactly the modules they connect.
 - [ ] Every artifact in each package defines that package's own vocabulary (config schema, translations, routes, templates, migrations, menu entries) — run the ownership litmus test.

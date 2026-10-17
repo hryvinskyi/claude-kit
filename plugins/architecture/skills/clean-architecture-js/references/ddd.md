@@ -32,7 +32,7 @@ export function toCart(raw: unknown): Cart {
 }
 ```
 
-When the backend is the project's own Symfony or Magento code, the published language is still the endpoint's contract (the PHP skill's `Api/Data/` DTOs, the API resource) — not the entity behind it, and not the component's wishes.
+When the backend is the project's own PHP code, the published language is still the endpoint's contract (the PHP skill's published DTOs, the API resource) — not the entity behind it, and not the component's wishes.
 
 ## 3. Value objects — valid by construction
 
@@ -119,7 +119,7 @@ A rule that exists only in JS is not a rule — it is a suggestion to anyone wit
 
 ## 7. Domain events on the client
 
-Independently loaded parts of a page — Magento widgets rendered by different templates, Stimulus controllers from different packages, React islands — should not reach into each other. They announce what happened, in the past tense, through a **typed event contract owned by the publisher**:
+Independently loaded parts of a page — widgets rendered by different templates, controllers from different packages, React islands — should not reach into each other. They announce what happened, in the past tense, through a **typed event contract owned by the publisher**:
 
 ```ts
 // cart/events.ts — the published language; the listener imports only this file
@@ -137,7 +137,7 @@ export const publishCartUpdated = (detail: CartUpdated): void => {
 document.addEventListener('cart:updated', (e) => render(e.detail.itemCount), { signal });
 ```
 
-Name the event after the fact (`cart:updated`, `slot:reserved`), namespace it by the owning module, keep the detail a plain serializable DTO, and document it as the module's public surface. In Stimulus the idiom is `this.dispatch('updated', { detail })` (prefixed with the controller identifier); in Magento the customer-data sections and their invalidation are the platform's own version of this seam.
+Name the event after the fact (`cart:updated`, `slot:reserved`), namespace it by the owning module, keep the detail a plain serializable DTO, and document it as the module's public surface. A framework's own dispatch idiom, or its own platform version of this seam, is named by the stack skill.
 
 ## 8. Pragmatism
 

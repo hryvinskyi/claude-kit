@@ -1,0 +1,10 @@
+{
+  "name": "symfony",
+  "version": "0.1.0",
+  "description": "Symfony's idiom for the architecture rubrics: where each layer goes with Doctrine, Messenger and API Platform, services.yaml wiring and generated factories, and the browser half with Stimulus, Turbo, AssetMapper and React islands.",
+  "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
+  "repository": "https://github.com/hryvinskyi/claude-kit",
+  "license": "MIT",
+  "keywords": ["architecture", "symfony", "doctrine", "messenger", "stimulus", "php"],
+  "dependencies": ["architecture"]
+}

@@ -1,6 +1,6 @@
 # JavaScript — modules, async, the DOM, Node
 
-The language-level rules every host builds on: how a module is shaped, how async code stays correct, how framework-free browser code (a Magento widget, a theme-assets script, a Stimulus controller's helpers, a custom element) treats the DOM as an adapter, and how a Node service is composed. The host references (`react.md`, `magento2-frontend.md`, `symfony-frontend.md`) add their idioms on top; TypeScript specifics are in `typescript.md`.
+The language-level rules every host builds on: how a module is shaped, how async code stays correct, how framework-free browser code (a widget a server template renders, a script the page loads, a page controller's helpers, a custom element) treats the DOM as an adapter, and how a Node service is composed. The host reference `react.md` and the frontend stack skill add their idioms on top; TypeScript specifics are in `typescript.md`.
 
 ---
 
@@ -10,13 +10,13 @@ The language-level rules every host builds on: how a module is shaped, how async
 A file answers one question: `expression-tree.js` (the tree model and its serialization), `expression-value.js` (leaf-value shapes and validator predicates), `price-format.js` (turning minor units into display strings). A file whose honest name is `utils.js` has no charter — split it by concern (`solid.md` §SRP). Name files after what they hold, not after the framework category (`helpers/`, `services/`, `managers/`).
 
 ### 2. Explicit, named exports
-Prefer named exports; a default export is for what a framework requires (a Stimulus controller, a React route module). A barrel `index.js` is a feature's **public surface**, deliberately small — not a re-export of every file, which hides cycles and defeats tree-shaking.
+Prefer named exports; a default export is for what a framework requires (a page controller class its loader expects, a React route module). A barrel `index.js` is a feature's **public surface**, deliberately small — not a re-export of every file, which hides cycles and defeats tree-shaking.
 
 ### 3. Importing does nothing
 Module scope holds definitions only. No `fetch`, no `document.querySelector`, no listeners, no timers, no writes to `window` at import time. Only **entry points** start work — the page's bootstrap, a widget's mount, an island's `mount()`, a CLI's `main`. A module with top-level effects cannot be imported by a test without triggering them, runs its effect on every page that bundles it, and turns import order into behavior.
 
 ### 4. No globals, no load-order contracts
-`window.Foo = …`, `if (window.fooInitialized) return;`, and an inline script that calls a function another file defined are the JS service locator and hidden sequencing. Each works until an optimizer defers, merges or lazy-loads one of the scripts (`magento2-frontend.md` §6). Pass what a module needs as arguments; keep the "already mounted" fact on the element (below), not on `window`. When classic scripts genuinely must share something, publish **one** namespaced object from one entry point and document it as that module's public surface.
+`window.Foo = …`, `if (window.fooInitialized) return;`, and an inline script that calls a function another file defined are the JS service locator and hidden sequencing. Each works until an optimizer defers, merges or lazy-loads one of the scripts. Pass what a module needs as arguments; keep the "already mounted" fact on the element (below), not on `window`. When classic scripts genuinely must share something, publish **one** namespaced object from one entry point and document it as that module's public surface.
 
 ### 5. Immutability by default
 `const`; spread or `structuredClone` instead of mutating arguments; `Object.freeze` on exported config and lookup tables. A function that mutates its input has a second, hidden output.
@@ -40,7 +40,7 @@ When config or markup names a behavior (`data-validator="postcode"`, a block typ
 
 ## Part 2 — The DOM is an adapter
 
-Framework-free browser code: a widget a Magento template renders through theme-assets, a script in a Symfony page, a custom element, the DOM half of a Stimulus controller.
+Framework-free browser code: a widget a server template renders through the project's asset renderer, a script in a server-rendered page, a custom element, the DOM half of a page controller.
 
 ### 9. Progressive enhancement
 The server renders working HTML where it can — links link, forms submit — and JS enhances it. Initial state comes from the markup, not from a request the script fires on load.
@@ -84,15 +84,15 @@ if (document.readyState === 'loading') {
 }
 ```
 
-Content inserted later (an AJAX block, a Turbo frame, Magento's `contentUpdated`) is handled by calling `mountAll(newContent)` again — which is why mounting must be idempotent.
+Content inserted later (an AJAX block, a server-rendered fragment swapped into the page, a framework's content-updated event) is handled by calling `mountAll(newContent)` again — which is why mounting must be idempotent.
 
 ### 11. Config comes from the markup, and is parsed
 - `data-*` attributes are **strings**; `<script type="application/json">` content is text. Parse both, validate the shape, and fail loudly (a console error in development, a quiet no-op with a logged reason in production) — never proceed on `undefined`.
-- The server escapes what it prints (`$escaper->escapeHtmlAttr(json)` in Magento, Twig's auto-escaping plus `|json_encode` in Symfony); the script never evaluates config as code.
+- The server escapes what it prints (the template engine's attribute escaping over the JSON; the stack skill names the call); the script never evaluates config as code.
 - Wording arrives the same way — translated by the server — so the script holds no user-facing English.
 
 ### 12. Rendering without injection
-`textContent` for text; `<template>` cloning or `createElement` for structure; attributes through `setAttribute`/`dataset`. `innerHTML`, `insertAdjacentHTML` and `outerHTML` only with markup the server already escaped (a Turbo stream, an HTML fragment from the project's own endpoint) — never with data. Building HTML by string concatenation is an XSS finding.
+`textContent` for text; `<template>` cloning or `createElement` for structure; attributes through `setAttribute`/`dataset`. `innerHTML`, `insertAdjacentHTML` and `outerHTML` only with markup the server already escaped (a server-rendered fragment from the project's own endpoint) — never with data. Building HTML by string concatenation is an XSS finding.
 
 ### 13. Lifecycle and cleanup
 Every listener, observer, timer and in-flight request created by a widget ends when the widget ends: an `AbortController` whose `signal` is passed to every `addEventListener` and `fetch`; `disconnect()` on observers; `clearTimeout`. Leaks show up as double handlers after a partial page update, and as memory growth in long sessions.
@@ -122,7 +122,7 @@ Keyboard reachable, focus managed when content appears or disappears, `aria-live
 - **Pure modules** run under the test runner the project has — `node --test`, Vitest, Jest — with no DOM at all. That they can is the proof that their dependencies point inward.
 - **Legacy module formats** are still testable in Node: an AMD module behind a small `define` shim (a stubbed `underscore` at most), a classic IIFE script loaded into a `vm` context with the few globals it needs, or a factory that assigns `module.exports` when it exists.
 - **DOM adapters** are driven with real markup — jsdom or happy-dom when the project has them, a real browser (Playwright) otherwise: mount, dispatch the user's event, assert what the user would see.
-- **Never** a test that reads a script or template as text and asserts what it contains (the engineering standards in your user `CLAUDE.md`, §*Tests run code*).
+- **Never** a test that reads a script or template as text and asserts what it contains (the engineering standards, §*Tests run code*).
 
 ---
 

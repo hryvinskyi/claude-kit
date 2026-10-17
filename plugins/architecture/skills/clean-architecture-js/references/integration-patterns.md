@@ -72,11 +72,11 @@ Show the expected result immediately, reconcile with the server's answer, **roll
 
 ## 7. Full-page-cached HTML
 
-In Magento (FPC, Varnish) and Symfony (HTTP cache, ESI) the HTML itself is shared. Whatever a cacheable template prints is seen by everyone who receives that cached copy.
+Behind a full-page cache (a reverse proxy, the framework's HTTP cache, edge-side includes) the HTML itself is shared. Whatever a cacheable template prints is seen by everyone who receives that cached copy.
 
-- Private data — the customer's name, cart count, group price, wishlist state, consent — is loaded **after** the page through the private channel (customer-data sections, a private endpoint, ESI), and the script renders a neutral state until then.
+- Private data — the customer's name, cart count, group price, wishlist state, consent — is loaded **after** the page through the private channel (the framework's private-content mechanism, a private endpoint, ESI), and the script renders a neutral state until then.
 - Config printed into a cached page contains nothing that varies per visitor.
-- `magento2-frontend.md` §5, `symfony-frontend.md` §8.
+- The frontend stack skill names its framework's cache and private channel.
 
 ## 8. Realtime: WebSocket, SSE, polling
 

@@ -23,13 +23,13 @@ A use case that contains `sleep()`, a retry loop, a `try { $http->request } catc
 ```php
 // ❌ Two systems, no shared transaction (and `new OrderPlaced` in a use case: events come from the
 //    aggregate's event factory, ddd.md §Creation lives in factories)
-$this->em->wrapInTransaction(function () use ($order): void {
+$this->transactions->run(function () use ($order): void {      // a transaction port the use case owns
     $this->orders->save($order);
     $this->bus->dispatch(new OrderPlaced($order->id()));   // broker is outside the transaction
 });
 
 // ✅ The message is a row in the same commit; a relay publishes it afterwards
-$this->em->wrapInTransaction(function () use ($order): void {
+$this->transactions->run(function () use ($order): void {
     $this->orders->save($order);
     foreach ($order->releaseEvents() as $event) {
         $this->outbox->record($event);                      // port owned by the use case
@@ -37,7 +37,7 @@ $this->em->wrapInTransaction(function () use ($order): void {
 });
 ```
 
-Symfony: a Messenger **Doctrine transport on the same connection** *is* an outbox — dispatching inside the transaction writes the envelope row in the same commit, and `messenger:consume` is the relay. It stops being one the moment the transport is AMQP/Redis/SQS: then either route through a Doctrine transport first and forward, or use `DispatchAfterCurrentBusStamp` knowing it narrows the window without closing it. Magento: `queue_message` written through the publisher inside the same DB transaction behaves the same way with the `db` connection, and not with `amqp`.
+A message transport that **writes to the same database connection** *is* an outbox — dispatching inside the transaction writes the message row in the same commit, and the transport's consumer is the relay. It stops being one the moment the transport is a network broker (AMQP, Redis, SQS): then either route through a database transport first and forward, or dispatch after the commit knowing it narrows the window without closing it. The stack skill names which of its framework's transports is which.
 
 Review questions:
 - Is the message written by the **same connection and transaction** as the state change? (Two entity managers = two transactions.)
@@ -55,7 +55,7 @@ final class ReserveStockHandler
 {
     public function __invoke(OrderPlaced $event): void
     {
-        $this->em->wrapInTransaction(function () use ($event): void {
+        $this->transactions->run(function () use ($event): void {
             if (!$this->processed->claim($event->messageId, self::class)) {
                 return;                                  // duplicate: already handled
             }
@@ -107,11 +107,7 @@ final class RetryingPaymentGateway implements PaymentGateway
     }
 }
 ```
-```yaml
-Acme\Billing\Infrastructure\RetryingPaymentGateway:
-    decorates: Acme\Billing\Infrastructure\HttpPaymentGateway
-```
-Symfony ships most of it: `RetryableHttpClient` and `timeout`/`max_duration` on `framework.http_client` scoped clients; Messenger's `retry_strategy` (`max_retries`, `delay`, `multiplier`, `jitter`) and `failure_transport`; `RateLimiter`; `Lock` and `Semaphore` for bulkheads. Reach for those before writing a class.
+The container registers `RetryingPaymentGateway` as a decorator of the HTTP implementation, so whoever asks for `PaymentGateway` gets the wrapped one. Frameworks ship most of these pieces — a retrying HTTP client, per-client timeouts, a transport's retry strategy and failure destination, a rate limiter, locks and semaphores; the stack skill lists its framework's. Reach for those before writing a class.
 
 Rules, each a review finding when broken:
 - **Every outbound call has a timeout**, connect and total. The default of most clients is "wait forever", and in a worker that is a process that never comes back.
@@ -124,15 +120,15 @@ Rules, each a review finding when broken:
 
 ## 5. Caching in front of a port
 
-A cache is an adapter decision. The shape that keeps it one: a **decorator implementing the same port**, wired with `decorates:` (Symfony) or, in Magento, a `di.xml` `<preference>` for the port that points at the decorator, whose `<type>` argument injects the real implementation. A use case calling `$cache->get()` has learned about a detail and now owns key naming and invalidation too.
+A cache is an adapter decision. The shape that keeps it one: a **decorator implementing the same port**, registered in the container so the port resolves to the decorator and the decorator receives the real implementation (the stack skill shows its framework's wiring). A use case calling `$cache->get()` has learned about a detail and now owns key naming and invalidation too.
 
 Review questions:
 - **Who invalidates, and on what event?** TTL-only is a decision that staleness up to the TTL is acceptable — write the number and who agreed to it. Anything stricter invalidates on the domain event, by tag.
 - **What is in the key?** Everything the value depends on: tenant, locale, currency, the viewer's permissions. A key without the tenant is a cross-tenant data leak, not a performance bug.
-- **What happens on a miss under load?** A hot key expiring sends every request to the origin at once. Symfony's `CacheInterface::get($key, $callback, beta: …)` recomputes early and locks; use it instead of `getItem`/`save` pairs.
-- **What is cached?** Values and DTOs — never a managed Doctrine entity (it comes back detached, with lazy associations that fail later) and never an object holding a service.
+- **What happens on a miss under load?** A hot key expiring sends every request to the origin at once. A cache call that takes the recompute callback and recomputes early under a lock (probabilistic early expiration) prevents it; use it instead of `getItem`/`save` pairs where the cache library offers one.
+- **What is cached?** Values and DTOs — never a managed ORM entity (it comes back detached, with lazy associations that fail later) and never an object holding a service.
 - **Is a negative result cached?** "Not found" with a short TTL, or every miss is an origin hit forever.
-- **Per-process memo caches** (`private ?array $byCode = null` on a service) are the same decision at the smallest scale: in a long-running worker they are process-lifetime state and need the same answer to "who invalidates" — usually `ResetInterface`.
+- **Per-process memo caches** (`private ?array $byCode = null` on a service) are the same decision at the smallest scale: in a long-running worker they are process-lifetime state and need the same answer to "who invalidates" — usually a reset hook the worker calls between requests.
 
 ---
 
@@ -142,13 +138,13 @@ ripgrep; add `-g '!**/tests/**'`; pass a pattern that starts with `->` as `-e '�
 
 | Smell | Search | Then check |
 |---|---|---|
-| Dual write | `->dispatch\(\|->publish\(` in `**/{Service,Handler,Messenger,Application,UseCase}/**/*.php` | the transport for that message class (`messenger.yaml` routing, `queue_topology.xml`): same DB connection as the state change, or a network broker? |
-| Network call inside a transaction | files matching both `wrapInTransaction\|beginTransaction` and `HttpClientInterface\|->request\(\|curl_exec` — `rg -l A \| xargs grep -lE B` (`grep` on the right: where `rg` is a shell function, `xargs` cannot run it) | whether the call is inside the closure |
-| Consumer with no idempotency | `#\[AsMessageHandler\|implements MessageHandlerInterface\|ConsumerInterface` | a claim on a unique key in the same transaction, or a naturally idempotent effect |
-| Outbound call with no timeout | `HttpClientInterface\|new \\?GuzzleHttp\\Client\|curl_init` | `timeout` / `max_duration` on the scoped client or request options; `CURLOPT_TIMEOUT` **and** `CURLOPT_CONNECTTIMEOUT` |
-| Retry in the wrong layer | `\bsleep\(\|usleep\(\|for \(\$attempt\|while \(\$(tries\|attempt\|retry)` in non-adapter folders | move to a decorator or the transport's `retry_strategy` |
-| No failure transport | `retry_strategy` present in `messenger.yaml` without `failure_transport` | where a message goes after the last retry |
-| Cache in a use case | `CacheInterface\|CacheItemPoolInterface\|TagAwareCacheInterface` in `**/{Service,Handler,Application,Domain}/**/*.php` | whether the class is a decorator of a port (fine) or a use case (move it) |
+| Dual write | `->dispatch\(\|->publish\(` in `**/{Service,Handler,Application,UseCase}/**/*.php` | the transport for that message class (the framework's message routing configuration): same DB connection as the state change, or a network broker? |
+| Network call inside a transaction | files matching both `beginTransaction\|->transactional\(` (plus the ORM's transaction wrapper, from the stack skill) and `->request\(\|->sendRequest\(\|curl_exec` — `rg -l A \| xargs grep -lE B` (`grep` on the right: where `rg` is a shell function, `xargs` cannot run it) | whether the call is inside the closure |
+| Consumer with no idempotency | every message consumer class — the framework's handler attribute or interface (the stack skill's row) | a claim on a unique key in the same transaction, or a naturally idempotent effect |
+| Outbound call with no timeout | `new \\?GuzzleHttp\\Client\|curl_init\|ClientInterface` (plus the framework's HTTP client, from the stack skill) | a timeout on the client or the request options; `CURLOPT_TIMEOUT` **and** `CURLOPT_CONNECTTIMEOUT` |
+| Retry in the wrong layer | `\bsleep\(\|usleep\(\|for \(\$attempt\|while \(\$(tries\|attempt\|retry)` in non-adapter folders | move to a decorator or the transport's retry configuration |
+| No failure destination | a transport configured with retries and no failure destination (the stack skill spells the keys) | where a message goes after the last retry |
+| Cache in a use case | `CacheInterface\|CacheItemPoolInterface` (plus the framework's tag-aware cache, from the stack skill) in `**/{Service,Handler,Application,Domain}/**/*.php` | whether the class is a decorator of a port (fine) or a use case (move it) |
 | Cache key missing a dimension | every `->get\(` on a cache in a multi-tenant or multi-locale project | tenant / locale / permission in the key |
 
 ## Review checklist
@@ -163,4 +159,3 @@ ripgrep; add `-g '!**/tests/**'`; pass a pattern that starts with `->` as `-e '�
 ## References
 - Chris Richardson, *Microservices Patterns* — transactional outbox, saga, idempotent consumer — https://microservices.io/patterns/
 - Michael Nygard, *Release It!* — timeouts, circuit breaker, bulkhead
-- Symfony Messenger (transports, retries, failure transport) — https://symfony.com/doc/current/messenger.html · HttpClient (timeouts, `RetryableHttpClient`) — https://symfony.com/doc/current/http_client.html · Cache (`get()` with early expiration) — https://symfony.com/doc/current/components/cache.html

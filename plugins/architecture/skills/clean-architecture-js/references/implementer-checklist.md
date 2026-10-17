@@ -5,12 +5,15 @@ feature will import, a port, a component or controller other code composes, a re
 public surface (`index.ts`, `mount()`, an event), a new entry point or registration. It is the
 rubric's rules without its review and planning formats; those live in `SKILL.md` and are not
 needed to implement a task that has already been planned and reviewed. `solid.md`,
-`javascript.md`, the host reference and — for TypeScript — `typescript.md` are still read.
+`javascript.md`, the host reference and — for TypeScript — `typescript.md` are still read. On
+a project with a stack plugin, read its frontend skill's *Implementer checklist on this stack*
+too.
 
 ## Dependency rule
 
-- Domain and use-case modules import no framework (React, Stimulus, Knockout, Alpine, jQuery,
-  `mage/*`), no DOM or `window`, no `fetch`/storage/`process.env`, no adapter — types included.
+- Domain and use-case modules import no framework (React, the page's component framework,
+  jQuery, the module loader's platform modules), no DOM or `window`, no `fetch`/storage/
+  `process.env`, no adapter — types included.
 - Need the network, storage, the clock or randomness? The use case owns a port; an adapter
   implements it; the composition root (mount function, root provider, bootstrap, `main`) wires it.
 - No service locator: no `window.app.get(…)`, no module-level client singleton imported by hooks
@@ -33,7 +36,7 @@ needed to implement a task that has already been planned and reviewed. `solid.md
 ## Where logic lives
 
 - Rules and calculations in pure modules a Node test can import; components, controllers,
-  widgets, Knockout view models and Alpine objects only bind, render and choose wording.
+  widgets and framework view models only bind, render and choose wording.
 - The client decides only what it owns; it mirrors server rules for feedback and displays server
   values — it never becomes their source of truth.
 - No new `utils`/`helpers` file; one charter per module; importing a module does nothing.
@@ -44,8 +47,9 @@ needed to implement a task that has already been planned and reviewed. `solid.md
   registrations. Hook into `data-*` attributes and events the owner publishes, not a theme's CSS
   classes or a neighbour's DOM.
 - Name only what you depend on: no comment, identifier, attribute or event names a module, vendor
-  or product outside the module's declared dependencies (`package.json`, `composer.json`,
-  `module.xml`). A neighbour's quirk is described as a situation; its name goes to your report.
+  or product outside the module's declared dependencies (`package.json`, `composer.json`, the
+  framework's module manifest). A neighbour's quirk is described as a situation; its name goes to
+  your report.
 - Need a concept a sibling owns? Scope-check stop — the plan owns the inward move.
 
 ## Async and the DOM
@@ -60,15 +64,10 @@ needed to implement a task that has already been planned and reviewed. `solid.md
 
 ## Host specifics
 
-- **Magento**: follow the area's delivery mechanism. theme-assets — get the renderer through a
-  typed argument, the view-model registry or the ViewModel; inline only small critical code;
-  external + defer by default; preload only what first paint needs; the module declares
-  `hryvinskyi/magento2-theme-assets` and every module whose fileId it renders. Config and wording
-  printed escaped (`JsonHexTag`, `escapeHtmlAttr`), parsed by the script; nothing private in
-  cacheable output; no timing assumptions the project's script optimizers break.
-- **Symfony**: controllers are humble; values/targets are the contract; `disconnect()` undoes
-  `connect()`; wording arrives translated from Twig; the package registers its own controllers,
-  asset path and importmap entries; islands are mounted/unmounted by a host controller.
+- **A server-rendered host**: follow the project's delivery mechanism; config and wording
+  printed escaped by the template and parsed by the script; nothing private in cacheable output;
+  the module registers its own scripts and controllers; the frontend stack skill's checklist
+  says how on its framework.
 - **React**: hooks bind use cases; nothing derived stored and synced by an effect; effects clean
   up and are never silenced; ports through context; variants through component maps.
 - **TypeScript**: `strict` and the project's flags stay on; only erasable syntax; `import type`

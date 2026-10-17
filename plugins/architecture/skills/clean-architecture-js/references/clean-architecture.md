@@ -1,6 +1,6 @@
 # Clean Architecture — the dependency rule in JavaScript and TypeScript
 
-Uncle Bob's rules, applied to ES modules, React, Stimulus, Magento storefront code and Node. `solid.md` has the class- and module-level mechanics, `ddd.md` the domain patterns, the host references the wiring.
+Uncle Bob's rules, applied to ES modules, React, the browser code of server-rendered pages and Node. `solid.md` has the class- and module-level mechanics, `ddd.md` the domain patterns, the host references the wiring.
 
 ## 1. The rule, restated for imports
 
@@ -16,19 +16,19 @@ The corollary that trips people up is the same as on the server: **control flow 
 Types, value objects, invariants, state transitions, calculations. **No I/O and no framework**: no React, no DOM, no `fetch`, no storage, no `process`, no `Date.now()`, no `Math.random()` — time and randomness arrive as ports (`Clock`, `IdGenerator`) or as arguments. A reducer is domain code when it is a pure `(state, event) => state`.
 
 ### Use cases
-One application action per function or small class: `addToCart`, `applyCoupon`, `saveDraft`. Orchestrates domain code and **declares the ports** it needs — gateway, storage, clock, notifier, analytics. No DOM, no JSX, no hooks. A React hook, a Stimulus controller or a Knockout view model *binds* a use case to a framework; it is not one.
+One application action per function or small class: `addToCart`, `applyCoupon`, `saveDraft`. Orchestrates domain code and **declares the ports** it needs — gateway, storage, clock, notifier, analytics. No DOM, no JSX, no hooks. A React hook, a page controller or a framework view model *binds* a use case to a framework; it is not one.
 
 ### Interface adapters
-Translation in both directions, **no business rules**. Components, custom hooks, Stimulus controllers, Knockout view models and uiComponents, Alpine components, DOM widgets, API clients implementing gateway ports, storage adapters, parsers (unknown → domain), mappers (domain → DTO), formatters (`Intl`), wording.
+Translation in both directions, **no business rules**. Components, custom hooks, page controllers, framework view models and components, DOM widgets, API clients implementing gateway ports, storage adapters, parsers (unknown → domain), mappers (domain → DTO), formatters (`Intl`), wording.
 
 ### Frameworks & drivers
-React and its router, Stimulus, Knockout, Alpine, RequireJS, the bundler, AssetMapper, theme-assets, the browser APIs, Node's `fs`/`net`/`process`. Configuration and third-party code; nothing inward may depend on it.
+React and its router, the page's component framework, the module loader, the bundler, the asset pipeline and renderer, the browser APIs, Node's `fs`/`net`/`process`. Configuration and third-party code; nothing inward may depend on it.
 
 **In Node** the same four layers hold: the domain and use cases as above; adapters are HTTP route handlers, repository implementations, queue consumers, CLI parsers; drivers are the framework (Express, Fastify, Nest), the database client, the file system.
 
 ## 3. Ports and the composition root
 
-A port is an `interface` (or a function type) **owned by the inner module**. The adapter implements it. One place — the **composition root** — builds the graph: `main.ts` in Node, the island's `mount()` function, the root component's provider, the widget's bootstrap script, a Stimulus controller's `connect()` for a small widget.
+A port is an `interface` (or a function type) **owned by the inner module**. The adapter implements it. One place — the **composition root** — builds the graph: `main.ts` in Node, the island's `mount()` function, the root component's provider, the widget's bootstrap script, a page controller's connect step for a small widget.
 
 ```ts
 // ── cart/application/add-to-cart.ts  (inner — owns its port) ──────────────
@@ -62,11 +62,11 @@ export const httpCartGateway = (baseUrl: string, csrf: string): CartGateway => (
 const add = addToCart(httpCartGateway(config.baseUrl, config.csrfToken));
 ```
 
-No DI container is needed: **parameters and factories are dependency injection.** The anti-pattern is the JS service locator — `window.app.services.get('cart')`, a module-level singleton imported from everywhere, `require()` at call time to dodge a cycle. It is Magento's `ObjectManager` in another language: dependencies hidden, tests forced to patch modules.
+No DI container is needed: **parameters and factories are dependency injection.** The anti-pattern is the JS service locator — `window.app.services.get('cart')`, a module-level singleton imported from everywhere, `require()` at call time to dodge a cycle. It is a server container's service locator in another language: dependencies hidden, tests forced to patch modules.
 
 ## 4. What crosses a boundary — parse at the edge
 
-Only **inner-owned shapes** cross inward: domain types, value objects, DTOs the use case declares. Never raw JSON, a `Response`, an `Event`, an `HTMLElement`, a React element, a Knockout observable, a Stimulus controller.
+Only **inner-owned shapes** cross inward: domain types, value objects, DTOs the use case declares. Never raw JSON, a `Response`, an `Event`, an `HTMLElement`, a React element, a framework observable, a page controller instance.
 
 Everything from outside the process is `unknown` until **parsed**: API responses, `JSON.parse`, `data-*` attributes (always strings), `<script type="application/json">` config, `localStorage`, `postMessage`, the URL, `process.env`. The parser lives in the adapter and returns a domain type or a typed failure. Details and parser choices: `typescript.md` §2.
 
@@ -85,18 +85,19 @@ Money travels as integer minor units plus a currency, never a float. Dates arriv
 Code that is hard to test — components, controllers, templates, DOM bindings, route handlers — stays **humble**: it translates input, calls a use case, renders output. Everything worth testing moves inward, where a plain Node test can reach it.
 
 ```js
-// ✅ A humble Stimulus controller: parse values, delegate, render. No rules.
-export default class extends Controller {
-  static values = { threshold: Number, currency: String, remaining: String };
-  static targets = ['bar', 'label'];
+// ✅ A humble widget: parse its config, delegate, render. No rules.
+export function mountFreeShippingBar(root, config, signal) {   // config parsed from the markup; signal tears it down
+  const bar = root.querySelector('[data-role="bar"]');
+  const label = root.querySelector('[data-role="label"]');
 
-  update({ detail: { subtotalMinor } }) {
-    const gap = freeShippingGap(subtotalMinor, this.thresholdValue);   // pure domain function
-    this.barTarget.style.width = `${gap.progressPercent}%`;
-    this.labelTarget.textContent = gap.reached ? '' : this.remainingValue.replace('%amount', format(gap.missingMinor, this.currencyValue));
-  }
+  document.addEventListener('cart:updated', ({ detail: { subtotalMinor } }) => {
+    const gap = freeShippingGap(subtotalMinor, config.threshold);       // pure domain function
+    bar.style.width = `${gap.progressPercent}%`;
+    label.textContent = gap.reached ? '' : config.remaining.replace('%amount', format(gap.missingMinor, config.currency));
+  }, { signal });
 }
 ```
+The frontend stack skill shows the same widget written as its framework's controller.
 
 ## 6. Import side effects and entry points
 
@@ -116,7 +117,7 @@ src/shared/          (kernel: no features)    src/store/
 src/app/             (composition, routing)
 ```
 
-Feature-Sliced Design, "features/" folders and Magento's module-per-capability all express the same idea. Pick the project's convention; do not impose four folders on a feature that is one component and one parser.
+Feature-Sliced Design, "features/" folders and a server framework's module-per-capability all express the same idea. Pick the project's convention; do not impose four folders on a feature that is one component and one parser.
 
 ## 8. The module graph is an onion too
 
@@ -124,8 +125,8 @@ The rings of `clean-architecture-php/references/onion-modules.md` hold for JS un
 
 - **A feature exports one public surface** (`index.ts`, a package's `exports` map, a `mount(el, props)` function, a documented event). Everything else is private; a deep import (`../../checkout/components/StepTwo`) is a boundary violation.
 - **Same-ring features never import each other.** They compose in the app shell or page, exchange data through props and events, or meet in a bridge one ring out.
-- **Artifacts are dependencies.** The ownership litmus test applies to everything a script must know by name: CSS classes and DOM ids it queries, `data-*` attribute names, custom event names, storage keys, route names, RequireJS module ids and mixin targets, theme-assets fileIds (`Vendor_Module::js/file.js`), Stimulus identifiers, importmap entries, translation keys. Each belongs to exactly one module; a sibling's vocabulary in your code couples you with zero imports.
-- **Resources ship with their owner.** A Magento module's JS, CSS, templates and `i18n/*.csv` in that module; a Symfony package's controllers, styles, translations and asset registration in that package; a feature's dictionary files beside its components.
+- **Artifacts are dependencies.** The ownership litmus test applies to everything a script must know by name: CSS classes and DOM ids it queries, `data-*` attribute names, custom event names, storage keys, route names, module-loader ids and override targets, asset ids, controller identifiers, import-map entries, translation keys. Each belongs to exactly one module; a sibling's vocabulary in your code couples you with zero imports.
+- **Resources ship with their owner.** A server module's scripts, styles, templates, translations and asset registration in that module (the stack skill says where each lives); a feature's dictionary files beside its components.
 
 ## 9. The second consumer and the inward move
 
@@ -165,5 +166,5 @@ A project that runs none of these still has the rule; say in the review which ga
 - [ ] Untrusted input is parsed at the edge into inner-owned types; no raw JSON, DOM node, event or framework object crosses inward.
 - [ ] Components, controllers, widgets and templates are humble; rules live in use cases and domain modules a Node test can reach.
 - [ ] Importing a module has no side effects; only entry points start work.
-- [ ] Features expose one public surface; no deep imports across features; artifacts (CSS hooks, attributes, events, keys, ids, fileIds) have one owner.
+- [ ] Features expose one public surface; no deep imports across features; artifacts (CSS hooks, attributes, events, keys, ids, asset ids) have one owner.
 - [ ] Boundaries are enforced by the project's tooling where it has any; each abstraction protects a real axis of change.

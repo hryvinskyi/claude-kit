@@ -1,0 +1,10 @@
+{
+  "name": "magento2",
+  "version": "0.1.0",
+  "description": "Magento 2's idiom for the architecture rubrics: Service Contracts, di.xml wiring, plugins, observers and ViewModels, and the browser half with RequireJS/Knockout, hryvinskyi/magento2-theme-assets and Hyvä/Alpine.",
+  "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
+  "repository": "https://github.com/hryvinskyi/claude-kit",
+  "license": "MIT",
+  "keywords": ["architecture", "magento", "magento2", "hyva", "php"],
+  "dependencies": ["architecture"]
+}

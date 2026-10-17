@@ -12,14 +12,13 @@ One language per context, shared by code and domain experts. The class, method, 
 ### Bounded context = module
 A **bounded context** is a boundary within which one model and one language are consistent. The same word means different things across contexts: a *Product* in Catalog (title, media, attributes) is not the *Product* in Sales (sku, price, qty ordered). Do not build one shared "Product" class for both — model each context's own.
 
-- **Symfony modular monolith:** one bounded context ≈ one Composer package under `packages/{module}/`, exposing only `Api/`, `Event/`, `Entity/`.
-- **Magento 2:** one bounded context ≈ one module `Vendor_Module`, exposing only its `Api/` service contracts.
+In a modular monolith one bounded context ≈ one module — a Composer package, or the framework's own module unit — exposing only its public surface (its `Api/` contracts, events, and whatever else it publishes). The stack skill names the unit and the surface on its framework.
 
 ### Context mapping — how contexts relate
 
 | Pattern | Meaning | PHP realization |
 |---|---|---|
-| **Published Language** | A stable, shared contract vocabulary | Magento `Api/Data/` DTOs; a module's `Api/` VOs/interfaces |
+| **Published Language** | A stable, shared contract vocabulary | A module's published DTO interfaces; its `Api/` VOs/interfaces |
 | **Open Host Service** | A context offers a defined service to others | A module's `Api/` service interfaces |
 | **Anti-Corruption Layer (ACL)** | Translate another context's model so it can't leak in | An adapter that maps the other module's DTO → your domain VO |
 | **Shared Kernel** | A small model shared by two teams (use sparingly) | A `Shared` module of common VOs (`Money`, `EmailAddress`) |
@@ -60,7 +59,7 @@ A modular monolith's "cross-module access only via `Api/`, `Event/`, `Entity/`" 
 ## Part 2 — Tactical building blocks
 
 ### Creation lives in factories
-**Code never writes `new`, and never hides one in a static named constructor** (`Money::ofMinor()`, `Order::draft()`, `OrderId::generate()` each do `new self(...)`). An object comes from the container, or — when a genuinely new instance is needed — from an injected factory. **A factory is an interface; the container writes its implementation, never a person**: Magento generates `…Factory` (its `create()` asks the ObjectManager); Symfony ships no generator, so use the compile-time one the project's docs name (`symfony.md` §10) — and if there is none, that is a plan decision, not a licence to hand-write `new`. **A factory method only creates**: one object per method, from its arguments, no computation.
+**Code never writes `new`, and never hides one in a static named constructor** (`Money::ofMinor()`, `Order::draft()`, `OrderId::generate()` each do `new self(...)`). An object comes from the container, or — when a genuinely new instance is needed — from an injected factory. **A factory is an interface; the container writes its implementation, never a person**: how it is generated is the framework's (the stack skill names the mechanism, or the project's docs do) — and if there is none, that is a plan decision, not a licence to hand-write `new`. **A factory method only creates**: one object per method, from its arguments, no computation.
 
 Why: it is DIP at the call site. A `new`, or a static call that makes one, binds the caller to one concrete class, and nothing can be substituted for it — not a fake, not a decorator, not a second implementation. A factory interface is a seam the container fills.
 
@@ -68,11 +67,11 @@ Why: it is DIP at the call site. A `new`, or a static call that makes one, binds
 - **Aggregate** — `OrderFactoryInterface::draft(OrderId, CustomerId): Order`. A child is created by its own factory (`OrderLineFactoryInterface`) in the use case and handed to the root (`$order->addLine($line)`), which enforces its invariants on what it is given.
 - **Identity** — the repository's `nextIdentity()`, backed by an injected `OrderIdGeneratorInterface::next()`: a service that draws the value and asks the id factory for the `OrderId`.
 - **Domain event** — the aggregate records it through an event factory the use case holds and hands to the behaviour method: `$order->place($this->orderEvents)`. The root decides *that* it happened; the factory creates the object. This is the one pattern for events throughout this skill.
-- **Time** — an injected clock (`ClockInterface`, PSR-20; Symfony's extends it), never `new \DateTimeImmutable()`.
+- **Time** — an injected clock (`ClockInterface`, PSR-20), never `new \DateTimeImmutable()`.
 
 An aggregate has no container, so a factory reaches it as a method argument — `place()` receives `$events`, `total()` receives `$money`.
 
-Exempt: `throw new …Exception`, attribute metadata, tests, and the composition root (the one place that builds the container, before any exists: `new Kernel(...)` in the front controller or `bin/console`, Magento's bootstrap), not wiring code in general.
+Exempt: `throw new …Exception`, attribute metadata, tests, and the composition root (the one place that builds the container, before any exists: the front controller or console entry point that boots the kernel), not wiring code in general.
 
 ### Value Object — immutable, equality by value, valid by construction
 No identity; two are equal iff their values are. Enforce invariants in the constructor so an invalid instance cannot exist; only the value's factory calls that constructor. PHP 8.2+ `readonly` classes are ideal.
@@ -180,7 +179,7 @@ interface OrderRepository
     public function save(Order $order): void;
 }
 ```
-Implementations: Doctrine (Symfony) / a Magento repository behind `Api/OrderRepositoryInterface`. See `symfony.md` and `magento2.md`.
+Implementations live in infrastructure — an ORM repository, or the module's repository behind its `Api/OrderRepositoryInterface`; the stack skill shows its framework's.
 
 ### Domain Service — logic that belongs to no single entity
 When a rule spans multiple aggregates or needs collaborators, and forcing it into one entity would be artificial, use a stateless **domain service** (named in the ubiquitous language). Distinct from an *application service* (below).
@@ -268,12 +267,12 @@ $order->place($this->orderEvents);           // throws CannotPlaceEmptyOrder / O
 
 ---
 
-## Magento 2 reality check — DDD-lite
-Magento's models extend `\Magento\Framework\Model\AbstractModel` and are coupled to ResourceModels — genuinely rich, persistence-free aggregates are hard, and full tactical DDD is usually **overkill** for a typical module. Pragmatic path:
-- Treat **Service Contracts** (`Api/` + `Api/Data/`) as your published language and use-case boundary; keep orchestration in service classes behind `Api/`.
-- Concentrate business rules in **domain service classes**, not in Blocks, controllers, templates, or fat Observers.
+## Framework-first models — DDD-lite
+Where the framework's models extend a framework base class and are coupled to its persistence layer, genuinely rich, persistence-free aggregates are hard, and full tactical DDD is usually **overkill** for a typical module. The stack skill says when its framework is one of these. Pragmatic path:
+- Treat the module's **published contracts** (`Api/` and its data interfaces) as your published language and use-case boundary; keep orchestration in service classes behind `Api/`.
+- Concentrate business rules in **domain service classes**, not in view classes, controllers, templates, or fat observers.
 - Use **Value Objects** freely for money, sku, quantities even inside a mostly-transaction-script module — they pay off immediately.
-- Introduce a **pure domain layer mapped to/from persistence models via a repository** only for genuinely complex modules; otherwise it's ceremony. Details and pitfalls: `magento2.md`.
+- Introduce a **pure domain layer mapped to/from persistence models via a repository** only for genuinely complex modules; otherwise it's ceremony.
 
 ---
 

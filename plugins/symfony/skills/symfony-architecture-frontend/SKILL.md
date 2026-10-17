@@ -1,6 +1,15 @@
+---
+name: symfony-architecture-frontend
+description: Symfony's front-end idiom for the architecture:clean-architecture-js rubric — AssetMapper/importmap, Webpack Encore and Vite pipelines; Stimulus controllers as humble adapters (values, targets, outlets, events); wording from Twig; Turbo, Live and Twig Components; React islands mounted by a controller; per-package asset registration in a modular monolith; CSRF and CSP nonces; TypeScript builds; detection recipes in Symfony's spelling. Use together with architecture:clean-architecture-js whenever JavaScript or TypeScript a Symfony project ships is reviewed, planned or written; the PHP half is symfony:symfony-architecture-php.
+---
+
+Load this skill together with `architecture:clean-architecture-js`. A file named without a skill
+(`javascript.md`, `typescript.md`, `react.md`, `ddd.md`, `clean-architecture.md`,
+`integration-patterns.md`, `solid.md`) is that core skill's.
+
 # Symfony frontend — Stimulus, AssetMapper, UX and islands
 
-Symfony renders the page with Twig and JavaScript enhances it: Stimulus controllers bound by `data-controller`, optionally Turbo, Live and Twig Components, and bundles (often React) mounted into one element. The PHP half — controllers, Twig components' PHP classes, Live Component actions, the endpoints a script calls — is reviewed with `architecture:clean-architecture-php` (`symfony.md`). This file covers the browser half. Read `javascript.md` first; `typescript.md` for TypeScript; `react.md` for islands.
+Symfony renders the page with Twig and JavaScript enhances it: Stimulus controllers bound by `data-controller`, optionally Turbo, Live and Twig Components, and bundles (often React) mounted into one element. The PHP half — controllers, Twig components' PHP classes, Live Component actions, the endpoints a script calls — is reviewed with `architecture:clean-architecture-php` and `symfony:symfony-architecture-php`. This skill covers the browser half. Read `javascript.md` first; `typescript.md` for TypeScript; `react.md` for islands.
 
 ## 1. Discover the pipeline
 
@@ -75,7 +84,7 @@ Turbo makes the server the UI: Frames and Streams replace markup the server rend
 
 ## 6. Live Components and Twig Components
 
-- Their PHP classes are adapters too — humble, delegating to services (`architecture:clean-architecture-php`, `symfony.md`).
+- Their PHP classes are adapters too — humble, delegating to services (`architecture:clean-architecture-php`, `symfony:symfony-architecture-php`).
 - A Live Component's template is re-rendered and morphed on every action, so **behavior belongs in Stimulus controllers attached to it, not in inline scripts** inside it; an element the component must not morph is marked `data-live-ignore`.
 - A controller that needs the component uses its public API — `getComponent(element)` then `component.action('name', args)` — and never edits the component's DOM or props behind its back.
 - Anonymous Twig Components with `{% props %}` are the page's component library: their props are their published language; keep consumer vocabulary out of shared ones.
@@ -101,7 +110,7 @@ When a feature needs a real client-side application (an editor, a canvas, a cons
 - **Controllers**: start a real `Application`, register the controller under its real identifier, render real markup (jsdom or happy-dom when available, otherwise a real browser), dispatch the user's event, assert what the user sees — this also proves registration.
 - **Islands**: `mount(el, props)` and `unmount()` on real markup.
 - **Flows**: Panther or Playwright against the running app.
-- **Twig**: a render test asserting the attributes and values a controller needs is a render, and is allowed; a test that reads a template, stylesheet or script file as text is not (the engineering standards in your user `CLAUDE.md`, §*Tests run code*).
+- **Twig**: a render test asserting the attributes and values a controller needs is a render, and is allowed; a test that reads a template, stylesheet or script file as text is not (the engineering standards, §*Tests run code*).
 
 ## Detection recipes — candidates, not findings
 
@@ -129,3 +138,73 @@ ripgrep over the package's `assets/` (or `src/Resources/assets/`) and templates.
 - [ ] Islands are mounted and unmounted by a host controller, receive everything as props, and stay inside their element.
 - [ ] CSRF, CSP nonces, no inline handlers, no data through `innerHTML`, no raw errors shown.
 - [ ] Pure modules, controllers, islands and flows are each tested at their level; no test reads a source file as text.
+
+## 10. The core rules in Symfony's idiom
+
+The core skill states each rule without a server framework. This section is where those rules meet Symfony's names.
+
+### Where things sit
+
+- **A module's zone** in a Symfony modular monolith: the package's `assets/` plus its registration (asset path, controller path, importmap fragment, translations). A Symfony package's controllers, styles, translations and asset registration ship in that package (§4).
+- **Artifacts with one owner** include Stimulus identifiers and importmap entries.
+- **Layers:** a pure module of a Stimulus package is domain code; Stimulus controllers are interface adapters (a Stimulus controller *binds* a use case, it is not one, and a controller instance never crosses inward); Stimulus and AssetMapper are frameworks and drivers. A domain or use-case module that imports Stimulus breaks the dependency rule.
+- **The composition root** of a small widget can be a Stimulus controller's `connect()`.
+- **Litmus:** replacing a Twig template with another server's must not touch use cases or the domain.
+
+### Review and plan passes
+
+- **The host pass** on Symfony: registration, values as the contract, wording from Twig (§2–§4).
+- **Plan mode, delivery:** state the AssetMapper/Stimulus registration of every controller and entry point.
+- **A React island in a Symfony page** needs both `react.md` and this skill.
+
+### The humble controller, in Stimulus
+
+The core's humble widget (`clean-architecture.md` §5), written as a Stimulus controller:
+```js
+// ✅ A humble Stimulus controller: parse values, delegate, render. No rules.
+export default class extends Controller {
+  static values = { threshold: Number, currency: String, remaining: String };
+  static targets = ['bar', 'label'];
+
+  update({ detail: { subtotalMinor } }) {
+    const gap = freeShippingGap(subtotalMinor, this.thresholdValue);   // pure domain function
+    this.barTarget.style.width = `${gap.progressPercent}%`;
+    this.labelTarget.textContent = gap.reached ? '' : this.remainingValue.replace('%amount', format(gap.missingMinor, this.currencyValue));
+  }
+}
+```
+
+### Language-level rules on this stack
+
+- **Framework-free browser code** here is a script in a Symfony page, a Stimulus controller's helpers, or the DOM half of a Stimulus controller.
+- **Default exports:** a Stimulus controller is one of the default exports a framework requires.
+- **Content inserted later:** a Turbo frame is mounted again with `mountAll(newContent)`.
+- **Escaping:** the server prints config through Twig's auto-escaping plus `|json_encode` (§3).
+- **Server-escaped markup:** a Turbo stream is markup the server already escaped (§5).
+- **Events between parts of the page:** `this.dispatch('updated', { detail })`, prefixed with the controller identifier (§2), is Stimulus's form of the typed event contract (`ddd.md` §7).
+- **Variants (OCP):** one controller per behavior, chosen by the markup's `data-controller`.
+- **Injection (DIP):** values, outlets and the controller's `connect()`.
+- **The DIP import recipe** (`solid.md`) adds `@hotwired/stimulus` to its list of framework imports.
+
+### Islands, caching and TypeScript
+
+- **Islands:** the host is a Stimulus controller (§7); it lazy-loads the bundle in `connect()` and unmounts in `disconnect()`, so Turbo navigation, Live Component re-renders and removed markup do not leak roots. Encore is one of the pipelines that build the bundle.
+- **Full-page-cached HTML:** Symfony's HTTP cache and ESI share the HTML itself; private data arrives through ESI or a private endpoint, and the security rules of §8 apply.
+- **The published language of the backend** is the endpoint's API resource, not the entity behind it.
+- **TypeScript pipelines** (`typescript.md` §9):
+
+  | Pipeline | What compiles `.ts` | What type-checks |
+  |---|---|---|
+  | Symfony AssetMapper | `sensiolabs/typescript-bundle` (swc binary), or an esbuild script whose output lands outside `assets/` | `tsc --noEmit` per `tsconfig` |
+  | Symfony Webpack Encore | `enableTypeScriptLoader()` | `enableForkedTypeScriptTypesChecking()` or `tsc --noEmit` |
+
+### References
+
+- Stimulus Handbook — https://stimulus.hotwired.dev/handbook/introduction · Symfony AssetMapper — https://symfony.com/doc/current/frontend/asset_mapper.html
+
+## Implementer checklist on this stack
+
+Read with the core skill's `references/implementer-checklist.md`.
+
+- Controllers are humble; values/targets are the contract; `disconnect()` undoes `connect()`; wording arrives translated from Twig; the package registers its own controllers, asset path and importmap entries; islands are mounted/unmounted by a host controller.
+- Domain and use-case modules import no Stimulus.

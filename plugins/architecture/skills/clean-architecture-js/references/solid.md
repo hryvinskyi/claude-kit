@@ -87,7 +87,7 @@ export function reduce<K extends keyof CartEvents>(s: Cart, e: CartEvent<K>): Ca
 }
 ```
 
-In React the same rule reads: a component map (`const blockComponents = { hero: Hero, carousel: Carousel } satisfies Record<Block['type'], ComponentType<…>>`), not a `switch` in JSX; composition (`children`, slots) instead of a component that grows a boolean prop per variant. In Magento: a registry module or a `rendererList` the component iterates (the checkout's payment renderers are this pattern), never a new `else if` in someone else's widget. In Stimulus: one controller per behavior, chosen by the markup's `data-controller`.
+In React the same rule reads: a component map (`const blockComponents = { hero: Hero, carousel: Carousel } satisfies Record<Block['type'], ComponentType<…>>`), not a `switch` in JSX; composition (`children`, slots) instead of a component that grows a boolean prop per variant. In a widget: a registry module or a renderer list the component iterates, never a new `else if` in someone else's widget. With page controllers: one controller per behavior, chosen by the markup. The stack skill names its framework's form.
 
 **Value → value mapping is not the smell.** A lookup object (`const labels = { … } satisfies Record<Status, string>`) or a ternary choosing between two values is fine. **Guard clauses** with early returns are fine. The smell is dispatching *behavior* by type.
 
@@ -113,7 +113,7 @@ interface CartWriter { addLine(sku: Sku, qty: Quantity, signal?: AbortSignal): P
 The JS-specific forms:
 - A wrapper component that swallows props its base accepts — drops `className`, `ref`, `aria-*`, `onClick`, or `...rest` — breaks every caller that passes them.
 - A port whose contract returns a promise, implemented by a plain (non-`async`) function that **throws before returning one**; callers that handle failure with `.catch()` never see it.
-- A Magento RequireJS mixin or an overridden widget method that changes the return type or skips `this._super()` for some inputs — the JS `around` plugin with the same LSP risk.
+- A module-loader override or an overridden widget method that changes the return type or skips the parent call for some inputs — interception, with the same LSP risk as on the server.
 - A mock in a test that accepts inputs the real adapter rejects: the test proves nothing about the real thing.
 
 ---
@@ -151,7 +151,7 @@ export const reorder = (deps: { orders: OrderReader; recent: RecentActions; cloc
   };
 ```
 
-The injection mechanism is the host's: function parameters and factories anywhere; a context provider in React; values, outlets and the controller's `connect()` in Stimulus; the config object passed to a Magento widget or uiComponent; the `mount(el, props)` call of an island. **The service locator is the anti-pattern** in every host: `window.app.get('cart')`, `registry.get('checkout.steps')` reached into from business code, `require()` at call time.
+The injection mechanism is the host's: function parameters and factories anywhere; a context provider in React; a page controller's values and its connect step; the config object passed to a widget or component; the `mount(el, props)` call of an island. The stack skill names its framework's. **The service locator is the anti-pattern** in every host: `window.app.get('cart')`, `registry.get('checkout.steps')` reached into from business code, `require()` at call time.
 
 **Review cue:** any `fetch`, `XMLHttpRequest`, `$.ajax`, `axios`, `localStorage`, `document`, `window`, `process.env`, `Date.now()`, `new Date()`, `Math.random()` or framework import inside a domain or use-case module is a DIP violation.
 
@@ -159,13 +159,13 @@ The injection mechanism is the host's: function parameters and factories anywher
 
 ## Detection recipes — candidates, not findings
 
-Run these over the blast radius before the reading pass, in the diagnosis order above. Patterns are ripgrep (`rg -n`; `-P` where noted). Always add `-g '!**/node_modules/**' -g '!**/{dist,build,coverage,pub/static,public/build}/**'`, and `-g '!**/{tests,test,__tests__}/**' -g '!*.{test,spec}.*'` except for the test rows. Source globs: `-g '*.{js,mjs,cjs,jsx,ts,mts,cts,tsx}'`. Each hit is opened and judged; the right-hand column is what clears it.
+Run these over the blast radius before the reading pass, in the diagnosis order above. Patterns are ripgrep (`rg -n`; `-P` where noted). Always add `-g '!**/node_modules/**' -g '!**/{dist,build,coverage,public/build}/**'` and the served copies the stack skill names, and `-g '!**/{tests,test,__tests__}/**' -g '!*.{test,spec}.*'` except for the test rows. Source globs: `-g '*.{js,mjs,cjs,jsx,ts,mts,cts,tsx}'`. Each hit is opened and judged; the right-hand column is what clears it.
 
 | Principle | Search | Cleared when |
 |---|---|---|
 | DIP | `\bfetch\(\|axios\b\|XMLHttpRequest\|\$\.(ajax\|get\|post)\(\|localStorage\|sessionStorage\|indexedDB\|document\.\|window\.\|process\.env` in `**/{domain,model,entities,application,use-cases,core}/**` | never in those folders; move it behind a port |
 | DIP | `Date\.now\(\)\|new Date\(\)\|Math\.random\(\)\|crypto\.randomUUID\(` in the same folders | the value is an argument's default at the edge; otherwise a `Clock`/`IdGenerator` port |
-| DIP | `^import .* from ['"](react\|react-dom\|@hotwired/stimulus\|knockout\|jquery\|alpinejs)` in the same folders | never |
+| DIP | `^import .* from ['"](react\|react-dom\|jquery)` in the same folders, with the page's component framework added from the stack skill | never |
 | DIP | `window\.\w+\s*=\|globalThis\.\w+\s*=\|window\[['"]` | the project's documented bridge between classic scripts (one namespaced object), written by an entry point — say so in the report |
 | SRP | files named `utils?\|helpers?\|common\|misc\|functions` (`rg --files \| rg -i '/(utils?\|helpers?\|common\|misc)\.[cm]?[jt]sx?$'`) | the file has one charter its name states (`string-utils` holding only string functions is still a smell: name the concern) |
 | SRP | `wc -l` over the radius, longest first; `rg -c 'useEffect\|useState' <file>` | above ~250 lines, or more than ~5 effects/states, read for a second reason to change |

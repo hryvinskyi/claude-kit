@@ -1,3 +1,12 @@
+---
+name: magento2-architecture-php
+description: Magento 2's idiom for the architecture:clean-architecture-php rubric — Service Contracts (Api/ and Api/Data/) as ports and published language, di.xml preferences, virtual types and injected pools, plugins and observers with their caveats, ViewModels, generated factories, module.xml sequence and @api, DDD-lite within Magento's constraints, the outbox on the db queue connection, and how templates hand config and assets to the browser code (theme-assets from the PHP side). Use together with architecture:clean-architecture-php whenever PHP in a Magento 2 project is reviewed, planned or written; the browser half (RequireJS/Knockout, theme-assets, Hyvä/Alpine) is magento2:magento2-architecture-frontend.
+---
+
+Load this skill together with `architecture:clean-architecture-php`. A file named without a skill
+(`clean-architecture.md`, `solid.md`, `ddd.md`, `onion-modules.md`, `integration-patterns.md`,
+`SKILL.md`) is that core skill's.
+
 # Clean Architecture in Magento 2
 
 Magento is framework-first: models extend `AbstractModel`, persistence runs through ResourceModels/Collections, and wiring is `di.xml`. You will not get a textbook four-layer app — but the dependency rule, SOLID, and DDD-lite apply directly, and Magento gives you a first-class boundary mechanism: **Service Contracts**. Read `clean-architecture.md`, `solid.md`, `ddd.md` first.
@@ -43,7 +52,7 @@ interface OrderInterface
 
 ## 2. DIP wiring — `di.xml` `<preference>` and constructor injection
 
-A `<preference>` binds a contract to an implementation — the same inversion as a Symfony alias:
+A `<preference>` binds a contract to an implementation — the inversion the core skill calls the container's binding:
 ```xml
 <!-- etc/di.xml -->
 <preference for="Acme\Sales\Api\OrderRepositoryInterface"
@@ -154,14 +163,14 @@ Full tactical DDD (pure aggregates mapped to persistence) usually **isn't worth 
 
 ## 8. The module's browser code — the PHP side of the seam
 
-The script itself — its structure, how the page loads it, what it may assume — is reviewed with `architecture:clean-architecture-js` (`references/magento2-frontend.md` there: RequireJS/Knockout, theme-assets vanilla scripts, Hyvä/Alpine). This skill owns what the module's PHP hands to it:
+The script itself — its structure, how the page loads it, what it may assume — is reviewed with `architecture:clean-architecture-js` and `magento2:magento2-architecture-frontend` (RequireJS/Knockout, theme-assets vanilla scripts, Hyvä/Alpine). This skill owns what the module's PHP hands to it:
 
 - **The ViewModel builds the config** — a typed array or DTO computed from services behind `Api/`, never in the template. When the block is cacheable, it contains nothing private: a customer's name, cart count or group price printed into full-page-cached HTML is served to every visitor of that page; private data reaches the script through customer-data sections or a private endpoint.
 - **The template prints it escaped**: `Magento\Framework\Serialize\Serializer\JsonHexTag` into a `<script type="application/json">` block, or `$escaper->escapeHtmlAttr($json)` into a `data-*` attribute. Never `window.fooConfig = <?= json_encode(...) ?>` and never JSON assembled by hand around an unescaped `<?= $block->getX() ?>`.
 - **The template asks for the asset through the renderer the project uses** — with `hryvinskyi/magento2-theme-assets`, `Hryvinskyi\ThemeAssets\Api\AssetRendererInterface` obtained through a typed layout argument checked with `instanceof`, through `$viewModels->require()`, or by constructor injection into the feature's ViewModel. `$viewModels->require()` is `ObjectManager::get()` underneath — one shared instance per request: fine for a stateless view model, wrong for one holding per-block state, which is built per block by a factory. Never `ObjectManager` in the template.
 - **The module declares what it renders**: the package (`composer.json` require, `Hryvinskyi_ThemeAssets` in the `module.xml` sequence) and every module whose fileId (`Vendor_Module::js/file.js`) it renders — or the asset moves to its owner.
 - **Wording** is translated with `__()` into the config or the markup, or with `$t()` and the module's `i18n/*.csv` in AMD code — never assembled in the browser from English literals.
-- **The seam is tested by rendering**: a template test with a recording fake of `AssetRendererInterface` (a marker tag per fileId, mode and attributes) asserts what the template requests and the escaped config it prints. A test that reads the `.phtml` as text proves nothing (the engineering standards in your user `CLAUDE.md`, §*Tests run code*).
+- **The seam is tested by rendering**: a template test with a recording fake of `AssetRendererInterface` (a marker tag per fileId, mode and attributes) asserts what the template requests and the escaped config it prints. A test that reads the `.phtml` as text proves nothing (the engineering standards, §*Tests run code*).
 
 ## Magento 2 review checklist
 - [ ] Consumers depend on `Api/` + `Api/Data/`, never on concrete `Model\`.
@@ -172,3 +181,84 @@ The script itself — its structure, how the page loads it, what it may assume �
 - [ ] Stable contracts are marked `@api`; changes are additive (backward compatible).
 - [ ] Value objects used for money/ids/quantities; complex modules only add a pure `Domain/` layer when invariants justify it.
 - [ ] Browser-code seam: ViewModels build the config (nothing private in cacheable output); templates print it escaped (`JsonHexTag`, `escapeHtmlAttr`) and request assets through the project's renderer, never `ObjectManager`; the module declares the renderer's package and every module whose asset it renders; the browser code itself passes `architecture:clean-architecture-js`.
+
+## 9. The core lenses in Magento's idiom
+
+The core skill states each rule in plain PHP. This section is where those rules meet Magento's names.
+
+### Layers
+
+| Layer | In Magento 2 |
+|-------|--------------|
+| **Entities** | Domain model / service logic kept off `AbstractModel` where feasible |
+| **Use Cases** | Service-contract implementations behind `Api/` |
+| **Interface Adapters** | Controllers, Blocks/ViewModels, `Api/Data/` DTOs, ResourceModels, Magento repository *implementations* |
+| **Frameworks & Drivers** | The Magento framework and kernel, MySQL, `di.xml` wiring and glue |
+
+- **What the inner layers never import:** no `Magento\Framework\*`. In review, grep domain and application code for `Magento\Framework` and `ObjectManager`; an inner class that needs `di.xml` glue to work is a candidate violation. Magento base classes and the `ObjectManager` reached from domain or use-case code are the framework leaking inward.
+- **What crosses a boundary:** never a Magento `Model`. In Magento this discipline is built in: **`Api/Data/` interfaces are the DTOs** that cross the service-contract boundary, never the `Model` (§1). A Magento `Model` crossing the API/service-contract boundary is a leaky boundary.
+- **Plan mode in Magento's terms:** an adapter is the Magento `Api/` implementation (a repository, a management service); the wiring is a `di.xml` `<preference>` (§2); published contracts carry `@api`.
+- **Debt specific to Magento:** business rules stranded in Observers and Blocks; never reach for `ObjectManager` to dodge injection (§2).
+
+### Humble edges
+
+Keep controllers and Blocks humble and push logic into a **ViewModel** (`ArgumentInterface`) or a service behind `Api/` — never business logic in a `.phtml` template or a fat Block (§5).
+
+### Modules, rings and enforcement
+
+- Magento already forces capability-first modules (`Vendor/Ordering`, `Vendor/Billing`), each with its own `Api/ Model/ etc/`. That module boundary *is* your architectural boundary — respect it. One bounded context ≈ one module `Vendor_Module`, exposing only its `Api/` service contracts.
+- Every `module.xml` `<sequence>` entry is a package-level edge like a `composer.json` require, and points inward.
+- Magento core models bridges: `Magento_CatalogInventory`, `Magento_GroupedProduct` are bridges over `Catalog`+`Inventory`, `Catalog`+`Sales`.
+- Vocabulary is a dependency in `di.xml` too: it names only modules the module declares.
+- **Enforcement:** no Deptrac by default; rely on the `@api` annotation to mark stable contracts, depend only on other modules' `Api/`, and keep `composer.json` `require` honest so module dependencies are explicit and acyclic. `module.xml` `<sequence>` + `composer.json` mirror the same inward edges; no tool checks resource ownership, so grep for your module's config paths/table names in *other* modules' `etc/` during review.
+- **Outer rings contributing to an inner module:** `di.xml` array/pool arguments into an inner composite; `system.xml` sections shipped per module; extension attributes on inner DTOs; observers on inner events.
+
+### SOLID
+
+- **OCP:** strategy pools are a `di.xml` array (§3). Other extension points: plugins and `events.xml` observers. Prefer adding a strategy to the pool over an `around` plugin — plugins are powerful but obscure control flow (§4).
+- **LSP:** a plugin that changes a public method's documented contract for some callers is an LSP hazard.
+- **ISP:** Magento's Service Contracts are deliberately split (`OrderRepositoryInterface` vs `OrderManagementInterface`) for the role-interface reason.
+- **DIP:** the service locator is `ObjectManager::get()`/`create()` (§2). Detection recipe, with `solid.md`'s conventions:
+
+  | Principle | Search | Cleared when |
+  |---|---|---|
+  | DIP | `ObjectManager::` | never in domain or application code |
+
+  A client a recipe finds is built by the container from its definition in `di.xml`.
+
+### No `new`, in Magento's vocabulary
+
+- **Factories:** Magento generates a `…Factory` for any class, and its `create()` asks the ObjectManager (§2).
+- **The composition root** is Magento's bootstrap.
+
+### DDD
+
+- **Published Language:** the module's `Api/Data/` DTOs.
+- **Load `ddd.md` for any `Api/Data/` type.** A session that read only the core `SKILL.md` shipped a closed value object in a Magento `Api/Data/` with no extension point, unvalidated fields and no interface.
+- **DDD-lite:** Magento is a framework-first model. Its models extend `\Magento\Framework\Model\AbstractModel` and are coupled to ResourceModels — genuinely rich, persistence-free aggregates are hard, and full tactical DDD is usually **overkill** for a typical module. Treat **Service Contracts** (`Api/` + `Api/Data/`) as your published language and use-case boundary; concentrate business rules in domain service classes, not in Blocks, controllers, templates, or fat Observers. How far to go: §7.
+- **Repositories:** the implementation is a Magento repository behind `Api/OrderRepositoryInterface` (§1).
+
+### Integration patterns on Magento
+
+- **Outbox:** `queue_message` written through the publisher inside the same DB transaction behaves as an outbox with the `db` connection, and not with `amqp`.
+- **Dual-write recipe:** the transport for a message class is declared in `queue_topology.xml`.
+- **Consumer recipe:** the consumers to check for idempotency are the `ConsumerInterface` implementations.
+- **A cache or resilience decorator** is wired by a `di.xml` `<preference>` for the port that points at the decorator, whose `<type>` argument injects the real implementation.
+
+### The browser half
+
+The JavaScript a Magento module ships — RequireJS/Knockout and jQuery widgets, Hyvä/Alpine, vanilla scripts and styles rendered through `hryvinskyi/magento2-theme-assets` — is reviewed with `architecture:clean-architecture-js` and `magento2:magento2-architecture-frontend`; a change that touches JS/TS loads both. A Knockout component fusing rules, wording and transport is the PHP rubric's pitfall 10 on this stack. The seam on the PHP side is §8: the ViewModel that builds a widget's config, the template that prints it escaped and asks the renderer for the asset.
+
+### References
+
+- Magento *Service Contracts* — https://developer.adobe.com/commerce/php/development/components/service-contracts/
+
+## Implementer checklist on this stack
+
+Read with the core skill's `references/implementer-checklist.md`.
+
+- Inner code names no `Magento\Framework` class and no `ObjectManager`.
+- What crosses a boundary: `Api/` + `Api/Data/` contracts, never `AbstractModel`s. Wiring is a `di.xml` preference or plugin; a class that is built but never wired ships nothing, so a test resolves it through the real container.
+- Factories: Magento generates `…Factory`, whose `create()` asks the ObjectManager; nobody writes one by hand. The composition root is Magento's bootstrap.
+- Declared dependencies are the `module.xml` sequence and the composer require; a neighbour's name appears in neither the code nor the wiring unless it is declared there.
+- The browser seam: the ViewModel builds the config, the template prints it escaped and asks the renderer for the asset (§8). JS/TS source is written against `architecture:clean-architecture-js` and `magento2:magento2-architecture-frontend`.

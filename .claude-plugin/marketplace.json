@@ -4,12 +4,22 @@
     "name": "Volodymyr Hryvinskyi",
     "url": "https://github.com/hryvinskyi"
   },
-  "description": "Project-agnostic Claude Code plugins: architecture rubrics, a plan-review-implement pipeline with agent evals, QA skills, guard hooks, a project knowledge vault, and a paced queue for GitHub Projects boards.",
+  "description": "Project-agnostic Claude Code plugins: architecture rubrics with a stack plugin per framework, a plan-review-implement pipeline with agent evals, QA skills, guard hooks, a project knowledge vault, and a paced queue for GitHub Projects boards.",
   "plugins": [
     {
       "name": "architecture",
       "source": "./plugins/architecture",
-      "description": "Clean Architecture, SOLID and DDD rubrics for PHP (Symfony, Magento 2) and JavaScript/TypeScript, with an implementer's cut and stack references."
+      "description": "Clean Architecture, SOLID and DDD rubrics for PHP and JavaScript/TypeScript, with an implementer's cut and detection recipes; a stack plugin adds its framework's idiom."
+    },
+    {
+      "name": "symfony",
+      "source": "./plugins/symfony",
+      "description": "Stack plugin: the architecture rubrics in Symfony's idiom, for its PHP and for the browser code its pages load."
+    },
+    {
+      "name": "magento2",
+      "source": "./plugins/magento2",
+      "description": "Stack plugin: the architecture rubrics in Magento 2's idiom, for its PHP and for the browser code its pages load."
     },
     {
       "name": "pipeline",

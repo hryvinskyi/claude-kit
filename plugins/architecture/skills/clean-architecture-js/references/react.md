@@ -120,13 +120,13 @@ User-facing strings go through the project's i18n layer — per-feature dictiona
 
 ## 10. Islands in a server-rendered page
 
-In Magento and Symfony, React usually runs as an **island**: a bundle mounted into one element of a page the server rendered.
+In a server-rendered application, React usually runs as an **island**: a bundle mounted into one element of a page the server rendered.
 
 - **The island's public surface is its mount function**: `mountX(el: HTMLElement, props: XProps): { unmount(): void }`. Nothing else is imported by the host.
 - **Props are a DTO parsed at mount** — from the host controller's values or a JSON script tag — including everything environment-shaped: API base URL, CSRF token, locale, a `navigate(href)` callback. The island never reads `window` globals the host happens to define and never queries outside its root.
-- **The host owns the lifecycle**: a Stimulus controller (or a small bootstrap) lazy-loads the bundle with `import()`, calls `mount` in `connect()`, and `unmount` in `disconnect()` — so Turbo navigation, Live Component re-renders and removed markup do not leak roots.
+- **The host owns the lifecycle**: a page controller (or a small bootstrap) lazy-loads the bundle with `import()`, calls `mount` when it connects, and `unmount` when it disconnects — so client-side navigation, server re-renders and removed markup do not leak roots. The frontend stack skill names its framework's host.
 - **One `createRoot` per mount point**; render after the locale dictionary is loaded, and guard that async gap against an unmount that arrives first.
-- The island's bundle is built by the project's pipeline (esbuild, Vite, Encore) and type-checked by `tsc --noEmit` — see `typescript.md` §9 and the host references.
+- The island's bundle is built by the project's pipeline (esbuild, Vite, or the framework's own) and type-checked by `tsc --noEmit` — see `typescript.md` §9 and the frontend stack skill.
 
 ## 11. Next.js and server components (when the project uses them)
 

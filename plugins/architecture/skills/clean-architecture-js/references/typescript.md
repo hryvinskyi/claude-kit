@@ -118,8 +118,8 @@ Node's type stripping (`node --test file.ts` on current Node) handles only **era
 
 ## 8. Declaration files
 
-- **AMD / RequireJS modules** (Magento): a local `types/` folder with `declare module 'Vendor_Module/js/price-box' { … }` for the few modules the TypeScript code imports — typed as narrowly as the code uses them.
-- **Globals**: `declare global` only for globals the platform really provides (a `window.checkoutConfig` the page prints), typed as `unknown` or as a parsed shape — never `any`.
+- **Module-loader modules** (AMD and the like): a local `types/` folder with `declare module '<loader id>' { … }` for the few modules the TypeScript code imports — typed as narrowly as the code uses them.
+- **Globals**: `declare global` only for globals the platform really provides (a `window.appConfig` the page prints), typed as `unknown` or as a parsed shape — never `any`.
 - **Untyped packages**: a minimal module declaration beside the code, not `declare module '*'` and not a blanket `any` shim.
 - `.d.ts` files describe; they never contain logic, and a hand-written one is reviewed like code.
 
@@ -128,9 +128,7 @@ Node's type stripping (`node --test file.ts` on current Node) handles only **era
 | Pipeline | What compiles `.ts` | What type-checks |
 |---|---|---|
 | Vite / esbuild / swc scripts | the bundler, types erased | only `tsc --noEmit` — add it to the gate if missing |
-| Symfony AssetMapper | `sensiolabs/typescript-bundle` (swc binary), or an esbuild script whose output lands outside `assets/` | `tsc --noEmit` per `tsconfig` |
-| Symfony Webpack Encore | `enableTypeScriptLoader()` | `enableForkedTypeScriptTypesChecking()` or `tsc --noEmit` |
-| Magento storefront | a build step (esbuild, `tsc`) emitting the `.js` that `view/<area>/web/js/` serves — `module: amd` when RequireJS loads it, an IIFE or ES module when theme-assets renders it | `tsc --noEmit` |
+| A server framework's asset pipeline | the rows in the frontend stack skill | `tsc --noEmit` unless the stack skill names a checker |
 | Node scripts and tests | Node's type stripping, or `tsx` | `tsc --noEmit` |
 
 A compiled `.js` committed next to its `.ts` source with no build step in the project's tooling is a **fork**, not a build: the two drift, and the page runs whichever was edited last. Either wire the build (and a check that the committed output matches it), or delete one of them.
