@@ -20,9 +20,11 @@ import re
 import subprocess
 import sys
 import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Iterator, Optional, Union
 
 HOME_CLAUDE = Path.home() / ".claude"
 FIND_VAULT = Path(__file__).resolve().parent / "find-vault.sh"
@@ -151,24 +153,89 @@ def project_owns(root: Path, event: str) -> bool:
     return f'"{event}"' in text
 
 
-def take_lock(lock: Path, stale: int = 600) -> bool:
-    """Claim a lock file, stealing one that has gone stale."""
+def _claim(lock: Path, stale: int) -> Optional[str]:
+    """Create a lock file holding a token of this process; steal one that has gone stale. None when held."""
+    token = f"{os.getpid()} {uuid.uuid4().hex}"
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.write(fd, str(os.getpid()).encode())
+        os.write(fd, token.encode())
         os.close(fd)
-        return True
+        return token
     except FileExistsError:
         try:
             if time.time() - lock.stat().st_mtime < stale:
-                return False
+                return None
             lock.unlink()
         except OSError:
-            return False
-        return take_lock(lock, stale)
+            return None
+        return _claim(lock, stale)
     except OSError:
-        return False
+        return None
+
+
+def take_lock(lock: Path, stale: int = 600) -> bool:
+    """Claim a lock file, stealing one that has gone stale."""
+    return _claim(lock, stale) is not None
+
+
+class HeldLock:
+    """A lock file this process holds."""
+
+    def __init__(self, path: Path, token: str) -> None:
+        self.path = path
+        self.token = token
+
+    def refresh(self) -> None:
+        """Mark the lock as alive, so a long run of steps never looks stale to a waiting process."""
+        try:
+            os.utime(str(self.path), None)
+        except OSError:
+            pass
+
+    def release(self) -> None:
+        """Remove the lock file, but only while it is still this holder's — never one a waiter stole."""
+        try:
+            if self.path.read_text(encoding="utf-8") == self.token:
+                self.path.unlink()
+        except OSError:
+            pass
+
+
+@contextmanager
+def holding(lock: Path, wait: float = 0.0, stale: int = 600, poll: float = 0.25,
+            sleep: Callable[[float], None] = time.sleep,
+            clock: Callable[[], float] = time.monotonic) -> Iterator[Optional[HeldLock]]:
+    """Hold a lock file for the block, waiting up to `wait` seconds for it; yields None when it stayed taken."""
+    deadline = clock() + wait
+    token = _claim(lock, stale)
+    while token is None and clock() < deadline:
+        sleep(poll)
+        token = _claim(lock, stale)
+    if token is None:
+        yield None
+        return
+    held = HeldLock(lock, token)
+    try:
+        yield held
+    finally:
+        held.release()
+
+
+def handle(repo: Path) -> str:
+    """The person this clone acts for, as a short name a git ref can hold.
+
+    `git config vault.handle` when set, else `$VAULT_HANDLE`, else the git user name — each reduced to
+    lower-case letters, digits and hyphens.
+    """
+    code, out = git_out(repo, "config", "vault.handle", timeout=10)
+    raw = out.strip() if code == 0 else ""
+    raw = raw or os.environ.get("VAULT_HANDLE", "").strip()
+    if not raw:
+        code, out = git_out(repo, "config", "user.name", timeout=10)
+        raw = out.strip() if code == 0 else ""
+    raw = raw or os.environ.get("USER", "")
+    return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-") or "someone"
 
 
 def spawn(args: list[str], cwd: Path) -> None:

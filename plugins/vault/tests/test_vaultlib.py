@@ -113,6 +113,44 @@ class OwnershipLockAndDisplayTests(StateIsolated):
         os.utime(lock, (old, old))
         self.assertTrue(vaultlib.take_lock(lock, stale=600))
 
+    def test_a_held_lock_is_waited_for_and_released_when_the_block_ends(self) -> None:
+        lock = Path(tempfile.mkdtemp()) / "x.lock"
+        first = vaultlib.holding(lock)
+        self.assertIsNotNone(first.__enter__())
+        waits: list = []
+
+        def other_finishes(seconds: float) -> None:
+            waits.append(seconds)
+            first.__exit__(None, None, None)
+
+        with vaultlib.holding(lock, wait=30.0, sleep=other_finishes) as held:
+            self.assertIsNotNone(held)
+            self.assertTrue(lock.exists())
+        self.assertEqual(waits, [0.25])
+        self.assertFalse(lock.exists())
+
+    def test_a_lock_that_stays_taken_yields_none_once_the_wait_is_over(self) -> None:
+        lock = Path(tempfile.mkdtemp()) / "x.lock"
+        now = [0.0]
+
+        def tick(seconds: float) -> None:
+            now[0] += seconds
+
+        with vaultlib.holding(lock):
+            with vaultlib.holding(lock, wait=1.0, sleep=tick, clock=lambda: now[0]) as held:
+                self.assertIsNone(held)
+        self.assertEqual(now[0], 1.0)
+
+    def test_a_holder_refreshes_its_lock_and_never_removes_one_it_lost(self) -> None:
+        lock = Path(tempfile.mkdtemp()) / "x.lock"
+        with vaultlib.holding(lock) as held:
+            old = time.time() - 1000
+            os.utime(lock, (old, old))
+            held.refresh()
+            self.assertGreater(lock.stat().st_mtime, old + 900)
+            lock.write_text("another process that stole it")
+        self.assertEqual(lock.read_text(), "another process that stole it")
+
     def test_a_path_is_shown_relative_inside_the_project_and_home_anchored_outside_it(self) -> None:
         root = Path(tempfile.mkdtemp()).resolve()
         vault = vaultlib.Vault(root=root, path=root / "kb", mode="no-git")
