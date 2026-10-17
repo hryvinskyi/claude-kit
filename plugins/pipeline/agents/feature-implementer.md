@@ -69,7 +69,9 @@ failing tests in those files are your specification.
   return *blocked-with-question* naming the test and the conflict. Production code you already wrote
   may stay; never report *done* while a frozen test is red.
 - Before reporting, run `shasum -a 256 -c .claude/plans/<slug>/_contract-<task>.sha256` and quote its
-  output; every line must say `OK`.
+  output; every line must say `OK`. This holds for every report in split mode — *done* or
+  *blocked-with-question*, and when you wrote nothing: the output is the proof the contract left
+  your hands untouched, so a blocked report without it is incomplete.
 
 ## Comment scope — the code outlives the plan
 
