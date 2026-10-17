@@ -10,6 +10,8 @@ FAIL=0
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export XDG_CONFIG_HOME="$TMP/xdg"
+# A policy override in the caller's environment must not leak into the cases below.
+unset CLAUDE_KIT_GITHUB_REST_ONLY CLAUDE_KIT_FORBID_ASSISTANT_COMMIT_TRAILERS
 
 ok() { PASS=$((PASS + 1)); }
 ko() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
@@ -725,6 +727,123 @@ OUT=$(bash_json "printf '// FIXME later\n' > src/a.js" "$TMP/node" "$TMP/tj-base
 case "$OUT" in *"deferral marker"*"CLAUDE.standards.md §Architecture and tech debt"*) ok ;;
   *) ko "bash write: debt denial names the standards"; echo "$OUT" ;; esac
 case "$OUT" in *"~/.claude"*) ko "bash write: denial points at a personal path"; echo "$OUT" ;; *) ok ;; esac
+
+# ---------- github_rest_only policy: policies.resolve ----------
+# policy_resolve <name> [VAR=value ...] -> "<value> <source>" for the named policy under that environment
+policy_resolve() {
+  local name="$1"; shift
+  python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import policies
+env = dict(a.split("=", 1) for a in sys.argv[3:])
+value, source = policies.resolve(sys.argv[2], env)
+print(value, source)' "$H" "$name" "$@"
+}
+expect_policy() {
+  local name="$1" want="$2"; shift 2
+  local got; got="$(policy_resolve "$@")"
+  [ "$got" = "$want" ] && ok || ko "$name (want '$want', got '$got')"
+}
+RESTP=github_rest_only
+rm -f "$POLICY"
+expect_policy "policy resolve: default is off" "False default" $RESTP
+printf 'github_rest_only = true\n' > "$POLICY"
+expect_policy "policy resolve: file on" "True file" $RESTP
+expect_policy "policy resolve: env on beats a file that is off" "True environment" $RESTP CLAUDE_KIT_GITHUB_REST_ONLY=1
+printf 'github_rest_only = false\n' > "$POLICY"
+expect_policy "policy resolve: env 1 beats file off" "True environment" $RESTP CLAUDE_KIT_GITHUB_REST_ONLY=1
+expect_policy "policy resolve: env TRUE (any case) beats file off" "True environment" $RESTP CLAUDE_KIT_GITHUB_REST_ONLY=TRUE
+printf 'github_rest_only = true\n' > "$POLICY"
+expect_policy "policy resolve: env 0 beats file on" "False environment" $RESTP CLAUDE_KIT_GITHUB_REST_ONLY=0
+expect_policy "policy resolve: env false beats file on" "False environment" $RESTP CLAUDE_KIT_GITHUB_REST_ONLY=false
+expect_policy "policy resolve: malformed env falls back to the file" "True file" $RESTP CLAUDE_KIT_GITHUB_REST_ONLY=maybe
+expect_policy "policy resolve: empty env falls back to the file" "True file" $RESTP CLAUDE_KIT_GITHUB_REST_ONLY=
+rm -f "$POLICY"
+expect_policy "policy resolve: malformed env with no file is the default" "False default" $RESTP CLAUDE_KIT_GITHUB_REST_ONLY=2
+expect_policy "policy resolve: the override is per policy" "False default" forbid_assistant_commit_trailers CLAUDE_KIT_GITHUB_REST_ONLY=1
+
+# ---------- bash_guard.py: github_rest_only ----------
+# gh_case <name> <want_exit> <command>, under whatever policy state is set
+gh_case() { expect_exit "gh: $1" "$2" "$(bash_json "$3")" "$B"; }
+rm -f "$POLICY"
+gh_case "policy off by default: gh issue create allowed" 0 'gh issue create --title x'
+gh_case "policy off by default: gh api graphql allowed" 0 'gh api graphql -f query=x'
+printf 'github_rest_only = false\n' > "$POLICY"
+gh_case "policy false in the file: gh pr list allowed" 0 'gh pr list'
+export CLAUDE_KIT_GITHUB_REST_ONLY=0
+printf 'github_rest_only = true\n' > "$POLICY"
+gh_case "env off beats file on: gh issue list allowed" 0 'gh issue list'
+export CLAUDE_KIT_GITHUB_REST_ONLY=maybe
+gh_case "malformed env falls back to the file on: gh issue list refused" 2 'gh issue list'
+rm -f "$POLICY"
+gh_case "malformed env with no file: gh issue list allowed" 0 'gh issue list'
+export CLAUDE_KIT_GITHUB_REST_ONLY=1
+printf 'github_rest_only = false\n' > "$POLICY"
+gh_case "env on beats file off: gh issue list refused" 2 'gh issue list'
+rm -f "$POLICY"
+# the policy is on (by the environment) for the rest of the section
+for c in 'gh issue create --title x -b y' 'gh issue view 12' 'gh issue comment 12 -b x' 'gh issue close 12' \
+  'gh issue list' 'gh issue edit 12 --title x' 'gh pr create --fill' 'gh pr view 3' 'gh pr list' \
+  'gh pr merge 3' 'gh pr checks 3' 'gh project list' 'gh project item-add 1 --url u' 'gh repo view' \
+  'gh repo view o/r --json name' 'gh release list' 'gh search issues foo' 'gh search repos foo' \
+  'gh api graphql -f query=x' 'gh api graphql --paginate -f query=x' 'gh api -X POST graphql -f query=x' \
+  'gh api /graphql -f query=x' 'gh api --hostname h.example graphql -f query=x'; do
+  gh_case "refused: $c" 2 "$c"
+done
+gh_case "refused: command gh" 2 'command gh issue list'
+gh_case "refused: env X=1 gh" 2 'env X=1 gh pr list'
+gh_case "refused: VAR=1 gh" 2 'GH_PAGER=cat gh pr list'
+gh_case "refused: absolute path" 2 '/opt/homebrew/bin/gh issue list'
+gh_case "refused: after &&" 2 'cd /tmp && gh issue list'
+gh_case "refused: after ;" 2 'echo hi; gh pr list'
+gh_case "refused: piped" 2 'gh pr list | head -3'
+gh_case "refused: command substitution" 2 'echo $(gh pr list)'
+gh_case "refused: assigned from a command substitution" 2 'N=$(gh issue view 3)'
+gh_case "refused: -R before the subcommand" 2 'gh -R owner/repo issue list'
+gh_case "refused: --repo=value before the subcommand" 2 'gh --repo=owner/repo pr view 3'
+gh_case "refused: --hostname before the subcommand" 2 'gh --hostname h.example issue list'
+gh_case "refused: -R between subcommand and action" 2 'gh issue -R owner/repo list'
+gh_case "allowed: gh api repos" 0 'gh api repos/o/r/issues'
+gh_case "allowed: gh api POST" 0 'gh api --method POST repos/o/r/issues -f title=x'
+gh_case "allowed: gh api -X GET" 0 'gh api -X GET repos/o/r/pulls'
+gh_case "allowed: gh api with a query body mentioning graphql" 0 'gh api repos/o/r/issues -f body=graphql'
+gh_case "allowed: gh api with a header flag before the endpoint" 0 'gh api -H "Accept: application/json" repos/o/r'
+gh_case "allowed: gh auth status" 0 'gh auth status'
+gh_case "allowed: gh run list" 0 'gh run list'
+gh_case "allowed: gh run view" 0 'gh run view 12'
+gh_case "allowed: gh repo clone" 0 'gh repo clone o/r'
+gh_case "allowed: gh repo create" 0 'gh repo create o/r --private'
+gh_case "allowed: gh release create" 0 'gh release create v1 --notes x'
+gh_case "allowed: gh release upload" 0 'gh release upload v1 a.zip'
+gh_case "allowed: gh release download" 0 'gh release download v1'
+gh_case "allowed: gh with no subcommand" 0 'gh'
+gh_case "allowed: gh version" 0 'gh --version'
+gh_case "allowed: echo mentioning gh issue" 0 'echo gh issue list'
+gh_case "allowed: git commit message mentioning gh pr" 0 'git commit -m "docs: replace gh pr list"'
+gh_case "allowed: grep for gh issue" 0 'grep -r "gh issue" docs'
+gh_case "allowed: another program named like a gh subcommand" 0 'issue list'
+
+OUT=$(bash_json 'gh issue create --title x' | python3 "$B" 2>&1)
+case "$OUT" in *"BLOCKED by bash_guard.py (guards plugin)"*"gh issue create"*"GraphQL"*"github_rest_only policy is on (set by the CLAUDE_KIT_GITHUB_REST_ONLY environment variable)"*) ok ;;
+  *) ko "gh: denial names the command, the allowance, the policy and the variable"; echo "$OUT" ;; esac
+case "$OUT" in *"gh api --method POST repos/OWNER/REPO/issues -f title=... -F body=@file"*) ok ;;
+  *) ko "gh: issue create denial names its REST form"; echo "$OUT" ;; esac
+case "$OUT" in *"~/.claude"*) ko "gh: denial cites a personal config path"; echo "$OUT" ;; *) ok ;; esac
+OUT=$(bash_json 'gh -R o/r pr list' | python3 "$B" 2>&1)
+case "$OUT" in *"gh api 'repos/OWNER/REPO/pulls?state=open'"*) ok ;; *) ko "gh: pr list denial names its REST form"; echo "$OUT" ;; esac
+OUT=$(bash_json 'gh project item-list 1' | python3 "$B" 2>&1)
+case "$OUT" in *"board_enqueue"*"written only by its worker"*) ok ;; *) ko "gh: project denial names the board queue"; echo "$OUT" ;; esac
+OUT=$(bash_json 'gh pr merge 3' | python3 "$B" 2>&1)
+case "$OUT" in *"gh issue close"*"gh pr create"*"gh project"*) ok ;; *) ko "gh: a command without an exact row gets the whole table"; echo "$OUT" ;; esac
+unset CLAUDE_KIT_GITHUB_REST_ONLY
+printf 'github_rest_only = true\n' > "$POLICY"
+OUT=$(bash_json 'gh issue create --title x' | python3 "$B" 2>&1)
+case "$OUT" in *"github_rest_only policy is on (set by $POLICY)"*) ok ;; *) ko "gh: denial names the policy file when the file switched it on"; echo "$OUT" ;; esac
+gh_case "file on: gh issue list refused" 2 'gh issue list'
+gh_case "file on: gh api repos allowed" 0 'gh api repos/o/r/issues'
+OUT=$(bash_json 'gh issue list' | CLAUDE_KIT_GITHUB_REST_ONLY=0 python3 "$B" 2>&1; echo "rc=$?")
+case "$OUT" in *"rc=0"*) ok ;; *) ko "gh: env off overrides the file for one process"; echo "$OUT" ;; esac
+rm -f "$POLICY"
 
 echo "----------------------------------------"
 echo "hooks tests: $PASS passed, $FAIL failed"
