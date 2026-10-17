@@ -79,10 +79,33 @@ for a local-directory marketplace and for `--plugin-dir`.
   suppressions and deferral markers). Those hooks are not part of these three plugins; without them
   the rubric is still loaded, because the agents are told to.
 - **Engineering standards.** Where a command or skill cites §*Architecture and tech debt* or
-  §*Tests run code*, it means the engineering standards your user `CLAUDE.md` carries.
+  §*Tests run code*, it means `standards/CLAUDE.standards.md`, which your user `CLAUDE.md`
+  imports (see below).
 - `qa:bug-hunt` drives a real browser: Node with Playwright installed in the project, and the
   Playwright MCP server for the interactive walk.
 - `qa:tighten` finishes with the `humanizer:humanizer` skill when it is installed.
+
+## Engineering standards
+
+`standards/CLAUDE.standards.md` is the bar the plugins hold code to, written as instructions:
+text other people read never cites agent config, how a knowledge vault is used, architecture and
+tech debt (with the rule against `new SomeClass`, which is PHP's), tests that run code, and PHP and
+JavaScript/TypeScript static analysis. Make every session load it by importing it from your user
+`CLAUDE.md`:
+
+```sh
+python3 standards/import_standards.py           # appends the import line once
+python3 standards/import_standards.py --check   # reports; exits 1 when the import is missing
+```
+
+The import names the file in this clone (`@~/…` when the clone sits under your home directory,
+an absolute path otherwise), never a copy in the plugin cache, whose path changes with every
+plugin version. Claude Code expands an import in the user `CLAUDE.md` at launch without asking
+for approval, so an edit here applies from the next session on, and a branch of this clone
+without the file drops the standards from every session. The helper writes
+`$CLAUDE_CONFIG_DIR/CLAUDE.md` when that variable is set, and writes through a symbolic link rather
+than replacing it. It refuses to add the import when your `CLAUDE.md` already carries the standards'
+sections inline (every rule would load twice) or imports a standards file from another path.
 
 ## Licence
 
