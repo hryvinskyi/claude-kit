@@ -1,0 +1,9 @@
+{
+  "name": "guards",
+  "version": "0.1.0",
+  "description": "Guard hooks: refuse catastrophic shell commands, PHP and JS/TS source or plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and edits inside generated regions; lint edited PHP.",
+  "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
+  "repository": "https://github.com/hryvinskyi/claude-kit",
+  "license": "MIT",
+  "keywords": ["hooks", "guardrails", "safety", "tech-debt", "static-analysis", "php", "typescript"]
+}

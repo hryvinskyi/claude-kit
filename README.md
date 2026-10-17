@@ -9,6 +9,7 @@ rules (`CLAUDE.md`/`AGENTS.md`, its gates, its layout) and follows them.
 | `architecture` | Clean Architecture, onion-at-module-altitude, SOLID and DDD rubrics, with review and plan formats, an implementer's cut and detection recipes | skills `architecture:clean-architecture-php` (PHP: Symfony, Magento 2), `architecture:clean-architecture-js` (JavaScript, TypeScript, React, Node, and the browser code Magento and Symfony ship) |
 | `pipeline` | A feature pipeline that plans and verifies on the main model and delegates each task to an implementer, an adversarial plan reviewer, a bug-fix loop that starts from a failing test, and an eval harness that regression-tests the agents | commands `/pipeline:feature`, `/pipeline:bug-fix`, `/pipeline:explain`, `/pipeline:learn`, `/pipeline:update-codemaps`, `/pipeline:agent-evals`; agents `pipeline:devils-advocate`, `pipeline:feature-implementer`, `pipeline:feature-contract-writer` |
 | `qa` | A browser bug hunt that proves what breaks, and a text tightener | skills `qa:bug-hunt`, `qa:tighten` |
+| `guards` | Hooks that refuse catastrophic shell commands, PHP and JS/TS source or plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and hand edits inside generated regions, and lint each edited PHP file | hooks only: `PreToolUse` on `Edit\|Write` and `Bash`, `PostToolUse` on `Edit\|Write`; see [plugins/guards/README.md](plugins/guards/README.md) |
 
 `pipeline` depends on `architecture` (its agents load the rubric before they write code). The
 dependency is declared in its manifest, so Claude Code installs and enables `architecture` along
@@ -23,6 +24,7 @@ claude plugin marketplace add hryvinskyi/claude-kit
 claude plugin install architecture@claude-kit
 claude plugin install pipeline@claude-kit
 claude plugin install qa@claude-kit
+claude plugin install guards@claude-kit
 ```
 
 Or from a local clone, which is also how you work on the plugins:
@@ -76,8 +78,8 @@ for a local-directory marketplace and for `--plugin-dir`.
   `find-vault` command on `PATH`.
 - **The rubric gate.** The skills and agents refer to guard hooks by name (`plan_skill_gate.py`,
   which refuses a plan or source edit until the rubric is loaded, and `debt_guard.py`, which refuses
-  suppressions and deferral markers). Those hooks are not part of these three plugins; without them
-  the rubric is still loaded, because the agents are told to.
+  suppressions and deferral markers). They ship in the `guards` plugin; without it the rubric is
+  still loaded, because the agents are told to.
 - **Engineering standards.** Where a command or skill cites §*Architecture and tech debt* or
   §*Tests run code*, it means `standards/CLAUDE.standards.md`, which your user `CLAUDE.md`
   imports (see below).
