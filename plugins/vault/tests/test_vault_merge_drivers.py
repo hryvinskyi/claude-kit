@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Tests for the stamps and generated merge drivers and the vault-merge command (bin/vault_merge/).
 
-Pinned: stamps merge per (note, file) — kept, one side's, the changed one over a deletion, dropped
-when both changed it — and are written exactly as the vault check writes them; a generated note's
+Pinned: stamps merge per (note, file) — kept, one side's, the changed one over a deletion, the base
+entry when both sides changed it, the older review (by the project's history, the current side's when
+that cannot be told) when both added it — never dropped while either side has it, and are written
+exactly as the vault check writes them; the project's history is found the way the vault tools find
+a project's vault; a generated note's
 conflicts are resolved with the incoming side only when every one lies inside a region the clone's
 markers delimit, and the note is then listed once in the git dir's `vault-regenerate`; the command
 writes the merged file over %A and exits 0 or 1, falls back to git's text merge and its exit status
@@ -26,7 +29,7 @@ from vault_merge.driver import MergeInput
 from vault_merge.generated import REGENERATE, GeneratedDriver
 from vault_merge.gitmerge import Git
 from vault_merge.keyed import ANNOTATION
-from vault_merge.stamps import StampsDriver
+from vault_merge.stamps import ProjectHistory, ReviewHistory, StampsDriver
 
 
 def stamp(blob: str, commit: str = "c1", context: str = "x1") -> Dict[str, str]:
@@ -43,10 +46,22 @@ BASE_STAMPS = {
 }
 
 
+class KnownHistory(ReviewHistory):
+    """A history in which each listed commit descends from the ones before it; any other is unknown."""
+
+    def __init__(self, *line: str) -> None:
+        self.line = list(line)
+
+    def is_ancestor(self, older: str, newer: str) -> bool:
+        return older in self.line and newer in self.line and self.line.index(older) <= self.line.index(newer)
+
+
 class StampsTests(merge_support.IsolatedGitTestCase):
+    history: ReviewHistory = KnownHistory("c1", "c2", "c3", "c4")
+
     def merge(self, current: Dict[str, Any], incoming: Dict[str, Any],
               base: Dict[str, Any] = BASE_STAMPS) -> Tuple[Dict[str, Any], bytes, list]:
-        outcome = StampsDriver().merge(MergeInput(stamps_file(base), stamps_file(current), stamps_file(incoming),
+        outcome = StampsDriver(self.history).merge(MergeInput(stamps_file(base), stamps_file(current), stamps_file(incoming),
                                                   ".anchors.json"))
         self.assertTrue(outcome.resolved)
         return json.loads(outcome.merged)["notes"], outcome.merged, outcome.notes
@@ -74,20 +89,45 @@ class StampsTests(merge_support.IsolatedGitTestCase):
         self.assertIn("src/Tax.php", notes["Modules/billing.md"])
         self.assertIn("src/Index.php", notes["Plugins/search.md"])
 
-    def test_an_entry_changed_differently_on_both_sides_is_dropped(self) -> None:
-        current = self.changed("Modules/billing.md", "src/Invoice.php", stamp("b1", "c2"))
-        incoming = self.changed("Modules/billing.md", "src/Invoice.php", stamp("b1", "c3"))
-        notes, _, report = self.merge(current, incoming)
-        self.assertNotIn("src/Invoice.php", notes["Modules/billing.md"])
-        self.assertIn("src/Ledger.php", notes["Modules/billing.md"])
-        self.assertEqual(len(report), 1)
+    def test_an_entry_changed_differently_on_both_sides_keeps_the_base_review(self) -> None:
+        current = self.changed("Modules/billing.md", "src/Invoice.php", stamp("b7", "c2"))
+        incoming = self.changed("Modules/billing.md", "src/Invoice.php", stamp("b8", "c3"))
+        for one, other in ((current, incoming), (incoming, current)):
+            notes, _, report = self.merge(one, other)
+            self.assertEqual(notes["Modules/billing.md"]["src/Invoice.php"], stamp("b1"))
+            self.assertIn("src/Ledger.php", notes["Modules/billing.md"])
+            self.assertEqual(len(report), 1)
 
-    def test_an_entry_added_on_both_sides_differently_is_dropped_and_alike_is_kept(self) -> None:
+    def test_an_entry_added_on_both_sides_alike_is_kept(self) -> None:
         added = self.changed("Modules/billing.md", "src/Tax.php", stamp("b4"))
-        notes, _, _ = self.merge(added, self.changed("Modules/billing.md", "src/Tax.php", stamp("b5")))
-        self.assertNotIn("src/Tax.php", notes["Modules/billing.md"])
-        notes, _, _ = self.merge(added, added)
-        self.assertIn("src/Tax.php", notes["Modules/billing.md"])
+        notes, _, report = self.merge(added, added)
+        self.assertEqual(notes["Modules/billing.md"]["src/Tax.php"], stamp("b4"))
+        self.assertEqual(report, [])
+
+    def test_an_entry_added_differently_on_both_sides_keeps_the_older_review(self) -> None:
+        older = self.changed("Modules/billing.md", "src/Tax.php", stamp("b4", "c2"))
+        newer = self.changed("Modules/billing.md", "src/Tax.php", stamp("b5", "c4"))
+        for current, incoming in ((older, newer), (newer, older)):
+            notes, _, report = self.merge(current, incoming)
+            self.assertEqual(notes["Modules/billing.md"]["src/Tax.php"], stamp("b4", "c2"))
+            self.assertEqual(len(report), 1)
+
+    def test_an_entry_added_on_both_sides_from_unrelated_commits_keeps_the_current_one(self) -> None:
+        current = self.changed("Modules/billing.md", "src/Tax.php", stamp("b4", "c9"))
+        incoming = self.changed("Modules/billing.md", "src/Tax.php", stamp("b5", "c2"))
+        notes, _, _ = self.merge(current, incoming)
+        self.assertEqual(notes["Modules/billing.md"]["src/Tax.php"], stamp("b4", "c9"))
+        same = self.changed("Modules/billing.md", "src/Tax.php", stamp("b6", "c9"))
+        notes, _, _ = self.merge(same, current)
+        self.assertEqual(notes["Modules/billing.md"]["src/Tax.php"], stamp("b6", "c9"), "one commit: current")
+
+    def test_no_entry_either_side_has_is_ever_dropped(self) -> None:
+        current = self.changed("Modules/billing.md", "src/Invoice.php", stamp("b7", "c2"))
+        current["Modules/billing.md"]["src/Tax.php"] = stamp("b4", "c9")
+        incoming = self.changed("Modules/billing.md", "src/Invoice.php", stamp("b8", "c3"))
+        incoming["Modules/billing.md"]["src/Tax.php"] = stamp("b5", "c8")
+        notes, _, _ = self.merge(current, incoming)
+        self.assertEqual(sorted(notes["Modules/billing.md"]), ["src/Invoice.php", "src/Ledger.php", "src/Tax.php"])
 
     def test_a_deletion_against_no_change_deletes_and_against_a_change_keeps_the_change(self) -> None:
         deleted = self.changed("Modules/export.md", "src/Export.php", None)
@@ -105,15 +145,72 @@ class StampsTests(merge_support.IsolatedGitTestCase):
         self.assertEqual(raw, stamps_file(notes))
 
     def test_a_file_added_on_both_sides_merges_from_an_empty_base(self) -> None:
-        outcome = StampsDriver().merge(MergeInput(b"", stamps_file({"a.md": {"x": stamp("1")}}),
+        outcome = StampsDriver(self.history).merge(MergeInput(b"", stamps_file({"a.md": {"x": stamp("1")}}),
                                                   stamps_file({"b.md": {"y": stamp("2")}}), ".anchors.json"))
         self.assertEqual(sorted(json.loads(outcome.merged)["notes"]), ["a.md", "b.md"])
 
     def test_a_version_that_is_not_a_stamps_file_is_refused(self) -> None:
         for broken in (b"{not json", b"[]", b'{"notes": {"a.md": []}}'):
             with self.assertRaises(ValueError):
-                StampsDriver().merge(MergeInput(stamps_file(BASE_STAMPS), broken,
+                StampsDriver(self.history).merge(MergeInput(stamps_file(BASE_STAMPS), broken,
                                                 stamps_file(self.changed("a.md", "x", stamp("1"))), ".anchors.json"))
+
+
+class ProjectHistoryTests(merge_support.IsolatedGitTestCase):
+    """The project is found from the vault's own repository the way the vault tools find a vault."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.env = merge_support.git_env(self.home)
+        self.project = self.home / "project"
+        self.project.mkdir()
+        merge_support.git(self.project, self.env, "init", "-q")
+        (self.project / "CLAUDE.md").write_text("Knowledge-base directory: `kb/`\n", encoding="utf-8")
+        (self.project / ".gitignore").write_text("kb/\n", encoding="utf-8")
+        self.commits = []
+        for step in ("first", "second"):
+            (self.project / "src.txt").write_text(step + "\n", encoding="utf-8")
+            merge_support.git(self.project, self.env, "add", "-A")
+            merge_support.git(self.project, self.env, "commit", "-q", "-m", step)
+            self.commits.append(merge_support.git(self.project, self.env, "rev-parse", "HEAD").stdout.strip())
+        self.vault = self.project / "kb"
+        (self.vault / "Decisions").mkdir(parents=True)
+        (self.vault / "To DO.md").write_text("## Now\n", encoding="utf-8")
+        merge_support.git(self.vault, self.env, "init", "-q")
+
+    def merged_tax(self, history: ReviewHistory, current: str, incoming: str) -> Dict[str, str]:
+        base = stamps_file({"a.md": {"x": stamp("b0", self.commits[0])}})
+        sides = [stamps_file({"a.md": {"x": stamp("b0", self.commits[0]), "tax": stamp(blob, commit)}})
+                 for blob, commit in (("b1", current), ("b2", incoming))]
+        outcome = StampsDriver(history).merge(MergeInput(base, sides[0], sides[1], ".anchors.json"))
+        return json.loads(outcome.merged)["notes"]["a.md"]["tax"]
+
+    def test_the_project_that_claims_the_vault_answers_for_its_commits(self) -> None:
+        history = ProjectHistory(self.vault)
+        first, second = self.commits
+        self.assertTrue(history.is_ancestor(first, second))
+        self.assertFalse(history.is_ancestor(second, first))
+        self.assertEqual(self.merged_tax(history, second, first), stamp("b2", first))
+        self.assertEqual(self.merged_tax(history, first, second), stamp("b1", first))
+
+    def test_an_unknown_commit_keeps_the_current_side(self) -> None:
+        history = ProjectHistory(self.vault)
+        self.assertFalse(history.is_ancestor("0" * 40, self.commits[1]))
+        self.assertEqual(self.merged_tax(history, self.commits[1], "0" * 40), stamp("b1", self.commits[1]))
+
+    def test_a_vault_no_project_claims_keeps_the_current_side(self) -> None:
+        (self.project / "CLAUDE.md").write_text("Knowledge-base directory: `elsewhere/`\n", encoding="utf-8")
+        history = ProjectHistory(self.vault)
+        first, second = self.commits
+        self.assertIsNone(history.project())
+        self.assertFalse(history.is_ancestor(first, second))
+        self.assertEqual(self.merged_tax(history, second, first), stamp("b1", second))
+
+    def test_a_vault_outside_any_project_keeps_the_current_side(self) -> None:
+        lone = self.home / "lone"
+        lone.mkdir()
+        merge_support.git(lone, self.env, "init", "-q")
+        self.assertIsNone(ProjectHistory(lone).project())
 
 
 NOTE = """---

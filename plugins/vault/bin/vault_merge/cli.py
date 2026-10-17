@@ -27,7 +27,7 @@ from vault_merge.driver import Driver, MergeInput
 from vault_merge.generated import GeneratedDriver
 from vault_merge.gitmerge import Git
 from vault_merge.keyed import KeyedDriver
-from vault_merge.stamps import StampsDriver
+from vault_merge.stamps import ProjectHistory, StampsDriver
 
 Command = Callable[[List[str]], int]
 USAGE = "usage: vault-merge keyed|stamps|generated %O %A %B [%P] | vault-merge selfcheck FILE..."
@@ -137,7 +137,7 @@ def commands(git: Git, out: TextIO, err: TextIO) -> Dict[str, Command]:
     """Every command by name: the drivers and the self-check."""
     drivers: Dict[str, Driver] = {
         "keyed": KeyedDriver(git),
-        "stamps": StampsDriver(),
+        "stamps": StampsDriver(ProjectHistory(Path.cwd())),
         "generated": GeneratedDriver(git),
     }
     found: Dict[str, Command] = {name: DriverCommand(name, driver, git, err) for name, driver in drivers.items()}
