@@ -1,0 +1,29 @@
+{
+  "description": "Guard hooks: generated regions, the architecture-rubric gate and the debt guard before Edit/Write; the shell guard before Bash; a PHP syntax check after Edit/Write.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_generated_regions.py\"", "timeout": 10 },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/plan_skill_gate.py\"", "timeout": 10 },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/debt_guard.py\"", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bash_guard.py\"", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/php_lint.py\"", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}

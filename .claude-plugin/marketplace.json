@@ -4,7 +4,7 @@
     "name": "Volodymyr Hryvinskyi",
     "url": "https://github.com/hryvinskyi"
   },
-  "description": "Project-agnostic Claude Code plugins: architecture rubrics, a plan-review-implement pipeline with agent evals, and QA skills.",
+  "description": "Project-agnostic Claude Code plugins: architecture rubrics, a plan-review-implement pipeline with agent evals, QA skills, and guard hooks.",
   "plugins": [
     {
       "name": "architecture",
@@ -20,6 +20,11 @@
       "name": "qa",
       "source": "./plugins/qa",
       "description": "Quality skills: bug-hunt walks a live site in a real browser and proves what breaks; tighten shortens text without losing meaning."
+    },
+    {
+      "name": "guards",
+      "source": "./plugins/guards",
+      "description": "Guard hooks: refuse catastrophic shell commands, source and plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and edits inside generated regions; lint edited PHP. Personal policies are read from one TOML file."
     }
   ]
 }
