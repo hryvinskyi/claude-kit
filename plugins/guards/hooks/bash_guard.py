@@ -54,7 +54,8 @@ Rules (each has cases in tests.sh):
            - plan_skill_gate.py: PHP source needs the clean-architecture-php
              rubric, JS/TS source the clean-architecture-js rubric, and a plan
              file the rubric of each language it orders — with the references
-             the target needs — loaded first;
+             the target needs and the skills of the stacks registered for the
+             session — loaded first;
            - debt_guard.py: the written text (heredoc body, echo/printf
              arguments, a sed `s///` replacement) may not carry a deferral
              marker or a static-analysis suppression into a source file.

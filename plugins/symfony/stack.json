@@ -1,0 +1,14 @@
+{
+  "stack": "symfony",
+  "detect": {
+    "composer_requires": ["symfony/framework-bundle", "symfony/symfony"],
+    "root_paths": ["bin/console", "config/bundles.php"]
+  },
+  "browser_markers": ["Stimulus", "stimulus_controller"],
+  "requires": {
+    "php_source": ["symfony-architecture-php/SKILL.md"],
+    "js_source": ["symfony-architecture-frontend/SKILL.md"],
+    "plan_php": ["symfony-architecture-php/SKILL.md"],
+    "plan_js": ["symfony-architecture-frontend/SKILL.md"]
+  }
+}

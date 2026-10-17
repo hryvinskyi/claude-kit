@@ -1,0 +1,12 @@
+{
+  "description": "Registers this plugin's stack declaration at session start, so the guards plugin's rubric gate asks for the stack skills on this stack's projects.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/register-stack.py\"", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

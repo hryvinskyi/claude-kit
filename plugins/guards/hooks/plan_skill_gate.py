@@ -16,45 +16,67 @@ rubric being loaded, when the target is
     .tsx`, outside node_modules/, build output, test files, declaration files,
     minified files and tool configs) — rubric: the clean-architecture-js skill.
 
-Two skills, one rule each, published by the `architecture` plugin as
+Two core skills, one rule each, published by the `architecture` plugin as
 `architecture:clean-architecture-php` and `architecture:clean-architecture-js`.
 A skill counts as loaded after a `Skill` tool call for it (namespaced or bare),
 or a Read/Bash/Grep that names its SKILL.md or its
 references/implementer-checklist.md (agents whose tool list excludes Skill; the
 implementer's cut of the rubric). Files are recognised by their
-`clean-architecture-*/…` suffix, so a plugin cache, a marketplace clone and a
-user skill directory all count. Merely mentioning the skill directory (`ls`,
-`git log`) does not count, and one skill never stands in for the other.
+`<skill directory>/…` suffix, so a plugin cache (with its version segment), a
+marketplace clone, a `--plugin-dir` checkout and a user skill directory all
+count. Merely mentioning the skill directory (`ls`, `git log`) does not count,
+and one skill never stands in for another.
 
 Loading SKILL.md alone is not loading the skill — a session that read only the
-main file shipped a closed value object in Magento's Api/Data with no
-extension point, exactly what the references would have caught. So the gate
-also requires the references the target needs, each as a Read/Bash/Grep that
-names `<skill>/references/<name>.md`:
+main file shipped a closed value object in a module's published data contract
+with no extension point, exactly what the references would have caught. So the
+gate also requires the references the target needs, each as a Read/Bash/Grep
+that names `<skill>/references/<name>.md`:
 
-  PHP source   solid.md; the stack reference on a Magento (`magento2.md`) or
-               Symfony (`symfony.md`) project — detected from the composer.json
-               files above the target (type magento2-*, magento/* or
-               symfony/framework-bundle requirements) or from bin/magento,
-               app/etc, bin/console, config/bundles.php at the root; ddd.md in a
-               domain directory (Api/Data, Model, Entity, Domain, ValueObject,
-               Aggregate).
-  JS/TS source solid.md and javascript.md; the host reference — react.md for a
-               .jsx/.tsx file, under a tsconfig that sets `jsx`, or anywhere in a
-               project whose package.json depends on React while no PHP
-               framework hosts it; magento2-frontend.md in a Magento project;
-               symfony-frontend.md in a Symfony project; typescript.md for
-               .ts/.tsx/.mts/.cts; ddd.md in a domain directory (domain, model,
-               entities, value-objects).
-  Plan file    each skill the plan needs, with its stack or host reference: the
-               PHP skill on a PHP project (composer.json); the JS skill on a
-               JS project (package.json or tsconfig.json and no composer.json),
-               and on a PHP project whose plan directory names JS/TS files or
-               the browser machinery (Stimulus, RequireJS, Knockout,
-               AssetRendererInterface…). JS host references for plans: react.md
-               when the plan names .jsx/.tsx files or a non-PHP project depends
-               on React, magento2-frontend.md / symfony-frontend.md on those
-               hosts, javascript.md when there is no host.
+  PHP source   solid.md; ddd.md in a domain directory (Model, Entity, Domain,
+               ValueObject, Aggregate).
+  JS/TS source solid.md and javascript.md; react.md for a .jsx/.tsx file, under
+               a tsconfig that sets `jsx`, or anywhere in a project whose
+               package.json depends on React while no stack is detected;
+               typescript.md for .ts/.tsx/.mts/.cts; ddd.md in a domain directory
+               (domain, model, entities, value-objects).
+  Plan file    each skill the plan needs: the PHP skill on a PHP project
+               (composer.json); the JS skill on a JS project (package.json or
+               tsconfig.json and no composer.json), and on a PHP project whose
+               plan directory names JS/TS files or browser machinery. JS host
+               reference for plans: react.md when the plan names .jsx/.tsx files
+               or a project with no detected stack depends on React,
+               javascript.md when there is no host.
+
+Stack declarations. A stack plugin declares its framework in a `stack.json` it
+owns and copies it, at SessionStart, into this session's registry:
+`<state>/sessions/<session id>/stacks/<stack>.json`, where `<state>` is
+$CLAUDE_KIT_STATE_DIR, or `${XDG_STATE_HOME:-~/.local/state}/claude-kit`. The
+session id is read from the transcript path (`<id>.jsonl`, or
+`<id>/subagents/agent-*.jsonl` for a subagent), so a subagent finds the
+registry of the session that spawned it. A declaration only adds requirements:
+
+  {
+    "stack": "<plugin name, also the Skill namespace>",
+    "detect": {
+      "composer_type_prefixes": ["…"],  a composer.json `type` starting so
+      "composer_requires": ["…"],       a require/require-dev name containing it
+      "root_paths": ["…", "…/"]         at the PHP project root; "/" = directory
+    },
+    "browser_markers": ["…"],           words that make a PHP plan order JS work
+    "domain_dirs": {"php": ["…"], "js": ["…"]},
+    "requires": {                       "<skill dir>/SKILL.md" or "<skill dir>/<ref>.md"
+      "php_source": [], "js_source": [], "plan_php": [], "plan_js": []
+    }
+  }
+
+Detection keeps one order for every declaration at once: the composer.json
+files above the target are walked nearest first, and the first one any
+declaration matches decides; only when none does are the root paths tried.
+Every declaration matching at that step applies (a union). Browser markers and
+domain directories of every registered declaration apply on every project, the
+way the core's own words do. A missing, unreadable or malformed declaration is
+skipped, and the core rules run as if no stack were installed.
 
 The denial names exactly the files still missing, and tells the model to read
 each reference from the base directory the Skill tool reports for the skill.
@@ -74,20 +96,16 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 
-RUBRIC_PLUGIN = "architecture"  # the plugin that publishes both skills
+RUBRIC_PLUGIN = "architecture"  # the plugin that publishes both core skills
 PHP_SKILL = "clean-architecture-php"
 JS_SKILL = "clean-architecture-js"
 SKILLS = (PHP_SKILL, JS_SKILL)
-# SKILL.md or one of a skill's reference files, named in a Read/Bash/Grep call
-RUBRIC_FILE = re.compile(r"(clean-architecture-(?:php|js))/(?:(SKILL\.md)|references/([\w.-]+\.md))\b")
 # What stands in for SKILL.md: the implementer's cut of the rubric
 SKILL_EQUIVALENTS = {"SKILL.md", "implementer-checklist.md"}
 
-PHP_STACK_REFERENCE = {"magento": "magento2.md", "symfony": "symfony.md"}
-JS_HOST_REFERENCE = {"magento": "magento2-frontend.md", "symfony": "symfony-frontend.md"}
-
-PHP_DOMAIN_DIRS = {"Api/Data", "Model", "Entity", "Domain", "ValueObject", "ValueObjects", "Aggregate", "Aggregates"}
+PHP_DOMAIN_DIRS = {"Model", "Entity", "Domain", "ValueObject", "ValueObjects", "Aggregate", "Aggregates"}
 JS_DOMAIN_DIRS = {"domain", "Domain", "model", "models", "entities", "entity", "value-objects", "valueObjects", "value_objects"}
 
 # Directories whose PHP is not the project's own source: nothing to design there
@@ -124,15 +142,191 @@ REACT_PACKAGES = {
     "@vitejs/plugin-react-swc", "@symfony/ux-react", "@remix-run/react", "gatsby", "react-native", "expo",
 }
 TSCONFIG_JSX = re.compile(r'"jsx"\s*:\s*"[^"]+"')
-# A plan orders JS/TS work when it names such files or the browser machinery that runs them
+# A plan orders JS/TS work when it names such files or the browser machinery that runs them;
+# a registered stack adds the spellings of its own machinery
 JS_IN_PLAN = re.compile(
     r"[\w@/.-]+\.(?:m?js|cjs|jsx|tsx?|mts|cts)\b"
     r"|\b(?:package|tsconfig(?:\.\w+)?)\.json\b"
-    r"|\b(?:Stimulus|TypeScript|RequireJS|Knockout|uiComponent|AssetRendererInterface|stimulus_controller"
-    r"|react_component|x-magento-init|data-mage-init|Alpine\.data)\b"
+    r"|\b(?:TypeScript|react_component)\b"
 )
 JSX_IN_PLAN = re.compile(r"[\w@/.-]+\.(?:jsx|tsx)\b")
 PLAN_TEXT_LIMIT = 2_000_000  # bytes of sibling plan files read to decide what a plan orders
+
+# The per-session registry of stack declarations
+STATE_DIR_ENV = "CLAUDE_KIT_STATE_DIR"
+SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+STACK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+REQUIRED_FILE = re.compile(r"^([A-Za-z0-9_][\w.-]*)/([\w.-]+\.md)$")
+REQUIREMENT_KINDS = ("php_source", "js_source", "plan_php", "plan_js")
+DECLARATION_LIMIT = 64_000  # bytes; a declaration is a short list of words
+REGISTRY_LIMIT = 16  # declarations read per session
+
+
+@dataclass(frozen=True)
+class Stack:
+    """One registered stack declaration, normalised.
+
+    `requires` maps each target kind to the "<skill dir>/<file>" keys it adds;
+    `skills` are the skill directories those keys name.
+    """
+    name: str
+    composer_type_prefixes: tuple
+    composer_requires: tuple
+    root_paths: tuple
+    browser_markers: tuple
+    php_domain_dirs: frozenset
+    js_domain_dirs: frozenset
+    requires: dict
+    skills: frozenset
+
+    def matches_composer(self, data: dict) -> bool:
+        """Report whether a parsed composer.json belongs to this stack (its type or a required package)."""
+        kind = str(data.get("type", ""))
+        if any(kind.startswith(prefix) for prefix in self.composer_type_prefixes):
+            return True
+        names = []
+        for key in ("require", "require-dev"):
+            section = data.get(key)
+            if isinstance(section, dict):
+                names.extend(str(name) for name in section)
+        return any(fragment in name for fragment in self.composer_requires for name in names)
+
+    def matches_root(self, root: str) -> bool:
+        """Report whether one of the root paths exists at the project root ("x/" must be a directory)."""
+        for relative in self.root_paths:
+            target = os.path.join(root, *relative.rstrip("/").split("/"))
+            if os.path.isdir(target) if relative.endswith("/") else os.path.exists(target):
+                return True
+        return False
+
+    def required(self, kind: str) -> set:
+        """The rubric files this stack adds for one target kind."""
+        return set(self.requires.get(kind, ()))
+
+
+def words(value) -> tuple:
+    """A declaration field that must be a list of non-empty strings; anything else is an error."""
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise ValueError("expected a list of strings")
+    return tuple(item.strip() for item in value)
+
+
+def parse_declaration(data):
+    """Normalise one stack declaration.
+
+    @param data The parsed JSON of a `stack.json`.
+    @return A Stack, or None when the declaration is malformed (it is then ignored whole).
+    """
+    try:
+        if not isinstance(data, dict) or not STACK_NAME.match(str(data.get("stack", ""))):
+            return None
+        detect = data.get("detect") or {}
+        domains = data.get("domain_dirs") or {}
+        requires = data.get("requires") or {}
+        if not all(isinstance(part, dict) for part in (detect, domains, requires)):
+            return None
+        normalised = {}
+        skills = set()
+        for kind in REQUIREMENT_KINDS:
+            keys = words(requires.get(kind))
+            for key in keys:
+                match = REQUIRED_FILE.match(key)
+                if not match:
+                    return None
+                skills.add(match.group(1))
+            normalised[kind] = frozenset(keys)
+        root_paths = words(detect.get("root_paths"))
+        if any(path.startswith("/") or ".." in path.split("/") for path in root_paths):
+            return None
+        return Stack(
+            name=data["stack"],
+            composer_type_prefixes=words(detect.get("composer_type_prefixes")),
+            composer_requires=words(detect.get("composer_requires")),
+            root_paths=root_paths,
+            browser_markers=words(data.get("browser_markers")),
+            php_domain_dirs=frozenset(words(domains.get("php"))),
+            js_domain_dirs=frozenset(words(domains.get("js"))),
+            requires=normalised,
+            skills=frozenset(skills - set(SKILLS)),
+        )
+    except ValueError:
+        return None
+
+
+def state_dir() -> str:
+    """The base of the per-session registry: $CLAUDE_KIT_STATE_DIR, else the XDG state home's claude-kit."""
+    override = os.environ.get(STATE_DIR_ENV, "")
+    if os.path.isabs(override):
+        return override
+    xdg = os.environ.get("XDG_STATE_HOME", "")
+    base = xdg if os.path.isabs(xdg) else os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "claude-kit")
+
+
+def session_of(transcript_path: str):
+    """The session a transcript belongs to: `<id>.jsonl`, or `<id>/subagents/agent-*.jsonl`.
+
+    @return The session id, or None when the path does not name one safely.
+    """
+    if not transcript_path:
+        return None
+    directory, base = os.path.split(transcript_path)
+    if os.path.basename(directory) == "subagents":
+        session = os.path.basename(os.path.dirname(directory))
+    else:
+        session = base[: -len(".jsonl")] if base.endswith(".jsonl") else base
+    return session if SAFE_SEGMENT.match(session) else None
+
+
+def registered_stacks(transcript_path: str) -> tuple:
+    """The stack declarations the session's stack plugins registered at SessionStart.
+
+    Fails open: an absent registry, an unreadable or malformed declaration is skipped.
+    @return Stacks ordered by name, at most one per name.
+    """
+    session = session_of(transcript_path)
+    if session is None:
+        return ()
+    directory = os.path.join(state_dir(), "sessions", session, "stacks")
+    try:
+        names = sorted(name for name in os.listdir(directory) if name.endswith(".json"))
+    except OSError:
+        return ()
+    stacks = {}
+    for name in names[:REGISTRY_LIMIT]:
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                stack = parse_declaration(json.loads(fh.read(DECLARATION_LIMIT)))
+        except Exception:
+            continue
+        if stack is not None and stack.name not in stacks:
+            stacks[stack.name] = stack
+    return tuple(stacks[name] for name in sorted(stacks))
+
+
+def skill_owners(stacks) -> dict:
+    """Map every skill directory the gate knows to the plugin that publishes it."""
+    owners = {skill: RUBRIC_PLUGIN for skill in SKILLS}
+    for stack in stacks:
+        for skill in stack.skills:
+            owners.setdefault(skill, stack.name)
+    return owners
+
+
+def rubric_file_pattern(skills):
+    """SKILL.md or a reference of one of `skills`, named as a path suffix in a Read/Bash/Grep call."""
+    alternatives = "|".join(re.escape(skill) for skill in sorted(skills, key=len, reverse=True))
+    return re.compile(r"(?<![\w.-])(" + alternatives + r")/(?:(SKILL\.md)|references/([\w.-]+\.md))\b")
+
+
+def browser_pattern(stacks):
+    """The registered stacks' browser markers as one word-bounded pattern, or None when there are none."""
+    markers = sorted({marker for stack in stacks for marker in stack.browser_markers}, key=len, reverse=True)
+    if not markers:
+        return None
+    return re.compile(r"\b(?:" + "|".join(re.escape(marker) for marker in markers) + r")\b")
 
 
 def related_transcripts(transcript_path: str) -> list:
@@ -156,27 +350,30 @@ def related_transcripts(transcript_path: str) -> list:
     return seen
 
 
-def skill_called(value) -> str:
+def skill_called(value, skills=SKILLS) -> str:
     """The rubric skill a Skill tool call loads, or "" when it loads another one.
 
     @param value The call's `skill` argument (a name, possibly "plugin:name" or "/name").
+    @param skills The skill directories the gate recognises.
     """
     name = str(value or "").strip().lstrip("/").split(":")[-1]
-    return name if name in SKILLS else ""
+    return name if name in skills else ""
 
 
-def loaded_files(path: str):
+def loaded_files(path: str, skills=SKILLS):
     """Collect the rubric files one transcript shows being loaded.
 
     @param path Path to a JSONL transcript.
+    @param skills The skill directories the gate recognises.
     @return Set of "<skill>/<basename>": "<skill>/SKILL.md" for a Skill call or a read of
             SKILL.md, "<skill>/<name>.md" for each reference read; None when unreadable.
     """
     found = set()
+    rubric_file = rubric_file_pattern(skills)
     try:
         with open(path, encoding="utf-8", errors="ignore") as fh:
             for line in fh:
-                if "clean-architecture-" not in line:  # cheap filter: transcripts run to tens of MB
+                if not any(skill in line for skill in skills):  # cheap filter: transcripts run to tens of MB
                     continue
                 try:
                     entry = json.loads(line)
@@ -193,21 +390,22 @@ def loaded_files(path: str):
                     if not isinstance(args, dict):
                         continue
                     if name == "Skill":
-                        skill = skill_called(args.get("skill"))
+                        skill = skill_called(args.get("skill"), skills)
                         if skill:
                             found.add(f"{skill}/SKILL.md")
                     if name in ("Read", "Bash", "Grep"):
-                        for skill, main, ref in RUBRIC_FILE.findall(json.dumps(args)):
+                        for skill, main, ref in rubric_file.findall(json.dumps(args)):
                             found.add(f"{skill}/{main or ref}")
     except OSError:
         return None  # unreadable — never block on what cannot be proven absent
     return found
 
 
-def loaded_in(transcript_path: str):
+def loaded_in(transcript_path: str, skills=SKILLS):
     """Collect what this session — main turn or subagents — loaded of the rubrics.
 
     @param transcript_path Path to the transcript the hook was handed.
+    @param skills The skill directories the gate recognises.
     @return Set of "<skill>/<basename>" loaded, with each skill's implementer checklist also
             counting as its SKILL.md; None when nothing can be proven (missing or unreadable
             transcript) — the caller must not block then.
@@ -216,11 +414,11 @@ def loaded_in(transcript_path: str):
         return None  # cannot prove absence — never block on a missing transcript
     found = set()
     for path in related_transcripts(transcript_path):
-        files = loaded_files(path)
+        files = loaded_files(path, skills)
         if files is None:
             return None
         found |= files
-    for skill in SKILLS:
+    for skill in skills:
         if any(f"{skill}/{equivalent}" in found for equivalent in SKILL_EQUIVALENTS):
             found.add(f"{skill}/SKILL.md")
     return found
@@ -247,31 +445,36 @@ def read_json(path: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def stack_of(root: str, cwd: str, path: str):
-    """Detect the PHP framework from the composer.json files above the target, then from root layout.
+def stacks_of(root, cwd: str, path: str, stacks) -> tuple:
+    """Detect the target's stacks among the registered declarations.
 
-    @return "magento", "symfony", or None when neither can be told.
+    The composer.json files above the target are walked nearest first, and the first one any
+    declaration matches decides; only when none does are the root paths of the PHP project tried.
+    Every declaration matching at the deciding step applies.
+
+    @param root The PHP project root (nearest composer.json), or None.
+    @param stacks The registered declarations.
+    @return The matching Stacks; empty when no stack can be told.
     """
+    if not stacks:
+        return ()
     for directory in ancestors(cwd, path):
         composer = os.path.join(directory, "composer.json")
         if os.path.isfile(composer):
             data = read_json(composer)
-            require = " ".join(list((data.get("require") or {}).keys()) + list((data.get("require-dev") or {}).keys()))
-            if str(data.get("type", "")).startswith("magento2-") or "magento/" in require:
-                return "magento"
-            if "symfony/framework-bundle" in require or "symfony/symfony" in require:
-                return "symfony"
-    if root and (os.path.exists(os.path.join(root, "bin", "magento")) or os.path.isdir(os.path.join(root, "app", "etc"))):
-        return "magento"
-    if root and (os.path.exists(os.path.join(root, "bin", "console")) or os.path.isfile(os.path.join(root, "config", "bundles.php"))):
-        return "symfony"
-    return None
+            found = tuple(stack for stack in stacks if stack.matches_composer(data))
+            if found:
+                return found
+    if root:
+        return tuple(stack for stack in stacks if stack.matches_root(root))
+    return ()
 
 
 def depends_on_react(cwd: str, path: str, root) -> bool:
     """Report whether a package.json between the target and its project root depends on React.
 
-    React-compatible runtimes (Preact, Next, the Vite React plugin, Symfony UX React) count.
+    React-compatible runtimes (Preact, Next, the Vite React plugin, a server framework's React
+    bundle) count.
     """
     for directory in ancestors(cwd, path):
         data = read_json(os.path.join(directory, "package.json"))
@@ -364,26 +567,40 @@ def in_domain_dir(path: str, domain_dirs) -> bool:
     return bool(domain_dirs & set(directories)) or any("/" in d and d in "/".join(directories) for d in domain_dirs)
 
 
-def php_source_requirements(stack, path: str) -> set:
-    """The PHP rubric files a PHP source write needs."""
-    required = {f"{PHP_SKILL}/SKILL.md", f"{PHP_SKILL}/solid.md"}
-    if stack in PHP_STACK_REFERENCE:
-        required.add(f"{PHP_SKILL}/{PHP_STACK_REFERENCE[stack]}")
-    if in_domain_dir(path, PHP_DOMAIN_DIRS):
+def stack_requirements(stacks, kind: str) -> set:
+    """The rubric files the detected stacks add for one target kind."""
+    required = set()
+    for stack in stacks:
+        required |= stack.required(kind)
+    return required
+
+
+def php_source_requirements(detected, registered, path: str) -> set:
+    """The rubric files a PHP source write needs.
+
+    @param detected The stacks the target belongs to.
+    @param registered Every registered stack: their domain directories apply everywhere.
+    """
+    required = {f"{PHP_SKILL}/SKILL.md", f"{PHP_SKILL}/solid.md"} | stack_requirements(detected, "php_source")
+    domain_dirs = PHP_DOMAIN_DIRS.union(*(stack.php_domain_dirs for stack in registered))
+    if in_domain_dir(path, domain_dirs):
         required.add(f"{PHP_SKILL}/ddd.md")
     return required
 
 
-def js_source_requirements(stack, react: bool, path: str) -> set:
-    """The JS rubric files a JS/TS source write needs."""
+def js_source_requirements(detected, registered, react: bool, path: str) -> set:
+    """The rubric files a JS/TS source write needs.
+
+    @param detected The stacks hosting the target.
+    @param registered Every registered stack: their domain directories apply everywhere.
+    """
     required = {f"{JS_SKILL}/SKILL.md", f"{JS_SKILL}/solid.md", f"{JS_SKILL}/javascript.md"}
-    if stack in JS_HOST_REFERENCE:
-        required.add(f"{JS_SKILL}/{JS_HOST_REFERENCE[stack]}")
+    required |= stack_requirements(detected, "js_source")
     if react:
         required.add(f"{JS_SKILL}/react.md")
     if os.path.splitext(path)[1].lower() in TS_EXTENSIONS:
         required.add(f"{JS_SKILL}/typescript.md")
-    if in_domain_dir(path, JS_DOMAIN_DIRS):
+    if in_domain_dir(path, JS_DOMAIN_DIRS.union(*(stack.js_domain_dirs for stack in registered))):
         required.add(f"{JS_SKILL}/ddd.md")
     return required
 
@@ -406,25 +623,33 @@ def plan_text(cwd: str, path: str, text) -> str:
     return "\n".join(chunks)
 
 
-def plan_requirements(cwd: str, path: str, text) -> set:
-    """The rubric files a plan write needs: each skill the plan needs, with its stack or host reference."""
+def orders_js(said: str, registered) -> bool:
+    """Report whether a PHP project's plan text names JS/TS files or browser machinery."""
+    if JS_IN_PLAN.search(said):
+        return True
+    markers = browser_pattern(registered)
+    return bool(markers and markers.search(said))
+
+
+def plan_requirements(cwd: str, path: str, text, registered=()) -> set:
+    """The rubric files a plan write needs: each skill the plan needs, with its stack or host skill.
+
+    @param registered Every registered stack.
+    """
     php_root = project_root(cwd, path)
     js_root = nearest_root(cwd, path, ("package.json", "tsconfig.json"))
-    stack = stack_of(php_root, cwd, path) if php_root else None
+    detected = stacks_of(php_root, cwd, path, registered) if php_root else ()
     required = set()
     if php_root:
         required.add(f"{PHP_SKILL}/SKILL.md")
-        if stack in PHP_STACK_REFERENCE:
-            required.add(f"{PHP_SKILL}/{PHP_STACK_REFERENCE[stack]}")
+        required |= stack_requirements(detected, "plan_php")
     said = plan_text(cwd, path, text) if (php_root or js_root) else ""
-    needs_js = bool(js_root and not php_root) or bool(php_root and JS_IN_PLAN.search(said))
+    needs_js = bool(js_root and not php_root) or bool(php_root and orders_js(said, registered))
     if not needs_js:
         return required
     required.add(f"{JS_SKILL}/SKILL.md")
-    hosts = set()
-    if stack in JS_HOST_REFERENCE:
-        hosts.add(f"{JS_SKILL}/{JS_HOST_REFERENCE[stack]}")
-    if JSX_IN_PLAN.search(said) or (stack is None and js_root and depends_on_react(cwd, path, js_root)):
+    hosts = stack_requirements(detected, "plan_js")
+    if JSX_IN_PLAN.search(said) or (not detected and js_root and depends_on_react(cwd, path, js_root)):
         hosts.add(f"{JS_SKILL}/react.md")
     return required | (hosts or {f"{JS_SKILL}/javascript.md"})
 
@@ -442,51 +667,67 @@ def missing_for(cwd: str, path: str, transcript_path: str, text=None):
     @param path The target file (any separator).
     @param transcript_path The transcript the hook was handed.
     @param text The text being written, when visible (plan files use it to tell what they order).
-    @return (what the target is, set of missing "<skill>/<basename>") when the write must be
-            refused; None when the target is out of scope, nothing can be proven about the
-            session, or everything required was loaded.
+    @return (what the target is, set of missing "<skill>/<basename>", the plugin publishing each
+            skill directory) when the write must be refused; None when the target is out of
+            scope, nothing can be proven about the session, or everything required was loaded.
     """
     path = path.replace(os.sep, "/")
     extension = os.path.splitext(path)[1].lower()
     plan = is_plan_file(path)
     if not (plan or extension == ".php" or extension in JS_EXTENSIONS):
         return None
+    registered = registered_stacks(transcript_path)
     if plan:
-        what, required = "a plan file", plan_requirements(cwd, path, text)
+        what, required = "a plan file", plan_requirements(cwd, path, text, registered)
     elif extension == ".php":
         root = project_root(cwd, path)
         if root is None or not is_php_source(root, cwd, path):
             return None  # not a PHP project, or not its own source — the rubric does not apply
-        what, required = "PHP source", php_source_requirements(stack_of(root, cwd, path), path)
+        detected = stacks_of(root, cwd, path, registered)
+        what, required = "PHP source", php_source_requirements(detected, registered, path)
     else:
         root = nearest_root(cwd, path, ("package.json", "tsconfig.json", "composer.json"))
         if root is None or not is_js_source(root, cwd, path):
             return None  # no project around it, or not its own source
         php_root = project_root(cwd, path)
-        stack = stack_of(php_root, cwd, path) if php_root else None
+        detected = stacks_of(php_root, cwd, path, registered) if php_root else ()
         react = (extension in JSX_EXTENSIONS or tsconfig_sets_jsx(cwd, path, root)
-                 or (stack is None and depends_on_react(cwd, path, root)))
-        what, required = "JavaScript/TypeScript source", js_source_requirements(stack, react, path)
+                 or (not detected and depends_on_react(cwd, path, root)))
+        what, required = "JavaScript/TypeScript source", js_source_requirements(detected, registered, react, path)
     if not required:
         return None
-    loaded = loaded_in(transcript_path)
+    owners = skill_owners(registered)
+    loaded = loaded_in(transcript_path, tuple(owners))
     if loaded is None:
         return None
     missing = required - loaded
     if not missing:
         return None
-    return (what, missing)
+    return (what, missing, owners)
 
 
-def denial(what: str, missing) -> str:
-    """The message handed back to the model when a write is refused."""
+def denial(what: str, missing, owners=None) -> str:
+    """The message handed back to the model when a write is refused.
+
+    @param owners The plugin publishing each skill directory; a core skill defaults to its own.
+    """
+    owners = owners or {}
     wanted = []
-    for key in sorted(missing, key=lambda k: (k.split("/")[0], k.split("/")[1] != "SKILL.md", k)):
+
+    def order(key):
         skill, name = key.split("/", 1)
-        if name == "SKILL.md":
-            wanted.append(f"the {skill} skill itself: call the Skill tool with `{RUBRIC_PLUGIN}:{skill}` (or, "
+        return (owners.get(skill, RUBRIC_PLUGIN) != RUBRIC_PLUGIN, skill, name != "SKILL.md", name)
+
+    for key in sorted(missing, key=order):
+        skill, name = key.split("/", 1)
+        plugin = owners.get(skill, RUBRIC_PLUGIN)
+        if name == "SKILL.md" and skill in SKILLS:
+            wanted.append(f"the {skill} skill itself: call the Skill tool with `{plugin}:{skill}` (or, "
                           f"without that tool, Read SKILL.md or references/implementer-checklist.md in the "
-                          f"{skill} skill directory of the `{RUBRIC_PLUGIN}` plugin)")
+                          f"{skill} skill directory of the `{plugin}` plugin)")
+        elif name == "SKILL.md":
+            wanted.append(f"the {skill} skill: call the Skill tool with `{plugin}:{skill}` (or, without that "
+                          f"tool, Read SKILL.md in the {skill} skill directory of the `{plugin}` plugin)")
         else:
             wanted.append(f"Read {skill}/references/{name}")
     return (

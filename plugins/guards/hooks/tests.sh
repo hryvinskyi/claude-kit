@@ -10,6 +10,8 @@ FAIL=0
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export XDG_CONFIG_HOME="$TMP/xdg"
+# The rubric gate reads stack declarations from a per-session registry; never the caller's own.
+export CLAUDE_KIT_STATE_DIR="$TMP/state"
 # A policy override in the caller's environment must not leak into the cases below.
 unset CLAUDE_KIT_GITHUB_REST_ONLY CLAUDE_KIT_FORBID_ASSISTANT_COMMIT_TRAILERS
 
@@ -235,7 +237,7 @@ mkdir -p "$TMP/py/.claude/plans/x" && : > "$TMP/py/pyproject.toml"
 expect_exit "plan gate: project with neither composer.json nor package.json untouched" 0 \
   "$(gate Write "$TMP/py" "$TMP/empty.jsonl" "$TMP/py/.claude/plans/x/_plan.md")" "$P"
 expect_exit "plan gate: template outside plans untouched" 0 \
-  "$(gate Write "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/templates/x.html.twig")" "$P"
+  "$(gate Write "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/templates/x.html")" "$P"
 expect_exit "plan gate: missing transcript never blocks" 0 \
   "$(gate Write "$TMP/php" "$TMP/nope.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
 expect_exit "plan gate: non-write tool untouched" 0 \
@@ -261,11 +263,7 @@ expect_exit "plan gate: nothing in the family loaded it, still blocked" 2 \
 # PHP source edits go through the rubric too (the standards' §Architecture and tech debt),
 # and the rubric is SKILL.md plus the references the target needs, not SKILL.md alone
 mkdir -p "$TMP/php/src/Service" "$TMP/php/tests/Service" "$TMP/php/vendor/acme/src" "$TMP/php/packages/billing/src" "$TMP/php/sub/dir"
-mkdir -p "$TMP/mag/app/code/Acme/Foo/Block" "$TMP/mag/app/code/Acme/Foo/Api/Data" "$TMP/mag/app/code/Acme/Foo/Model" "$TMP/mag/.claude/plans/x"
-mkdir -p "$TMP/sf/src/Controller" "$TMP/modroot/app/code/Acme/Bar/Block"
-echo '{"require":{"magento/framework":"*"}}' > "$TMP/mag/composer.json"
-echo '{"require":{"symfony/framework-bundle":"^7.0"}}' > "$TMP/sf/composer.json"
-echo '{"type":"magento2-module"}' > "$TMP/modroot/app/code/Acme/Bar/composer.json"
+mkdir -p "$TMP/php/src/Domain" "$TMP/php/src/Model"
 tl() { # transcript path, then rubric files to show as loaded ("skill" = Skill call)
   local out="$1"; shift; : > "$out"
   for f in "$@"; do
@@ -280,10 +278,7 @@ tl "$TMP/t-skill-solid.jsonl" skill solid.md
 tl "$TMP/t-checklist.jsonl" implementer-checklist.md
 tl "$TMP/t-checklist-solid.jsonl" implementer-checklist.md solid.md
 tl "$TMP/t-solid-only.jsonl" solid.md
-tl "$TMP/t-mag.jsonl" skill solid.md magento2.md
-tl "$TMP/t-mag-ddd.jsonl" skill solid.md magento2.md ddd.md
-tl "$TMP/t-sf.jsonl" skill solid.md symfony.md
-tl "$TMP/t-skill-mag.jsonl" skill magento2.md
+tl "$TMP/t-ddd.jsonl" skill solid.md ddd.md
 cat > "$TMP/lsrefs.jsonl" <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls ~/.claude/skills/clean-architecture-php/references"}}]}}
 EOF
@@ -323,26 +318,12 @@ expect_exit "source gate: SKILL.md + solid.md read from a marketplace clone allo
   "$(gate Edit "$TMP/php" "$TMP/t-clone.jsonl" "$TMP/php/src/Service/Foo.php")" "$P"
 expect_exit "source gate: SKILL.md from the plugin cache alone still needs solid.md" 2 \
   "$(gate Edit "$TMP/php" "$TMP/t-cache-skill-only.jsonl" "$TMP/php/src/Service/Foo.php")" "$P"
-expect_exit "source gate: magento project needs magento2.md" 2 \
-  "$(gate Edit "$TMP/mag" "$TMP/t-skill-solid.jsonl" "$TMP/mag/app/code/Acme/Foo/Block/Survey.php")" "$P"
-expect_exit "source gate: magento block with skill+solid+magento2 allowed" 0 \
-  "$(gate Edit "$TMP/mag" "$TMP/t-mag.jsonl" "$TMP/mag/app/code/Acme/Foo/Block/Survey.php")" "$P"
-expect_exit "source gate: magento Api/Data needs ddd.md too" 2 \
-  "$(gate Write "$TMP/mag" "$TMP/t-mag.jsonl" "$TMP/mag/app/code/Acme/Foo/Api/Data/SurveyOptIn.php")" "$P"
-expect_exit "source gate: magento Model needs ddd.md too" 2 \
-  "$(gate Write "$TMP/mag" "$TMP/t-mag.jsonl" "$TMP/mag/app/code/Acme/Foo/Model/Order.php")" "$P"
-expect_exit "source gate: magento Api/Data with ddd.md allowed" 0 \
-  "$(gate Write "$TMP/mag" "$TMP/t-mag-ddd.jsonl" "$TMP/mag/app/code/Acme/Foo/Api/Data/SurveyOptIn.php")" "$P"
-expect_exit "source gate: magento detected from a module composer.json below an unmanaged root" 2 \
-  "$(gate Write "$TMP/modroot" "$TMP/t-skill-solid.jsonl" "$TMP/modroot/app/code/Acme/Bar/Block/Foo.php")" "$P"
-expect_exit "source gate: symfony project needs symfony.md" 2 \
-  "$(gate Edit "$TMP/sf" "$TMP/t-skill-solid.jsonl" "$TMP/sf/src/Controller/FooController.php")" "$P"
-expect_exit "source gate: symfony with skill+solid+symfony allowed" 0 \
-  "$(gate Edit "$TMP/sf" "$TMP/t-sf.jsonl" "$TMP/sf/src/Controller/FooController.php")" "$P"
-expect_exit "plan gate: magento plan needs the stack reference" 2 \
-  "$(gate Write "$TMP/mag" "$TMP/loaded.jsonl" "$TMP/mag/.claude/plans/x/_plan.md")" "$P"
-expect_exit "plan gate: magento plan with skill+magento2 allowed (solid not required for plans)" 0 \
-  "$(gate Write "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md")" "$P"
+expect_exit "source gate: a domain directory needs ddd.md" 2 \
+  "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/Domain/SurveyOptIn.php")" "$P"
+expect_exit "source gate: a Model directory needs ddd.md" 2 \
+  "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/Model/Order.php")" "$P"
+expect_exit "source gate: a domain directory with ddd.md allowed" 0 \
+  "$(gate Write "$TMP/php" "$TMP/t-ddd.jsonl" "$TMP/php/src/Domain/SurveyOptIn.php")" "$P"
 expect_exit "source gate: test file untouched" 0 \
   "$(gate Edit "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/tests/Service/FooTest.php")" "$P"
 expect_exit "source gate: vendor untouched" 0 \
@@ -355,8 +336,8 @@ expect_exit "source gate: composer.json found above the file when cwd is elsewhe
   "$(gate Write "$TMP/node" "$TMP/empty.jsonl" "$TMP/php/sub/dir/Foo.php")" "$P"
 OUT=$(gate Write "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/src/Service/Foo.php" | CLAUDE_NO_PLAN_SKILL_GATE=1 python3 "$P" 2>&1; echo "rc=$?")
 case "$OUT" in *"rc=0"*) ok ;; *) ko "source gate: kill switch honoured" ;; esac
-OUT=$(gate Write "$TMP/mag" "$TMP/loaded.jsonl" "$TMP/mag/app/code/Acme/Foo/Api/Data/SurveyOptIn.php" | python3 "$P" 2>&1)
-case "$OUT" in *"references/ddd.md"*"references/magento2.md"*"references/solid.md"*) ok ;; *) ko "source gate: denial names every missing reference"; echo "$OUT" ;; esac
+OUT=$(gate Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/src/Domain/SurveyOptIn.php" | python3 "$P" 2>&1)
+case "$OUT" in *"references/ddd.md"*"references/solid.md"*) ok ;; *) ko "source gate: denial names every missing reference"; echo "$OUT" ;; esac
 OUT=$(gate Write "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/src/Service/Foo.php" | python3 "$P" 2>&1)
 case "$OUT" in *"Skill tool with \`architecture:clean-architecture-php\`"*"clean-architecture-php/references/solid.md"*"base directory the Skill tool reports"*) ok ;;
   *) ko "source gate: denial names the plugin skill and where its references are"; echo "$OUT" ;; esac
@@ -387,33 +368,29 @@ mkdir -p "$TMP/js/src/cart/domain" "$TMP/js/src/widgets" "$TMP/js/src/__tests__"
 echo '{"name":"js","devDependencies":{"typescript":"^5"}}' > "$TMP/js/package.json"
 mkdir -p "$TMP/react/src/features/cart/ui" "$TMP/react/.claude/plans/x"
 echo '{"dependencies":{"react":"^19","react-dom":"^19"}}' > "$TMP/react/package.json"
-mkdir -p "$TMP/mag/app/code/Acme/Foo/view/frontend/web/js/model" "$TMP/mag/app/code/Acme/Foo/Test/Js" \
-  "$TMP/mag/pub/static/frontend/Acme/theme/en_US/Acme_Foo/js" "$TMP/mag/.claude/plans/y"
-mkdir -p "$TMP/sf/assets/controllers" "$TMP/sf/packages/editor/src/Resources/react-editor/lib" "$TMP/sf/public/build" \
-  "$TMP/sf/.claude/plans/x"
-echo '{"dependencies":{"react":"^19"}}' > "$TMP/sf/package.json"
+# $TMP/host: a PHP project whose package.json depends on React, with a React island under a jsx tsconfig
+mkdir -p "$TMP/js/src/cart/model" "$TMP/host/assets/controllers" "$TMP/host/packages/editor/src/Resources/react-editor/lib" \
+  "$TMP/host/public/build" "$TMP/host/web/js" "$TMP/host/src/Test/Js" "$TMP/host/pub/static/frontend/js" \
+  "$TMP/host/lib/web/js" "$TMP/host/public/bundles/acme" "$TMP/php/.claude/plans/y"
+echo '{}' > "$TMP/host/composer.json"
+echo '{"dependencies":{"react":"^19"}}' > "$TMP/host/package.json"
 printf '{\n  "compilerOptions": {\n    "strict": true, // comments are allowed here\n    "jsx": "react-jsx",\n    "paths": {"@/*": ["./*"]}\n  }\n}\n' \
-  > "$TMP/sf/packages/editor/src/Resources/react-editor/tsconfig.json"
+  > "$TMP/host/packages/editor/src/Resources/react-editor/tsconfig.json"
 mkdir -p "$TMP/loose" && : > "$TMP/loose/x.js"
 tj "$TMP/tj-base.jsonl" skill solid.md javascript.md
 tj "$TMP/tj-ts.jsonl" skill solid.md javascript.md typescript.md
 tj "$TMP/tj-ts-ddd.jsonl" skill solid.md javascript.md typescript.md ddd.md
 tj "$TMP/tj-checklist.jsonl" implementer-checklist.md solid.md javascript.md
 tj "$TMP/tj-react-ts.jsonl" skill solid.md javascript.md typescript.md react.md
-tj "$TMP/tj-mag.jsonl" skill solid.md javascript.md magento2-frontend.md
-tj "$TMP/tj-mag-ddd.jsonl" skill solid.md javascript.md magento2-frontend.md ddd.md
-tj "$TMP/tj-sf.jsonl" skill solid.md javascript.md symfony-frontend.md
-tj "$TMP/tj-sf-ts.jsonl" skill solid.md javascript.md symfony-frontend.md typescript.md
-tj "$TMP/tj-sf-island.jsonl" skill solid.md javascript.md symfony-frontend.md typescript.md react.md
+tj "$TMP/tj-ddd.jsonl" skill solid.md javascript.md ddd.md
+tj "$TMP/tj-react.jsonl" skill solid.md javascript.md react.md
 tj "$TMP/tj-plan-js.jsonl" skill javascript.md
 tj "$TMP/tj-plan-react.jsonl" skill react.md
 tj "$TMP/tj-skill-only.jsonl" skill
 cat > "$TMP/tj-cat.jsonl" <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat ~/.claude/skills/clean-architecture-js/SKILL.md ~/.claude/skills/clean-architecture-js/references/solid.md ~/.claude/skills/clean-architecture-js/references/javascript.md"}}]}}
 EOF
-cat "$TMP/t-mag.jsonl" "$TMP/tj-mag.jsonl" > "$TMP/t-both-mag.jsonl"
-cat "$TMP/t-skill-mag.jsonl" "$TMP/tj-skill-only.jsonl" > "$TMP/t-plan-php-js.jsonl"
-printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/root/.claude/skills/clean-architecture-js/references/magento2-frontend.md"}}]}}\n' >> "$TMP/t-plan-php-js.jsonl"
+cat "$TMP/loaded.jsonl" "$TMP/tj-plan-js.jsonl" > "$TMP/t-plan-php-js.jsonl"
 expect_exit "js gate: js source write without rubric blocked" 2 \
   "$(gate Write "$TMP/js" "$TMP/empty.jsonl" "$TMP/js/src/widgets/coupon.js")" "$P"
 expect_exit "js gate: the PHP rubric does not stand in for the JS one" 2 \
@@ -448,33 +425,29 @@ expect_exit "js gate: react project .ts needs react.md" 2 \
   "$(gate Write "$TMP/react" "$TMP/tj-ts.jsonl" "$TMP/react/src/features/cart/ui/use-cart.ts")" "$P"
 expect_exit "js gate: react project .ts with react.md allowed" 0 \
   "$(gate Write "$TMP/react" "$TMP/tj-react-ts.jsonl" "$TMP/react/src/features/cart/ui/use-cart.ts")" "$P"
-expect_exit "js gate: magento module js needs magento2-frontend.md" 2 \
-  "$(gate Write "$TMP/mag" "$TMP/tj-base.jsonl" "$TMP/mag/app/code/Acme/Foo/view/frontend/web/js/coupon.js")" "$P"
-expect_exit "js gate: magento module js with magento2-frontend.md allowed" 0 \
-  "$(gate Write "$TMP/mag" "$TMP/tj-mag.jsonl" "$TMP/mag/app/code/Acme/Foo/view/frontend/web/js/coupon.js")" "$P"
-expect_exit "js gate: magento js model/ needs ddd.md" 2 \
-  "$(gate Write "$TMP/mag" "$TMP/tj-mag.jsonl" "$TMP/mag/app/code/Acme/Foo/view/frontend/web/js/model/cart.js")" "$P"
-expect_exit "js gate: magento js model/ with ddd.md allowed" 0 \
-  "$(gate Write "$TMP/mag" "$TMP/tj-mag-ddd.jsonl" "$TMP/mag/app/code/Acme/Foo/view/frontend/web/js/model/cart.js")" "$P"
-expect_exit "js gate: stimulus controller needs symfony-frontend.md" 2 \
-  "$(gate Write "$TMP/sf" "$TMP/tj-base.jsonl" "$TMP/sf/assets/controllers/coupon_controller.js")" "$P"
-expect_exit "js gate: stimulus controller does not need react.md on a PHP host" 0 \
-  "$(gate Write "$TMP/sf" "$TMP/tj-sf.jsonl" "$TMP/sf/assets/controllers/coupon_controller.js")" "$P"
+expect_exit "js gate: a model/ directory needs ddd.md" 2 \
+  "$(gate Write "$TMP/js" "$TMP/tj-base.jsonl" "$TMP/js/src/cart/model/cart.js")" "$P"
+expect_exit "js gate: a model/ directory with ddd.md allowed" 0 \
+  "$(gate Write "$TMP/js" "$TMP/tj-ddd.jsonl" "$TMP/js/src/cart/model/cart.js")" "$P"
+expect_exit "js gate: with no stack detected, a PHP host depending on React needs react.md" 2 \
+  "$(gate Write "$TMP/host" "$TMP/tj-base.jsonl" "$TMP/host/assets/controllers/coupon_controller.js")" "$P"
+expect_exit "js gate: with no stack detected, a PHP host depending on React with react.md allowed" 0 \
+  "$(gate Write "$TMP/host" "$TMP/tj-react.jsonl" "$TMP/host/assets/controllers/coupon_controller.js")" "$P"
 expect_exit "js gate: island .ts under a jsx tsconfig needs react.md" 2 \
-  "$(gate Write "$TMP/sf" "$TMP/tj-sf-ts.jsonl" "$TMP/sf/packages/editor/src/Resources/react-editor/lib/api.ts")" "$P"
+  "$(gate Write "$TMP/host" "$TMP/tj-ts.jsonl" "$TMP/host/packages/editor/src/Resources/react-editor/lib/api.ts")" "$P"
 expect_exit "js gate: island .ts with react.md allowed" 0 \
-  "$(gate Write "$TMP/sf" "$TMP/tj-sf-island.jsonl" "$TMP/sf/packages/editor/src/Resources/react-editor/lib/api.ts")" "$P"
+  "$(gate Write "$TMP/host" "$TMP/tj-react-ts.jsonl" "$TMP/host/packages/editor/src/Resources/react-editor/lib/api.ts")" "$P"
 for skipped in "$TMP/js/node_modules/lib/index.js" "$TMP/js/dist/app.js" "$TMP/js/src/__tests__/cart.ts" \
   "$TMP/js/src/widgets/coupon.test.ts" "$TMP/js/src/widgets/coupon.spec.js" "$TMP/js/src/widgets/types.d.ts" \
-  "$TMP/js/src/widgets/lib.min.js" "$TMP/js/vite.config.ts" "$TMP/mag/app/code/Acme/Foo/view/frontend/requirejs-config.js" \
-  "$TMP/mag/app/code/Acme/Foo/Test/Js/coupon.test.mjs" "$TMP/mag/pub/static/frontend/Acme/theme/en_US/Acme_Foo/js/coupon.js" \
-  "$TMP/sf/public/build/app.js"; do
+  "$TMP/js/src/widgets/lib.min.js" "$TMP/js/vite.config.ts" "$TMP/host/web/requirejs-config.js" \
+  "$TMP/host/src/Test/Js/coupon.test.mjs" "$TMP/host/pub/static/frontend/js/coupon.js" \
+  "$TMP/host/public/build/app.js" "$TMP/host/lib/web/js/coupon.js" "$TMP/host/public/bundles/acme/app.js"; do
   expect_exit "js gate: not source, untouched: ${skipped#$TMP/}" 0 \
     "$(gate Write "$TMP/js" "$TMP/empty.jsonl" "$skipped")" "$P"
 done
-mkdir -p "$TMP/mag/e2e/src/pages" && echo '{"devDependencies":{"@playwright/test":"*"}}' > "$TMP/mag/e2e/package.json"
+mkdir -p "$TMP/host/e2e/src/pages" && echo '{"devDependencies":{"@playwright/test":"*"}}' > "$TMP/host/e2e/package.json"
 expect_exit "js gate: a test suite that is a package of its own untouched" 0 \
-  "$(gate Write "$TMP/mag" "$TMP/empty.jsonl" "$TMP/mag/e2e/src/pages/cart.ts")" "$P"
+  "$(gate Write "$TMP/host" "$TMP/empty.jsonl" "$TMP/host/e2e/src/pages/cart.ts")" "$P"
 expect_exit "js gate: js file outside any project untouched" 0 \
   "$(gate Write "$TMP/loose" "$TMP/empty.jsonl" "$TMP/loose/x.js")" "$P"
 expect_exit "js gate: missing transcript never blocks" 0 \
@@ -493,19 +466,222 @@ expect_exit "js plan: React project plan needs react.md" 2 \
   "$(gate Write "$TMP/react" "$TMP/tj-plan-js.jsonl" "$TMP/react/.claude/plans/x/_plan.md")" "$P"
 expect_exit "js plan: React project plan with skill + react.md allowed" 0 \
   "$(gate Write "$TMP/react" "$TMP/tj-plan-react.jsonl" "$TMP/react/.claude/plans/x/_plan.md")" "$P"
-expect_exit "js plan: magento plan naming a JS file needs the JS skill too" 2 \
-  "$(gatec Write "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md" "Task 2: add view/frontend/web/js/coupon.js")" "$P"
-expect_exit "js plan: magento plan naming a JS file with both skills allowed" 0 \
-  "$(gatec Write "$TMP/mag" "$TMP/t-plan-php-js.jsonl" "$TMP/mag/.claude/plans/x/_plan.md" "Task 2: add view/frontend/web/js/coupon.js")" "$P"
-expect_exit "js plan: magento plan naming no JS needs only the PHP skill" 0 \
-  "$(gatec Write "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md" "Task 2: add Api/CouponInterface.php")" "$P"
-printf '# Plan\n| 1 | `web/js/coupon-gap.ts` pure module |\n' > "$TMP/mag/.claude/plans/y/_plan.md"
+expect_exit "js plan: PHP plan naming a JS file needs the JS skill too" 2 \
+  "$(gatec Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 2: add web/js/coupon.js")" "$P"
+expect_exit "js plan: PHP plan naming a JS file with both skills allowed" 0 \
+  "$(gatec Write "$TMP/php" "$TMP/t-plan-php-js.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 2: add web/js/coupon.js")" "$P"
+expect_exit "js plan: PHP plan naming no JS needs only the PHP skill" 0 \
+  "$(gatec Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 2: add Api/CouponInterface.php")" "$P"
+printf '# Plan\n| 1 | `web/js/coupon-gap.ts` pure module |\n' > "$TMP/php/.claude/plans/y/_plan.md"
 expect_exit "js plan: a sibling plan file naming a .ts file brings the JS skill into an Edit" 2 \
-  "$(gatec Edit "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/y/task-1.md" "reword")" "$P"
+  "$(gatec Edit "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/y/task-1.md" "reword")" "$P"
 expect_exit "js plan: python project plan untouched even when it names a .js file" 0 \
   "$(gatec Write "$TMP/py" "$TMP/empty.jsonl" "$TMP/py/.claude/plans/x/_plan.md" "static/app.js")" "$P"
-expect_exit "js gate: magento source write with both rubrics loaded allowed" 0 \
-  "$(gate Write "$TMP/mag" "$TMP/t-both-mag.jsonl" "$TMP/mag/app/code/Acme/Foo/view/frontend/web/js/coupon.js")" "$P"
+
+# ---------- plan_skill_gate.py: stack declarations ----------
+# A stack plugin registers a declaration per session; the gate adds what it declares. Two synthetic
+# stacks, alpha and beta, stand for any framework: the core names none.
+mkdir -p "$TMP/decl"
+cat > "$TMP/decl/alpha.json" <<'EOF'
+{"stack": "alpha",
+ "detect": {"composer_type_prefixes": ["alpha-"], "composer_requires": ["alpha/framework"], "root_paths": ["bin/alpha", "etc/alpha/"]},
+ "browser_markers": ["Widgetry", "w-mount"],
+ "domain_dirs": {"php": ["Contracts/Data"], "js": ["stores"]},
+ "requires": {"php_source": ["alpha-architecture-php/SKILL.md", "alpha-architecture-php/wiring.md"],
+              "js_source": ["alpha-architecture-frontend/SKILL.md"],
+              "plan_php": ["alpha-architecture-php/SKILL.md"], "plan_js": ["alpha-architecture-frontend/SKILL.md"]}}
+EOF
+cat > "$TMP/decl/beta.json" <<'EOF'
+{"stack": "beta",
+ "detect": {"composer_requires": ["beta/kernel"], "root_paths": ["bin/beta"]},
+ "requires": {"php_source": ["beta-architecture-php/SKILL.md"], "js_source": ["beta-architecture-frontend/SKILL.md"],
+              "plan_php": ["beta-architecture-php/SKILL.md"], "plan_js": ["beta-architecture-frontend/SKILL.md"]}}
+EOF
+# reg <session id> <declaration file>... -> the declarations registered for that session
+reg() {
+  local dir="$CLAUDE_KIT_STATE_DIR/sessions/$1/stacks"; shift
+  mkdir -p "$dir"
+  for f in "$@"; do cp "$f" "$dir/$(basename "$f")"; done
+}
+# tr_ <transcript> <entry>... -> "skill=<name>" is a Skill call, "cat=<path>" a Bash cat, anything else a Read
+tr_() {
+  local out="$1"; shift; : > "$out"
+  for e in "$@"; do
+    case "$e" in
+      skill=*) printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"%s"}}]}}\n' "${e#skill=}" >> "$out" ;;
+      cat=*) printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat %s"}}]}}\n' "${e#cat=}" >> "$out" ;;
+      *) printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s"}}]}}\n' "$e" >> "$out" ;;
+    esac
+  done
+}
+CORE="/root/.claude/skills/clean-architecture-php/references"
+A_CACHE="/home/dev/.claude/plugins/cache/claude-kit/alpha/0.3.1/skills/alpha-architecture-php"
+A_CLONE="/srv/claude-kit/plugins/alpha/skills/alpha-architecture-php"
+B_DIR="/srv/claude-kit/plugins/beta/skills/beta-architecture-php"
+mkdir -p "$TMP/st" "$TMP/pa/src/Service" "$TMP/pa/assets" "$TMP/pa/.claude/plans/x" "$TMP/pb/src" "$TMP/pab/src" \
+  "$TMP/proot/modules/m/src" "$TMP/proot/modules/n/src" "$TMP/proot/bin" "$TMP/pdir/src" "$TMP/pdir/etc/alpha" \
+  "$TMP/pfile/src" "$TMP/pfile/etc" "$TMP/ptype/src" "$TMP/php/src/Contracts/Data" "$TMP/js/src/stores"
+echo '{"require":{"alpha/framework":"^2"}}' > "$TMP/pa/composer.json"
+echo '{"dependencies":{"react":"^19"}}' > "$TMP/pa/package.json"
+echo '{"require":{"beta/kernel":"^1"}}' > "$TMP/pb/composer.json"
+echo '{"require":{"alpha/framework":"^2"},"require-dev":{"beta/kernel":"^1"}}' > "$TMP/pab/composer.json"
+echo '{}' > "$TMP/proot/composer.json" && mkdir -p "$TMP/proot/modules/n/bin" && : > "$TMP/proot/modules/n/bin/beta"
+mkdir -p "$TMP/pouter/modules/n/src" "$TMP/pouter/modules/n/bin" && : > "$TMP/pouter/modules/n/bin/beta"
+echo '{"require":{"alpha/framework":"^2"}}' > "$TMP/pouter/composer.json"
+echo '{"name":"acme/n"}' > "$TMP/pouter/modules/n/composer.json"
+echo '{"require":{"alpha/framework":"^2"}}' > "$TMP/proot/modules/m/composer.json" && mkdir -p "$TMP/proot/modules/m/bin" && : > "$TMP/proot/modules/m/bin/beta"
+echo '{"name":"acme/n"}' > "$TMP/proot/modules/n/composer.json"
+echo '{}' > "$TMP/pdir/composer.json"
+echo '{}' > "$TMP/pfile/composer.json" && : > "$TMP/pfile/etc/alpha"
+echo '{"type":"alpha-module"}' > "$TMP/ptype/composer.json"
+# transcripts: core = the PHP rubric's SKILL.md + solid.md; +a = alpha's skill and its reference; +b = beta's skill
+tr_ "$TMP/st/s-core.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md"
+tr_ "$TMP/st/s-core-a.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" skill=alpha:alpha-architecture-php "$A_CACHE/references/wiring.md"
+tr_ "$TMP/st/s-core-a-noref.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" skill=alpha:alpha-architecture-php
+tr_ "$TMP/st/s-clone.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" "$A_CLONE/SKILL.md" "cat=$A_CLONE/references/wiring.md"
+tr_ "$TMP/st/s-bare.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" skill=alpha-architecture-php "$A_CACHE/references/wiring.md"
+tr_ "$TMP/st/s-near.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" "/x/not-alpha-architecture-php/SKILL.md" "$A_CACHE/references/wiring.md"
+tr_ "$TMP/st/s-ls.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" "cat=$A_CACHE" "$A_CACHE/references/wiring.md"
+tr_ "$TMP/st/s-a-for-b.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" skill=alpha:alpha-architecture-php "$A_CACHE/references/wiring.md"
+tr_ "$TMP/st/s-ab.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" skill=alpha:alpha-architecture-php "$A_CACHE/references/wiring.md" "$B_DIR/SKILL.md"
+tr_ "$TMP/st/s-ab-nob.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" skill=alpha:alpha-architecture-php "$A_CACHE/references/wiring.md"
+tr_ "$TMP/st/s-b.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md" "$B_DIR/SKILL.md"
+tr_ "$TMP/st/s-none.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md"
+tr_ "$TMP/st/s-dir.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md"
+tr_ "$TMP/st/s-type.jsonl" skill=architecture:clean-architecture-php "$CORE/solid.md"
+for s in s-core-a s-core-a-noref s-clone s-bare s-near s-ls s-dir s-type; do reg "$s" "$TMP/decl/alpha.json"; done
+for s in s-a-for-b s-ab s-ab-nob s-b; do reg "$s" "$TMP/decl/alpha.json" "$TMP/decl/beta.json"; done
+expect_exit "stacks: no registry for the session leaves a stack's project to the core rules" 0 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-core.jsonl" "$TMP/pa/src/Service/Foo.php")" "$P"
+expect_exit "stacks: a registered stack's project needs its skill" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-type.jsonl" "$TMP/pa/src/Service/Foo.php")" "$P"
+expect_exit "stacks: the stack skill and its reference from a versioned plugin cache allowed" 0 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-core-a.jsonl" "$TMP/pa/src/Service/Foo.php")" "$P"
+expect_exit "stacks: a reference the declaration names is required too" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-core-a-noref.jsonl" "$TMP/pa/src/Service/Foo.php")" "$P"
+expect_exit "stacks: SKILL.md read and reference cat from a marketplace clone allowed" 0 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-clone.jsonl" "$TMP/pa/src/Service/Foo.php")" "$P"
+expect_exit "stacks: the bare Skill name counts" 0 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-bare.jsonl" "$TMP/pa/src/Service/Foo.php")" "$P"
+expect_exit "stacks: a directory that only ends in the skill's name does not count" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-near.jsonl" "$TMP/pa/src/Service/Foo.php")" "$P"
+expect_exit "stacks: naming the skill directory itself does not count" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-ls.jsonl" "$TMP/pa/src/Service/Foo.php")" "$P"
+expect_exit "stacks: one stack's skill never satisfies another's" 2 \
+  "$(gate Write "$TMP/pb" "$TMP/st/s-a-for-b.jsonl" "$TMP/pb/src/Foo.php")" "$P"
+expect_exit "stacks: a composer.json both declarations match needs both skills" 2 \
+  "$(gate Write "$TMP/pab" "$TMP/st/s-ab-nob.jsonl" "$TMP/pab/src/Foo.php")" "$P"
+expect_exit "stacks: a composer.json both declarations match, both skills loaded, allowed" 0 \
+  "$(gate Write "$TMP/pab" "$TMP/st/s-ab.jsonl" "$TMP/pab/src/Foo.php")" "$P"
+expect_exit "stacks: the nearest matching composer.json decides before the root paths" 0 \
+  "$(gate Write "$TMP/proot" "$TMP/st/s-ab-nob.jsonl" "$TMP/proot/modules/m/src/Foo.php")" "$P"
+expect_exit "stacks: a composer.json matching none is passed and an outer one decides before the root paths" 0 \
+  "$(gate Write "$TMP/pouter" "$TMP/st/s-ab-nob.jsonl" "$TMP/pouter/modules/n/src/Foo.php")" "$P"
+expect_exit "stacks: the root paths decide only when no composer.json matches" 2 \
+  "$(gate Write "$TMP/proot" "$TMP/st/s-ab-nob.jsonl" "$TMP/proot/modules/n/src/Foo.php")" "$P"
+expect_exit "stacks: the root path's stack skill satisfies it" 0 \
+  "$(gate Write "$TMP/proot" "$TMP/st/s-b.jsonl" "$TMP/proot/modules/n/src/Foo.php")" "$P"
+expect_exit "stacks: a root path ending in / matches a directory" 2 \
+  "$(gate Write "$TMP/pdir" "$TMP/st/s-dir.jsonl" "$TMP/pdir/src/Foo.php")" "$P"
+expect_exit "stacks: a root path ending in / does not match a file" 0 \
+  "$(gate Write "$TMP/pfile" "$TMP/st/s-dir.jsonl" "$TMP/pfile/src/Foo.php")" "$P"
+expect_exit "stacks: a composer type prefix detects the stack" 2 \
+  "$(gate Write "$TMP/ptype" "$TMP/st/s-type.jsonl" "$TMP/ptype/src/Foo.php")" "$P"
+expect_exit "stacks: a registered stack the project does not match adds nothing" 0 \
+  "$(gate Write "$TMP/php" "$TMP/st/s-type.jsonl" "$TMP/php/src/Service/Foo.php")" "$P"
+reg s-none "$TMP/decl/alpha.json" "$TMP/decl/beta.json"
+OUT=$(gate Write "$TMP/pab" "$TMP/st/s-none.jsonl" "$TMP/pab/src/Foo.php" | python3 "$P" 2>&1)
+case "$OUT" in *"Skill tool with \`alpha:alpha-architecture-php\`"*"Read alpha-architecture-php/references/wiring.md"*"Skill tool with \`beta:beta-architecture-php\`"*) ok ;;
+  *) ko "stacks: one denial names every stack skill with its plugin, in order"; echo "$OUT" ;; esac
+case "$OUT" in *"implementer-checklist.md in the alpha"*) ko "stacks: the denial offers a stack skill a checklist it does not have"; echo "$OUT" ;; *) ok ;; esac
+# JavaScript and plans
+tj "$TMP/st/j-base.jsonl" skill solid.md javascript.md
+tr_ "$TMP/st/j-a.jsonl" skill=clean-architecture-js /r/clean-architecture-js/references/solid.md /r/clean-architecture-js/references/javascript.md \
+  "$A_CACHE/../alpha-architecture-frontend/SKILL.md"
+cp "$TMP/st/j-base.jsonl" "$TMP/st/j-base-r.jsonl"
+cp "$TMP/st/j-base.jsonl" "$TMP/st/j-dom.jsonl"
+for s in j-base-r j-a j-dom; do reg "$s" "$TMP/decl/alpha.json"; done
+expect_exit "stacks: JS on a registered stack's project needs its frontend skill" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/j-base-r.jsonl" "$TMP/pa/assets/app.js")" "$P"
+expect_exit "stacks: JS with the frontend skill allowed; a detected stack asks no react.md" 0 \
+  "$(gate Write "$TMP/pa" "$TMP/st/j-a.jsonl" "$TMP/pa/assets/app.js")" "$P"
+expect_exit "stacks: the same JS with no stack registered needs react.md" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/j-base.jsonl" "$TMP/pa/assets/app.js")" "$P"
+expect_exit "stacks: a registered stack's JS domain directory needs ddd.md on any project" 2 \
+  "$(gate Write "$TMP/js" "$TMP/st/j-dom.jsonl" "$TMP/js/src/stores/cart.js")" "$P"
+expect_exit "stacks: a registered stack's PHP domain directory needs ddd.md on any project" 2 \
+  "$(gate Write "$TMP/php" "$TMP/st/s-type.jsonl" "$TMP/php/src/Contracts/Data/Line.php")" "$P"
+expect_exit "stacks: that directory is no domain directory when the stack is not registered" 0 \
+  "$(gate Write "$TMP/php" "$TMP/st/s-core.jsonl" "$TMP/php/src/Contracts/Data/Line.php")" "$P"
+tr_ "$TMP/st/p-php.jsonl" skill=clean-architecture-php
+tr_ "$TMP/st/p-php-unreg.jsonl" skill=clean-architecture-php
+tr_ "$TMP/st/p-a.jsonl" skill=clean-architecture-php "$A_CLONE/SKILL.md"
+tr_ "$TMP/st/p-a-js.jsonl" skill=clean-architecture-php "$A_CLONE/SKILL.md" skill=clean-architecture-js /r/clean-architecture-js/references/javascript.md
+tr_ "$TMP/st/p-a-front.jsonl" skill=clean-architecture-php "$A_CLONE/SKILL.md" skill=clean-architecture-js "$A_CACHE/../alpha-architecture-frontend/SKILL.md"
+for s in p-php p-a p-a-js p-a-front; do reg "$s" "$TMP/decl/alpha.json"; done
+expect_exit "stacks: a plan on a registered stack's project needs its skill" 2 \
+  "$(gatec Write "$TMP/pa" "$TMP/st/p-php.jsonl" "$TMP/pa/.claude/plans/x/_plan.md" "Task 1: add Api/Foo.php")" "$P"
+expect_exit "stacks: that plan with the stack skill allowed" 0 \
+  "$(gatec Write "$TMP/pa" "$TMP/st/p-a.jsonl" "$TMP/pa/.claude/plans/x/_plan.md" "Task 1: add Api/Foo.php")" "$P"
+expect_exit "stacks: a registered stack's browser marker makes any PHP plan order JS" 2 \
+  "$(gatec Write "$TMP/php" "$TMP/st/p-php.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 3: a Widgetry panel")" "$P"
+expect_exit "stacks: the marker means nothing when the stack is not registered" 0 \
+  "$(gatec Write "$TMP/php" "$TMP/st/p-php-unreg.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 3: a Widgetry panel")" "$P"
+expect_exit "stacks: a plan's JS half takes the stack's frontend skill, not javascript.md" 2 \
+  "$(gatec Write "$TMP/pa" "$TMP/st/p-a-js.jsonl" "$TMP/pa/.claude/plans/x/_plan.md" "Task 2: add assets/app.js")" "$P"
+expect_exit "stacks: a plan's JS half with the frontend skill allowed" 0 \
+  "$(gatec Write "$TMP/pa" "$TMP/st/p-a-front.jsonl" "$TMP/pa/.claude/plans/x/_plan.md" "Task 2: add assets/app.js")" "$P"
+# the registry: keyed by session, found from a subagent, and failing open
+mkdir -p "$TMP/st/sess-p/subagents"
+cp "$TMP/st/s-core.jsonl" "$TMP/st/sess-p.jsonl"
+cp "$TMP/st/s-core.jsonl" "$TMP/st/sess-p/subagents/agent-1.jsonl"
+reg sess-p "$TMP/decl/alpha.json"
+expect_exit "stacks: a subagent's transcript finds its session's registry" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/sess-p/subagents/agent-1.jsonl" "$TMP/pa/src/Foo.php")" "$P"
+expect_exit "stacks: the session's own transcript finds it" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/sess-p.jsonl" "$TMP/pa/src/Foo.php")" "$P"
+cp "$TMP/st/s-core.jsonl" "$TMP/st/s-bad.jsonl"
+mkdir -p "$CLAUDE_KIT_STATE_DIR/sessions/s-bad/stacks"
+printf '{not json' > "$CLAUDE_KIT_STATE_DIR/sessions/s-bad/stacks/broken.json"
+printf '{"stack":"gamma","requires":{"php_source":["../../etc/passwd"]}}' > "$CLAUDE_KIT_STATE_DIR/sessions/s-bad/stacks/gamma.json"
+printf '{"stack":"delta","detect":{"composer_requires":"alpha/framework"},"requires":{"php_source":["delta-php/SKILL.md"]}}' \
+  > "$CLAUDE_KIT_STATE_DIR/sessions/s-bad/stacks/delta.json"
+printf '{"stack":"Bad Name","detect":{"composer_requires":["alpha/framework"]},"requires":{"php_source":["x-php/SKILL.md"]}}' \
+  > "$CLAUDE_KIT_STATE_DIR/sessions/s-bad/stacks/eps.json"
+expect_exit "stacks: malformed declarations are ignored, the core rules still run" 0 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-bad.jsonl" "$TMP/pa/src/Foo.php")" "$P"
+: > "$TMP/st/s-bad-empty.jsonl"
+cp -R "$CLAUDE_KIT_STATE_DIR/sessions/s-bad" "$CLAUDE_KIT_STATE_DIR/sessions/s-bad-empty"
+expect_exit "stacks: the core rules still refuse beside malformed declarations" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-bad-empty.jsonl" "$TMP/pa/src/Foo.php")" "$P"
+cp "$TMP/decl/alpha.json" "$CLAUDE_KIT_STATE_DIR/sessions/s-bad/stacks/alpha.json"
+expect_exit "stacks: a valid declaration beside malformed ones still applies" 2 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-bad.jsonl" "$TMP/pa/src/Foo.php")" "$P"
+cp "$TMP/st/s-core.jsonl" "$TMP/st/s-file.jsonl"
+mkdir -p "$CLAUDE_KIT_STATE_DIR/sessions/s-file" && : > "$CLAUDE_KIT_STATE_DIR/sessions/s-file/stacks"
+expect_exit "stacks: an unreadable registry leaves the core rules" 0 \
+  "$(gate Write "$TMP/pa" "$TMP/st/s-file.jsonl" "$TMP/pa/src/Foo.php")" "$P"
+cp "$TMP/st/s-core.jsonl" "$TMP/st/s-xdg.jsonl"
+mkdir -p "$TMP/xdgstate/claude-kit/sessions/s-xdg/stacks" && cp "$TMP/decl/alpha.json" "$TMP/xdgstate/claude-kit/sessions/s-xdg/stacks/"
+OUT=$(gate Write "$TMP/pa" "$TMP/st/s-xdg.jsonl" "$TMP/pa/src/Foo.php" | CLAUDE_KIT_STATE_DIR= XDG_STATE_HOME="$TMP/xdgstate" python3 "$P" >/dev/null 2>&1; echo "rc=$?")
+case "$OUT" in *"rc=2"*) ok ;; *) ko "stacks: without the override the registry is read from the XDG state home"; echo "$OUT" ;; esac
+expect_exit "stacks: a missing transcript never blocks, registry or not" 0 \
+  "$(gate Write "$TMP/pa" "$TMP/st/nope.jsonl" "$TMP/pa/src/Foo.php")" "$P"
+# shell writes go through the same evaluation
+expect_exit "stacks: a shell write of a stack's PHP source needs its skill" 2 \
+  "$(bash_json "cat > src/Foo.php <<'EOF'
+<?php
+EOF" "$TMP/pa" "$TMP/st/s-type.jsonl")" "$B"
+expect_exit "stacks: a shell write with the stack skill loaded allowed" 0 \
+  "$(bash_json "cat > src/Foo.php <<'EOF'
+<?php
+EOF" "$TMP/pa" "$TMP/st/s-core-a.jsonl")" "$B"
+OUT=$(bash_json "sed -i '' 's/a/b/' src/Foo.php" "$TMP/pa" "$TMP/st/s-type.jsonl" | python3 "$B" 2>&1)
+case "$OUT" in *"a shell write of PHP source"*"alpha:alpha-architecture-php"*) ok ;; *) ko "stacks: a shell write's denial names the stack skill"; echo "$OUT" ;; esac
+expect_exit "stacks: a shell-written plan naming a browser marker needs the JS skill" 2 \
+  "$(bash_json "cat > .claude/plans/x/_plan.md <<'EOF'
+| 1 | a w-mount panel |
+EOF" "$TMP/php" "$TMP/st/p-php.jsonl")" "$B"
 
 # ---------- bash_guard.py: baseline regeneration ----------
 mkdir -p "$TMP/bl-has" "$TMP/bl-none"
@@ -674,10 +850,10 @@ expect_exit "bash write: heredoc into ts source with the JS rubric allowed" 0 \
   "$(bash_json "cat > src/widgets/coupon.ts <<'EOF'
 export const a = 1;
 EOF" "$TMP/js" "$TMP/tj-ts.jsonl")" "$B"
-expect_exit "bash write: heredoc plan naming a .ts file on magento needs the JS skill" 2 \
+expect_exit "bash write: heredoc plan naming a .ts file on a PHP project needs the JS skill" 2 \
   "$(bash_json "cat > .claude/plans/x/_plan.md <<'EOF'
-| 1 | view/frontend/web/js/gap.ts |
-EOF" "$TMP/mag" "$TMP/t-skill-mag.jsonl")" "$B"
+| 1 | web/js/gap.ts |
+EOF" "$TMP/php" "$TMP/loaded.jsonl")" "$B"
 expect_exit "bash write: heredoc carrying ts-expect-error into ts source blocked" 2 \
   "$(bash_json "cat > src/widgets/coupon.ts <<'EOF'
 // @ts-expect-error legacy

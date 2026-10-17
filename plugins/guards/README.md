@@ -8,12 +8,43 @@ hook must never wedge a session.
 | Event | Matcher | Hook | Refuses |
 |---|---|---|---|
 | `PreToolUse` | `Edit\|Write` | `guard_generated_regions.py` | an edit inside a `<!-- …generated:start --> … <!-- …generated:end -->` block, or a full-file `Write` over a file that has one (code files are exempt) |
-| `PreToolUse` | `Edit\|Write` | `plan_skill_gate.py` | a plan under `.claude/plans/`, or PHP or JS/TS source, written before the session loaded the rubric it needs from the `architecture` plugin (`architecture:clean-architecture-php`, `architecture:clean-architecture-js`) and the references the target calls for |
+| `PreToolUse` | `Edit\|Write` | `plan_skill_gate.py` | a plan under `.claude/plans/`, or PHP or JS/TS source, written before the session loaded the rubric it needs from the `architecture` plugin (`architecture:clean-architecture-php`, `architecture:clean-architecture-js`) and the references the target calls for, plus the skills of each stack plugin whose stack the project runs on (see *Stack plugins*) |
 | `PreToolUse` | `Edit\|Write` | `debt_guard.py` | a new deferral marker (`TODO`, `FIXME`, `@todo` …) or static-analysis suppression in a source file, and a static-analysis baseline that grows |
 | `PreToolUse` | `Bash` | `bash_guard.py` | catastrophic commands (recursive force-delete of `/` or the home directory, force-push to a protected branch, destructive SQL, uploads to external hosts, regenerating an existing baseline), `gh` commands that bill the GraphQL allowance while the `github_rest_only` policy is on, and files written through the shell that the two guards above would refuse |
 | `PostToolUse` | `Edit\|Write` | `php_lint.py` | nothing; it runs `php -l` on each edited PHP file and reports a syntax error at once |
 
 A refusal exits 2, so its message goes back to the model, which fixes the cause and retries.
+
+## Stack plugins
+
+The rubric gate names no framework. A stack plugin teaches it one: it ships a `stack.json` and a
+`SessionStart` hook that copies the file into a per-session registry,
+`<state>/sessions/<session id>/stacks/<stack>.json`, where `<state>` is `$CLAUDE_KIT_STATE_DIR` or
+`${XDG_STATE_HOME:-~/.local/state}/claude-kit`. The gate reads the registry of the session the
+transcript belongs to, so only the plugins enabled in that session count, and a subagent sees the
+registry of the session that spawned it. The same evaluation serves `Edit`/`Write` and files written
+through the shell, so a heredoc or `sed -i` is held to the stack's skills as well.
+
+A declaration says how to recognise the stack (a composer `type` prefix, required package names, paths
+at the project root), which words make a PHP plan order browser work, which directories hold domain
+code, and which stack skill each target needs: PHP source, JS/TS source, the PHP half of a plan and
+its JS half. The format is in the docstring of `plan_skill_gate.py`. A declaration only adds
+requirements; the exclusions (tests, build output, served copies, tool configs) stay in the gate.
+
+Detection walks the `composer.json` files above the target nearest first; the first one any declaration
+matches decides, and only when none does are the root paths of the project tried. When one file or one
+root matches two declarations, both apply. A stack's browser words and domain directories apply on every
+project of a session that registered it.
+
+| Setup | What the gate asks for |
+|---|---|
+| `guards` and the stack plugin for your project | the core skill and its references, plus the stack's skills |
+| `guards` and no stack plugin | the core rules only. A PHP project whose `package.json` depends on React is then treated as a React host: its JS needs `react.md` |
+| a stack plugin without `guards` | nothing; the stack's skills load when asked for |
+| neither | nothing |
+
+A missing, unreadable or malformed declaration is skipped and the core rules run. When a stack
+plugin cannot register, its hook says so once at session start.
 
 ## Kill switches
 
@@ -68,4 +99,6 @@ plugins/guards/hooks/tests.sh
 ```
 
 Run it before committing any change to a hook. It builds its fixtures in a temporary directory and
-reads policies from a temporary `XDG_CONFIG_HOME`, never from yours.
+reads policies from a temporary `XDG_CONFIG_HOME` and stack declarations from a temporary
+`CLAUDE_KIT_STATE_DIR`, never from yours. It needs no stack plugin: the stack cases use synthetic
+declarations. Each stack plugin tests its own declaration against this gate in its `tests/tests.sh`.

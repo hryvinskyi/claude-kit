@@ -1,0 +1,21 @@
+{
+  "stack": "magento2",
+  "detect": {
+    "composer_type_prefixes": ["magento2-"],
+    "composer_requires": ["magento/"],
+    "root_paths": ["bin/magento", "app/etc/"]
+  },
+  "browser_markers": [
+    "RequireJS", "Knockout", "uiComponent", "AssetRendererInterface",
+    "x-magento-init", "data-mage-init", "Alpine.data"
+  ],
+  "domain_dirs": {
+    "php": ["Api/Data"]
+  },
+  "requires": {
+    "php_source": ["magento2-architecture-php/SKILL.md"],
+    "js_source": ["magento2-architecture-frontend/SKILL.md"],
+    "plan_php": ["magento2-architecture-php/SKILL.md"],
+    "plan_js": ["magento2-architecture-frontend/SKILL.md"]
+  }
+}
