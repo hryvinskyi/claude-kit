@@ -10,7 +10,7 @@ rules (`CLAUDE.md`/`AGENTS.md`, its gates, its layout) and follows them.
 | `pipeline` | A feature pipeline that plans and verifies on the main model and delegates each task to an implementer, an adversarial plan reviewer, a bug-fix loop that starts from a failing test, and an eval harness that regression-tests the agents | commands `/pipeline:feature`, `/pipeline:bug-fix`, `/pipeline:explain`, `/pipeline:learn`, `/pipeline:update-codemaps`, `/pipeline:agent-evals`; agents `pipeline:devils-advocate`, `pipeline:feature-implementer`, `pipeline:feature-contract-writer` |
 | `qa` | A browser bug hunt that proves what breaks, and a text tightener | skills `qa:bug-hunt`, `qa:tighten` |
 | `guards` | Hooks that refuse catastrophic shell commands, PHP and JS/TS source or plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and hand edits inside generated regions, and lint each edited PHP file | hooks only: `PreToolUse` on `Edit\|Write` and `Bash`, `PostToolUse` on `Edit\|Write`; see [plugins/guards/README.md](plugins/guards/README.md) |
-| `vault` | A project knowledge vault beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index | commands `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync`; agent `vault:wiki-updater`; hooks on `SessionStart`, `SessionEnd`, `Stop`; `find-vault`, `vault-check`, `vault-capture`, `vault-search` on the Bash path |
+| `vault` | A project knowledge vault beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index, git merge drivers for its busiest files | commands `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync`; agent `vault:wiki-updater`; hooks on `SessionStart`, `SessionEnd`, `Stop`; `find-vault`, `vault-check`, `vault-capture`, `vault-search`, `vault-merge` on the Bash path |
 | `board-queue` | A durable queue and paced single writer for shared GitHub Projects boards, with a scheduled worker per person | MCP server `plugin:board-queue:board-queue` (tools `board_enqueue`, `board_queue`, `board_status`, `board_release`, `board_cancel`, `board_retry`, `board_show`); `board-queue` on the Bash path. Needs `npm ci` in the clone; see its README |
 
 `pipeline` depends on `architecture` (its agents load the rubric before they write code). The
@@ -64,9 +64,10 @@ picks up a new version.
 A scheduled job, a git hook or a project's script cannot see a plugin's `bin/`, and a path into the
 plugin cache moves on every update. `bin/install-shims.sh [CLONE]` writes small shims into
 `~/.local/bin` (or `$SHIM_DIR`) — `board-queue`, `board-queue-mcp`, `find-vault`, `vault-check`,
-`vault-capture`, `vault-search` — each running the copy in the clone. It is idempotent, re-points the
-shims when run from another clone, never replaces a file it did not write, and `--check` reports
-without writing. Callers outside Claude Code use those paths.
+`vault-capture`, `vault-search`, `vault-merge` — each running the copy in the clone. It is idempotent,
+re-points the shims when run from another clone, never replaces a file it did not write, and `--check`
+reports without writing. Callers outside Claude Code use those paths; git's merge-driver
+configuration names the `vault-merge` shim.
 
 ## Agent evals
 

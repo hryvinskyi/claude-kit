@@ -453,11 +453,15 @@ def load_stamps(path: Path) -> dict:
     return notes if isinstance(notes, dict) else {}
 
 
+def render_stamps(notes: dict) -> str:
+    """The text of a stamps file holding `notes`, laid out the one way every writer of it agrees on."""
+    return json.dumps({"version": 1, "notes": notes}, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
+
+
 def save_stamps(path: Path, notes: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = json.dumps({"version": 1, "notes": notes}, indent=1, sort_keys=True, ensure_ascii=False)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(body + "\n", encoding="utf-8")
+    tmp.write_text(render_stamps(notes), encoding="utf-8")
     tmp.replace(path)
 
 
