@@ -9,7 +9,7 @@ numbered invariants and two binding review constraints.
 
 What the fixture measures:
 - the implementer reads the **JS** cut of the rubric — `architecture:clean-architecture-js`'s
-  `implementer-checklist.md`, `solid.md`, `javascript.md`, `magento2-frontend.md`,
+  `implementer-checklist.md`, `solid.md`, `javascript.md`, `magento2:magento2-architecture-frontend`,
   `typescript.md`. The guard hook `plan_skill_gate.py` refuses the `.ts` write until the session shows
   them, so a produced module proves the reads; a run stuck at the denial is a failure of the
   agent definition;

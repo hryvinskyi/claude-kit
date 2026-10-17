@@ -386,3 +386,25 @@ Read with the core skill's `references/implementer-checklist.md`.
 - Minimum self-check for a Symfony controller you touched:
   `rg -nP '(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(|::of\(|addFlash\(|getMessage\(\)|function \w+\([^)]*\b(TranslatableMessage|Translator|EventDispatcher)\b\s+\$' <non-test files>`.
 - JS/TS source a module ships is written against `architecture:clean-architecture-js` and `symfony:symfony-architecture-frontend`.
+
+## Finding things
+
+Where the pipeline commands' stack-neutral steps look on a Symfony project.
+
+- **A route** (`/pipeline:explain`): `bin/console debug:router --show-controllers` lists each route with its controller; in the code, the `#[Route]` attribute on the controller.
+- **A console command**: the class carrying the name, through its `#[AsCommand]` attribute or its `configure()`.
+- **Dynamic hops**: besides the listeners of each event and the members of each tagged pool, Doctrine lifecycle callbacks and entity listeners run on the path without a call that names them. `bin/console debug:event-dispatcher <event>` lists an event's listeners, and `bin/console debug:container --tag=<tag>` a pool's members.
+- **The vendors present** (the sideways-naming review): the `composer.json` require of the project and of each package. A package declares its dependencies in its `composer.json` require; the framework adds no module manifest of its own.
+- **The verify sweep** (`/pipeline:feature`): on a Symfony project the minimum sweep adds the framework's side channel and the concrete types a helper must not be typed on. A controller building `new TranslatableMessage('key', [], 'domain')` at every call site, or a helper typed on `TranslatableMessage`, has shipped past every gate. The whole pattern, over the non-test PHP files of the diff:
+  `git diff --name-only | grep -E '\.php$' | grep -v /tests/ | xargs rg -nP '(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(|addFlash\(|getMessage\(\)|function \w+\([^)]*\b(TranslatableMessage|Translator|EventDispatcher)\b\s+\$|\bswitch\s*\(|\belse\s?if\b'`
+
+## Plan review on this stack
+
+What the `pipeline:devils-advocate` checks look for in Symfony's spelling.
+
+- **Browser work.** A plan has browser work, and needs `architecture:clean-architecture-js` with `symfony:symfony-architecture-frontend` as well, when it orders Stimulus controllers, a `stimulus_controller` call in a template, or `importmap` entries — as well as the `.js`/`.ts` files and templates loading assets that any stack's plan names.
+- **Sideways naming.** The declared dependencies a module may name are its package's `composer.json` require (and `package.json` for its browser code); there is no module manifest beyond them.
+
+## Engineering standards on this stack
+
+The always-loaded engineering standards name no framework. What they mean on Symfony — `services.yaml` among the files a test must not parse, the container compile as the build step that proves the wiring, the skills that state the bar — is in this plugin's `standards/CLAUDE.standards.symfony.md`. The kit's installer imports that file into the user's memory beside the standards (`standards/import_standards.py --stack symfony`), so every session and every subagent loads it whether or not it loads this skill. It is not repeated here.

@@ -41,7 +41,7 @@ are in**, never assumed from another project.
   - tests run code; never read a project file and assert its text (global rule);
   - a rule you cannot express as a test belongs under *Not pinned* in your report, not in a comment.
 - **Not the contract**: implementation classes or function bodies, stubs that return a placeholder,
-  wiring (`di.xml`, service config, layout, module registration), templates, translations. The
+  wiring (container and service configuration, layout, module registration), templates, translations. The
   implementer writes those from your *Implementation notes*.
 
 Every file you create or change is frozen once the orchestrator accepts it, so put nothing in a

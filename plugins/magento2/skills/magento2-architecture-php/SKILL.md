@@ -262,3 +262,25 @@ Read with the core skill's `references/implementer-checklist.md`.
 - Factories: Magento generates `…Factory`, whose `create()` asks the ObjectManager; nobody writes one by hand. The composition root is Magento's bootstrap.
 - Declared dependencies are the `module.xml` sequence and the composer require; a neighbour's name appears in neither the code nor the wiring unless it is declared there.
 - The browser seam: the ViewModel builds the config, the template prints it escaped and asks the renderer for the asset (§8). JS/TS source is written against `architecture:clean-architecture-js` and `magento2:magento2-architecture-frontend`.
+
+## Finding things
+
+Where the pipeline commands' stack-neutral steps look on a Magento 2 project.
+
+- **A route** (`/pipeline:explain`): the module's `etc/<area>/routes.xml` for a storefront or admin route, `etc/webapi.xml` for a REST or SOAP one.
+- **A console command**: the class carrying the name, through its `configure()`, registered in the command list of a `di.xml`.
+- **Dynamic hops**: besides the listeners of each event, the plugins `di.xml` declares on each class on the path and the observers `events.xml` attaches to each event it dispatches.
+- **The vendors present** (the sideways-naming review): `ls app/code vendor`. A module's declared dependencies are its `composer.json` require and its `etc/module.xml` `<sequence>`.
+- **Vault notes named for a module.** A note `Modules/Vendor_Module.md` cites paths inside `app/code/Vendor/Module/` once `vault-check` has this note-base rule, in `${XDG_CONFIG_HOME:-~/.config}/claude-kit/vault-check.conf` or the vault's git key `vault-check.noteBase`:
+  `([A-Z][A-Za-z0-9]*)_([A-Z][A-Za-z0-9]*) app/code/{1}/{2}/`
+
+## Plan review on this stack
+
+What the `pipeline:devils-advocate` checks look for in Magento's spelling.
+
+- **Browser work.** A plan has browser work, and needs `architecture:clean-architecture-js` with `magento2:magento2-architecture-frontend` as well, when it orders Magento `view/<area>/web/` assets, RequireJS/Knockout/Alpine code, or templates that load scripts and styles (`AssetRendererInterface` from hryvinskyi/magento2-theme-assets) — as well as the `.js`/`.ts` files any stack's plan names.
+- **Sideways naming.** The declared dependencies a module may name are its `module.xml` sequence and its `composer.json` require.
+
+## Engineering standards on this stack
+
+The always-loaded engineering standards name no framework. What they mean on Magento — the `ObjectManager` among the outer concretes, the `module.xml` sequence as the module manifest, `di.xml`/`config.xml`/layout XML among the files a test must not parse, `setup:di:compile` as the build step that proves the wiring, the skills that state the bar — is in this plugin's `standards/CLAUDE.standards.magento2.md`. The kit's installer imports that file into the user's memory beside the standards (`standards/import_standards.py --stack magento2`), so every session and every subagent loads it whether or not it loads this skill. It is not repeated here.

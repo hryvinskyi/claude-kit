@@ -30,8 +30,13 @@ evals/
     runs.log             # one line per run: date · agent@<content hash> · score · misses
 ```
 
-`<evals>` in an answer key or a scorer's header is this directory: `evals/` of the pipeline plugin,
-which `/pipeline:agent-evals` resolves as `${CLAUDE_PLUGIN_ROOT}/evals/`.
+A fixture lives in the `evals/` directory of the plugin it belongs to: a fixture that is a project
+of one stack ships with that stack's plugin (`plugins/<stack>/evals/<agent-name>/`), with the same
+layout and these same rules; a fixture that names no stack stays here. `<evals>` in an answer key or
+a scorer's header is the `evals/` directory of the plugin that holds the fixture, which
+`/pipeline:agent-evals` resolves for a fixture given as `<plugin>/<fixture-NN>`.
+
+Evals are a maintainer tool: they run from the kit's source clone, never from the plugin cache.
 
 ## Rules
 
@@ -52,23 +57,8 @@ which `/pipeline:agent-evals` resolves as `${CLAUDE_PLUGIN_ROOT}/evals/`.
 
 ## Current fixtures
 
-- `devils-advocate/fixture-01` + `expected-01.md` — Symfony-ish modular monolith
-  ("acme-billing"), plan "credit-notes" with **7 seeded flaws** (F1–F7): missing task
-  dependency, unwired tagged services, nonexistent repository method, switch-on-type
-  dispatch, entity change without migration, missing locale, and a plan step that
-  contradicts an accepted decision record.
-- `devils-advocate/fixture-02` + `expected-02.md` — the precision case: the same project and
-  feature planned **correctly**, with **7 decoys** (D1–D7) that look like F1–F7 until the
-  file the plan points at is read. Expected: 0 Critical, no decoy tripped, no `[APPLIED]`
-  edit that rests on nothing. fixture-01 scores recall; this one scores what a reviewer
-  that edits plans does to a plan that was right.
-- `devils-advocate/fixture-03` + `expected-03.md` — the first plan that ships browser code: a
-  Magento store ("acme-store") with storefront TypeScript, a free-shipping bar rendered through
-  hryvinskyi/magento2-theme-assets, **8 seeded flaws** (J1–J8): a 38 KB script inlined by the
-  renderer's default, the cart subtotal printed into a full-page-cached page, `switch` on the
-  mode, `JSON.parse(…) as` with `!`, the renderer's module undeclared, English in the TS module,
-  the entry missing from the explicit esbuild list, and a test that reads the template as text.
-  Its plan names `.ts` files, so the rubric gate demands both skills before any plan write.
+Here, in the pipeline plugin:
+
 - `wiki-updater/fixture-01` + `expected-01.md` — vault project ("acme-notes") with a real
   sync script (`scripts/kb-sync.py`), a stale managed block, empty prose, and an orphan
   note. Tests: sync-not-hand-edit, prose outside markers grounded in code, orphan
@@ -76,21 +66,11 @@ which `/pipeline:agent-evals` resolves as `${CLAUDE_PLUGIN_ROOT}/evals/`.
 - `feature-implementer/fixture-01` + `expected-01.md` — scope-check trap ("acme-tasks"):
   the task orders extending a method that doesn't exist while a review constraint freezes
   public names. Only correct outcome: **blocked-with-question with zero mutations**.
-- `feature-implementer/fixture-02` + `expected-02.md` + `verify-02.test.mts` — the TypeScript
-  happy path ("acme-store"): a pure `freeShippingGap()` module and its `node --test` tests, runnable
-  offline through Node's type stripping, with `tsc` deliberately absent. Scores behaviour (the
-  scorer), rubric reads (the gate), no `invariant N` in code, scope, and a type check reported as
-  not run rather than green.
-- `feature-implementer/fixture-04` + `expected-04.md` — `/pipeline:feature` split mode from the implementer's
-  side ("acme-store"): a frozen contract test file with a hash file, one of whose tests contradicts
-  the plan's invariant 3. Only correct outcome: **blocked-with-question, the frozen file
-  byte-identical**, and any module written honours the invariant (scored with `verify-02`). Run it on
-  Sonnet and Opus — split mode gives this contract to Sonnet.
-- `feature-contract-writer/fixture-01` + `expected-01.md` + `verify-01.test.mts` — the contract side
-  of split mode: the fixture-02 task, planned `split`. The scorer runs the agent's test file against a
-  reference implementation (must pass) and against ten mutants, each wrong in one way the task
-  forbids (each must be refused); it also checks no implementation was written and the contract is
-  red because the module is missing.
+
+The pipeline plugin has no `devils-advocate` fixture and no `feature-contract-writer` fixture of
+its own: every one written so far is a project of one stack, so it ships with that stack's plugin
+and is listed in that plugin's `evals/README.md`. The first stack-neutral `devils-advocate`
+fixture would be the JS-only `fixture-04` of the backlog below.
 
 ## Backlog
 

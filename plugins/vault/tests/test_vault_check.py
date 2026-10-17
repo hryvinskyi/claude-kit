@@ -7,7 +7,9 @@ that a vault is held to the dated decision template only when its records keep i
 vault is not flooded with findings; that links resolve as Obsidian resolves them; and, against a real
 throwaway project whose vault the project does not version, that a vanished class is hard while a
 class that exists as a word in code or under vendor/ is not, that an ignored path is never a finding,
-that the stamps live outside the project, and that a changed file flags the note until it is stamped.
+that the stamps live outside the project, and that a changed file flags the note until it is stamped;
+and that a note-base rule, from the vault's git config or the user's rule file, adds a package layout
+while a rule that does not parse is reported and skipped.
 
 Run from the plugin directory: python3 -m unittest discover -s tests
 """
@@ -42,25 +44,58 @@ class SpanTests(unittest.TestCase):
 
     def test_path_shaped_spans_are_collected_and_placeholders_are_not(self) -> None:
         self.assertEqual(vc.span_path("packages/crm/src/X.php:48"), "packages/crm/src/X.php")
-        self.assertEqual(vc.span_path("etc/di.xml"), "etc/di.xml")
+        self.assertEqual(vc.span_path("etc/settings.ini"), "etc/settings.ini")
         self.assertEqual(vc.span_path("text/plain"), "text/plain")  # shaped like one; the repository decides
-        for span in ("packages/{module}/src", "app/code/*/Api", "https://example.com/x", "@scope/pkg", "a / b"):
+        for span in ("packages/{module}/src", "modules/*/Api", "https://example.com/x", "@scope/pkg", "a / b"):
             self.assertIsNone(vc.span_path(span), span)
 
 
 class ScopeTests(unittest.TestCase):
     def test_a_path_is_about_the_repository_only_when_its_first_segment_exists(self) -> None:
         entries = {"packages", "scripts", ".claude"}
-        exists = {"app/code/Acme/Catalog/etc"}.__contains__
+        exists = {"modules/Acme/Catalog/etc"}.__contains__
         self.assertTrue(vc.names_the_repository("scripts/x.py", [], entries, exists))
         self.assertFalse(vc.names_the_repository("text/plain", [], entries, exists))
-        self.assertTrue(vc.names_the_repository("etc/di.xml", ["app/code/Acme/Catalog/"], entries, exists))
+        self.assertTrue(vc.names_the_repository("etc/settings.ini", ["modules/Acme/Catalog/"], entries, exists))
 
     def test_a_package_note_gets_its_packages_as_bases(self) -> None:
         self.assertEqual(vc.package_bases("Modules/crm.md", ["acme"]),
                          ["packages/crm/", "plugins/crm/", "vendor/acme/crm/"])
-        self.assertIn("app/code/Acme/Catalog/", vc.package_bases("Modules/Acme_Catalog.md", []))
+        self.assertEqual(vc.package_bases("Modules/Acme_Catalog.md", []),
+                         ["packages/Acme_Catalog/", "plugins/Acme_Catalog/"])
         self.assertEqual(vc.package_bases("Runbooks/Deploy.md", ["acme"]), [])
+
+    def test_a_rule_adds_the_directory_its_template_derives_from_a_matching_stem(self) -> None:
+        rule, why = vc.parse_note_base(RULE)
+        self.assertIsNotNone(rule, why)
+        self.assertEqual(vc.package_bases("Modules/Acme_Catalog.md", [], [rule]),
+                         ["packages/Acme_Catalog/", "plugins/Acme_Catalog/", "modules/Acme/Catalog/"])
+        self.assertEqual(vc.package_bases("Modules/crm.md", [], [rule]), ["packages/crm/", "plugins/crm/"])
+        self.assertEqual(vc.package_bases("Modules/Acme_Catalog_Extra.md", [], [rule]),
+                         ["packages/Acme_Catalog_Extra/", "plugins/Acme_Catalog_Extra/"])  # a full match only
+
+
+RULE = "([A-Z][A-Za-z0-9]*)_([A-Z][A-Za-z0-9]*) modules/{1}/{2}/"
+
+
+class RuleParsingTests(unittest.TestCase):
+    def test_the_template_is_the_last_field_so_a_regex_may_hold_a_space(self) -> None:
+        rule, _ = vc.parse_note_base("(Old|New) Notes  archive/{1}")
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule.base_for("Old Notes"), "archive/Old/")
+
+    def test_a_rule_that_does_not_parse_says_why(self) -> None:
+        cases = {
+            "([A-Z]+ modules/{1}/": "does not compile",
+            "modules/only/": "expected",
+            "([A-Z]+) modules/{1}/{2}/": "names a group the regex does not have",
+            "([A-Z]+) /etc/{1}/": "inside the project",
+            "([A-Z]+) ../{1}/": "inside the project",
+        }
+        for line, why in cases.items():
+            rule, problem = vc.parse_note_base(line)
+            self.assertIsNone(rule, line)
+            self.assertIn(why, problem, line)
 
     def test_living_notes_are_the_code_folders_and_the_overview(self) -> None:
         for rel in ("Modules/crm.md", "Kernel/admin.md", "Bridges/a-b.md", "Runbooks/Deploy.md",
@@ -131,10 +166,16 @@ class MeasureTests(unittest.TestCase):
             "`src/Missing.php`, logs to `var/log/app.log` and answers `text/plain`. See [[crm]] and [[nowhere]].\n")
 
     def setUp(self) -> None:
-        self.env = {k: os.environ.get(k) for k in ("CLAUDE_VAULT_STATE", "CLAUDE_VAULT_NO_SPAWN")}
+        self.env = {k: os.environ.get(k) for k in ("CLAUDE_VAULT_STATE", "CLAUDE_VAULT_NO_SPAWN", "XDG_CONFIG_HOME",
+                                                     "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM")}
         self.state = Path(tempfile.mkdtemp()).resolve()
         os.environ["CLAUDE_VAULT_STATE"] = str(self.state)
         os.environ["CLAUDE_VAULT_NO_SPAWN"] = "1"
+        # The rules a developer configured for their own vaults must not reach these measurements.
+        self.config = Path(tempfile.mkdtemp()).resolve()
+        os.environ["XDG_CONFIG_HOME"] = str(self.config)
+        os.environ["GIT_CONFIG_GLOBAL"] = str(self.config / "gitconfig")
+        os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
         self.root = Path(tempfile.mkdtemp()).resolve()
         git(self.root, "init", "-q", "-b", "main")
         git(self.root, "config", "user.email", "tests@example.com")
@@ -259,6 +300,76 @@ class MeasureTests(unittest.TestCase):
             release.cancel()
         self.assertTrue((self.vault.state / "vault-check.txt").is_file())
         self.assertFalse(lock.exists())
+
+    def module_note(self) -> None:
+        """A package whose directory only a note-base rule names, and a note citing one live and one gone path."""
+        self.write("modules/Acme/Catalog/etc/settings.ini", "[catalog]\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "a module")
+        self.write(".claude/kb/Modules/Acme_Catalog.md",
+                   "## Purpose\n\nReads `etc/settings.ini`; the old `etc/retired.ini` is gone.\n")
+
+    def module_findings(self) -> list[str]:
+        return [m for m in self.messages(vc.measure(self.vault, write=False), "HARD") if "Acme_Catalog" in m]
+
+    def test_with_no_rule_a_note_outside_the_built_in_layouts_is_not_read_for_paths(self) -> None:
+        self.module_note()
+        self.assertEqual(self.module_findings(), [])
+        self.assertEqual(vc.load_note_bases(self.vault.path), ([], []))
+
+    def test_a_rule_in_the_vaults_git_config_applies(self) -> None:
+        self.module_note()
+        git(self.root, "config", "--add", "vault-check.noteBase", RULE)
+        found = self.module_findings()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("`etc/retired.ini` does not exist", found[0])
+
+    def test_a_rule_in_the_users_rule_file_applies(self) -> None:
+        self.module_note()
+        conf = self.config / "claude-kit" / "vault-check.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text("# package layouts of my vaults\n\n" + RULE + "\n", encoding="utf-8")
+        found = self.module_findings()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("`etc/retired.ini` does not exist", found[0])
+
+    def test_both_sources_apply_and_a_rule_given_twice_counts_once(self) -> None:
+        other = "([a-z]+)-lib libs/{1}/"
+        git(self.root, "config", "--add", "vault-check.noteBase", RULE)
+        conf = self.config / "claude-kit" / "vault-check.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text(RULE + "\n" + other + "\n", encoding="utf-8")
+        rules, problems = vc.load_note_bases(self.vault.path)
+        self.assertEqual(problems, [])
+        self.assertEqual([(r.pattern.pattern, r.template) for r in rules],
+                         [(RULE.split()[0], "modules/{1}/{2}/"), ("([a-z]+)-lib", "libs/{1}/")])
+
+    def test_a_malformed_rule_is_reported_once_and_skipped_while_the_good_one_applies(self) -> None:
+        self.module_note()
+        conf = self.config / "claude-kit" / "vault-check.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text("([A-Z]+ broken/{1}/\n" + RULE + "\n", encoding="utf-8")
+        report = vc.measure(self.vault, write=False)
+        self.assertEqual(len(report.config_problems), 1, report.config_problems)
+        self.assertIn("vault-check.conf:1", report.config_problems[0])
+        self.assertIn("does not compile", report.config_problems[0])
+        found = [m for m in self.messages(report, "HARD") if "Acme_Catalog" in m]
+        self.assertEqual(len(found), 1, found)
+        printed = vc.render(report, quiet=True)
+        self.assertEqual(sum("note-base rule" in line for line in printed), 1, printed)
+        self.assertTrue(any("1 note-base rule problem(s)" in line for line in vc.brief_lines(report)))
+
+    def test_a_package_note_resolves_through_packages_with_no_rule_configured(self) -> None:
+        self.write("packages/billing/src/Service/InvoiceWriter.php", "<?php\nfinal class InvoiceWriter {}\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "billing")
+        self.write(".claude/kb/Modules/billing.md",
+                   "## Purpose\n\n`InvoiceWriter` lives in `src/Service/InvoiceWriter.php`; `src/Gone.php` is gone.\n")
+        report = vc.measure(self.vault, write=False)
+        self.assertEqual(report.config_problems, [])
+        found = [m for m in self.messages(report, "HARD") if m.startswith("Modules/billing.md")]
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("`src/Gone.php` does not exist", found[0])
 
     def test_a_project_outside_git_is_still_read_for_its_links(self) -> None:
         plain = Path(tempfile.mkdtemp()).resolve()

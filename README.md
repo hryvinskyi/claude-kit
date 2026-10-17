@@ -93,17 +93,19 @@ configuration names the `vault-merge` shim.
 
 ## Agent evals
 
-Agent definitions are programs, so they have regression tests: `plugins/pipeline/evals/` holds
-fixtures with seeded flaws, the prompt a caller would give, and an answer key kept outside the
-fixture. `/pipeline:agent-evals [agent] [fixture] [model]` runs an agent as registered (for example
-`claude -p --agent pipeline:devils-advocate`) on a fresh copy of the fixture, scores it, and appends
-the result to that agent's `runs.log`. Run it after every edit to an agent definition. See
-`plugins/pipeline/evals/README.md` for the rules.
+Agent definitions are programs, so they have regression tests: a plugin's `evals/` holds fixtures
+with seeded flaws, the prompt a caller would give, and an answer key kept outside the fixture. A
+fixture that is a project of one stack ships with that stack's plugin (`plugins/<stack>/evals/`);
+one that names no stack stays in `plugins/pipeline/evals/`. `/pipeline:agent-evals [agent]
+[fixture] [model]`, with the fixture given as `<plugin>/<fixture-NN>`, runs an agent as registered
+(for example `claude -p --agent pipeline:devils-advocate`) on a fresh copy of the fixture, scores it,
+and appends the result to the `runs.log` beside the fixture. Run it after every edit to an agent
+definition. See `plugins/pipeline/evals/README.md` for the rules.
 
-Runs are recorded in the source clone, never in the plugin cache, which an update replaces. The
-command finds the clone through `CLAUDE_KIT_ROOT` (the clone's root directory) when that variable is
-set, and otherwise uses the plugin directory itself when it is a git working tree, which is the case
-for a local-directory marketplace and for `--plugin-dir`.
+Evals run from the source clone, and runs are recorded there, never in the plugin cache, which an
+update replaces. The command finds the clone through `CLAUDE_KIT_ROOT` (the clone's root directory)
+when that variable is set, and otherwise uses the git working tree that holds the plugin directory,
+which is the clone for a local-directory marketplace and for `--plugin-dir`.
 
 ## What the plugins expect around them
 
@@ -132,7 +134,12 @@ JavaScript/TypeScript static analysis. Make every session load it by importing i
 ```sh
 python3 standards/import_standards.py           # appends the import line once
 python3 standards/import_standards.py --check   # reports; exits 1 when the import is missing
+python3 standards/import_standards.py --stack symfony   # also imports the symfony plugin's standards file
 ```
+
+The standards name no framework. A stack plugin ships what they mean on its stack in
+`plugins/<stack>/standards/CLAUDE.standards.<stack>.md`; `--stack` (repeatable, or a comma-separated
+list) imports it beside the standards, once, so it is loaded in every session as the standards are.
 
 The import names the file in this clone (`@~/…` when the clone sits under your home directory,
 an absolute path otherwise), never a copy in the plugin cache, whose path changes with every

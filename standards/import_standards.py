@@ -5,18 +5,26 @@ Claude Code expands an `@path` import in a user-scope CLAUDE.md at launch, so th
 in every session from this clone and stay current with it. The import names the file in the
 clone itself, never a copy in the plugin cache, whose path changes with every plugin version.
 
-States of the user's CLAUDE.md (`$CLAUDE_CONFIG_DIR/CLAUDE.md`, else `~/.claude/CLAUDE.md`):
+The standards name no framework. A stack plugin of the clone ships the spellings they mean on its
+stack in `plugins/<stack>/standards/CLAUDE.standards.<stack>.md`; `--stack <stack>` imports that
+file beside the standards, so it is always loaded too.
 
-  present   it already imports this clone's standards file, once        -> nothing to do
-  absent    no import of a standards file, no standards section inline   -> the import is appended
-  refused   it imports a standards file from another path, imports one
-            twice, or carries the standards' sections written inline
+States of the user's CLAUDE.md (`$CLAUDE_CONFIG_DIR/CLAUDE.md`, else `~/.claude/CLAUDE.md`), for the
+standards file and for each stack file, each on its own:
+
+  present   it already imports this clone's file, once                   -> nothing to do
+  absent    no import of a file of that name, none of its sections inline -> the import is appended
+  refused   it imports a file of that name from another path, imports one
+            twice, or carries the file's sections written inline
             (importing them as well would load every rule twice)         -> nothing is written
 
-Usage: import_standards.py [--check] [--print-line] [--target FILE]
-  --check       report the state; exit 0 when present, 1 otherwise; never writes
-  --print-line  print the import line this clone needs and exit
+When any file is refused, nothing is written for any of them.
+
+Usage: import_standards.py [--check] [--print-line] [--target FILE] [--stack NAME[,NAME…]]…
+  --check       report the states; exit 0 when every one is present, 1 otherwise; never writes
+  --print-line  print the import lines this clone needs, one per file, and exit
   --target      the CLAUDE.md to inspect instead of the user's
+  --stack       also import that stack plugin's standards file; repeatable, or a comma-separated list
 """
 
 from __future__ import annotations
@@ -28,11 +36,23 @@ from pathlib import Path
 
 STANDARDS = Path(__file__).resolve().parent / "CLAUDE.standards.md"
 STANDARDS_NAME = STANDARDS.name
+KIT = STANDARDS.parent.parent
+STACK_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 FENCE = re.compile(r"^\s*(```|~~~)")
 CODE_SPAN = re.compile(r"`+[^`]*`+")
 # An import token: `@` at the start of a word, the path running to the first unescaped space.
 IMPORT_TOKEN = re.compile(r"(?:(?<=\s)|^)@((?:\\ |\S)+)")
+
+
+def stack_standards(stack: str, kit: Path = KIT) -> Path:
+    """The standards file a stack plugin of the clone ships.
+
+    @param stack The stack plugin's name.
+    @param kit The kit clone.
+    @return Its path (it may not exist).
+    """
+    return kit / "plugins" / stack / "standards" / f"CLAUDE.standards.{stack}.md"
 
 
 def import_line(standards: Path = STANDARDS, home: Path | None = None) -> str:
@@ -100,30 +120,56 @@ def headings(text: str, level: int = 2) -> list[str]:
     return titles
 
 
-def assess(target_text: str, standards_text: str, line: str) -> tuple[str, str]:
-    """Classify a user CLAUDE.md against the import it needs.
+def names_file(path: str, name: str) -> bool:
+    """Whether an import path, as written, names a file of that name.
+
+    @param path An import path (`\\ ` escapes kept).
+    @param name A file name.
+    @return True when the path's last segment is the name.
+    """
+    return path.replace("\\ ", " ").rsplit("/", 1)[-1] == name
+
+
+def assess(target_text: str, standards_text: str, line: str, name: str = STANDARDS_NAME) -> tuple[str, str]:
+    """Classify a user CLAUDE.md against one import it needs.
 
     @param target_text The user CLAUDE.md ("" when it does not exist).
-    @param standards_text The standards file.
+    @param standards_text The file to import.
     @param line The import line this clone needs.
+    @param name The file's name, by which an import of another copy is recognised.
     @return (state, detail) with state in present | absent | refused.
     """
     wanted = line[1:]
-    found = [path for path in imports(target_text) if path.endswith(STANDARDS_NAME)]
+    found = [path for path in imports(target_text) if names_file(path, name)]
     sections = set(headings(standards_text))
     inline = [title for title in headings(target_text) if title in sections]
     if inline:
         return "refused", (
-            "the standards are already written into this file (sections: " + "; ".join(inline) + "); "
+            "the sections of " + name + " are already written into this file (" + "; ".join(inline) + "); "
             "importing them as well would load every rule twice. Remove those sections first."
         )
     if not found:
-        return "absent", "no import of " + STANDARDS_NAME
+        return "absent", "no import of " + name
     if found == [wanted]:
         return "present", "imports " + wanted
     if len(found) > 1:
-        return "refused", "imports a standards file " + str(len(found)) + " times: " + ", ".join(found)
+        return "refused", "imports " + name + " " + str(len(found)) + " times: " + ", ".join(found)
     return "refused", "imports " + found[0] + ", not " + wanted + "; correct that line by hand"
+
+
+def option_values(argv: list[str], option: str) -> list[str]:
+    """Every value an option takes, in order: `--opt VALUE` repeated, each value possibly a comma list.
+
+    @param argv Command-line arguments.
+    @param option The option.
+    @return The values; an empty string for a missing or empty one.
+    """
+    values: list[str] = []
+    for index, arg in enumerate(argv):
+        if arg == option:
+            value = argv[index + 1] if index + 1 < len(argv) else ""
+            values.extend(part.strip() for part in value.split(","))
+    return values
 
 
 def target_path(argv: list[str]) -> Path:
@@ -138,11 +184,11 @@ def target_path(argv: list[str]) -> Path:
     return (Path(config).expanduser() if config else Path.home() / ".claude") / "CLAUDE.md"
 
 
-def append(target: Path, line: str) -> None:
-    """Append the import line, writing through a symbolic link rather than replacing it.
+def append(target: Path, lines: list[str]) -> None:
+    """Append import lines, writing through a symbolic link rather than replacing it.
 
     @param target The user CLAUDE.md.
-    @param line The import line.
+    @param lines The import lines, in order.
     """
     real = target.resolve()
     text = real.read_text(encoding="utf-8") if real.exists() else ""
@@ -153,7 +199,7 @@ def append(target: Path, line: str) -> None:
     real.parent.mkdir(parents=True, exist_ok=True)
     mode = real.stat().st_mode if real.exists() else 0o644
     tmp = real.with_name(real.name + ".standards-tmp")
-    tmp.write_text(text + line + "\n", encoding="utf-8")
+    tmp.write_text(text + "".join(line + "\n" for line in lines), encoding="utf-8")
     os.chmod(tmp, mode)
     tmp.replace(real)
 
@@ -164,33 +210,48 @@ def main(argv: list[str]) -> int:
     @param argv Command-line arguments.
     @return The exit status.
     """
-    unknown = [a for a in argv if a.startswith("-") and a not in ("--check", "--print-line", "--target")]
-    if unknown or ("--target" in argv and argv.index("--target") + 1 >= len(argv)):
+    takes_value = ("--target", "--stack")
+    values = {index + 1 for index, arg in enumerate(argv) if arg in takes_value}
+    unknown = [a for i, a in enumerate(argv)
+               if i not in values and a not in ("--check", "--print-line", *takes_value)]
+    stacks = option_values(argv, "--stack")
+    missing_value = any(argv.index(o) + 1 >= len(argv) for o in takes_value if o in argv)
+    if unknown or missing_value or any(not STACK_NAME.fullmatch(s) for s in stacks):
         print(__doc__, file=sys.stderr)
         return 2
-    if not STANDARDS.is_file():
-        print(f"FAIL  {STANDARDS} is missing", file=sys.stderr)
+    files = [STANDARDS] + [stack_standards(s) for s in dict.fromkeys(stacks)]
+    absent_files = [f for f in files if not f.is_file()]
+    if absent_files:
+        for path in absent_files:
+            print(f"FAIL  {path} is missing", file=sys.stderr)
         return 1
-    line = import_line()
+    lines = [import_line(f) for f in files]
     if "--print-line" in argv:
-        print(line)
+        print("\n".join(lines))
         return 0
 
     target = target_path(argv)
-    text = target.read_text(encoding="utf-8") if target.exists() else ""
-    state, detail = assess(text, STANDARDS.read_text(encoding="utf-8"), line)
-    print(f"{state:<8} {target}: {detail}")
-    if state == "refused":
+
+    def states() -> list[tuple[str, str]]:
+        text = target.read_text(encoding="utf-8") if target.exists() else ""
+        return [assess(text, f.read_text(encoding="utf-8"), line, f.name) for f, line in zip(files, lines)]
+
+    found = states()
+    for (state, detail) in found:
+        print(f"{state:<8} {target}: {detail}")
+    if any(state == "refused" for state, _ in found):
         return 1
     if "--check" in argv:
-        return 0 if state == "present" else 1
-    if state == "absent":
-        append(target, line)
-        again, detail = assess(target.read_text(encoding="utf-8"), STANDARDS.read_text(encoding="utf-8"), line)
-        if again != "present":
-            print(f"FAIL  {target}: after writing, it reads as {again}: {detail}", file=sys.stderr)
-            return 1
-        print(f"added    {target}: {line}")
+        return 0 if all(state == "present" for state, _ in found) else 1
+    wanted = [line for line, (state, _) in zip(lines, found) if state == "absent"]
+    if wanted:
+        append(target, wanted)
+        for again, detail in states():
+            if again != "present":
+                print(f"FAIL  {target}: after writing, it reads as {again}: {detail}", file=sys.stderr)
+                return 1
+        for line in wanted:
+            print(f"added    {target}: {line}")
     return 0
 
 
