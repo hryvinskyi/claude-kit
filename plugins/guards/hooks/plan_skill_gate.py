@@ -33,8 +33,8 @@ with no extension point, exactly what the references would have caught. So the
 gate also requires the references the target needs, each as a Read/Bash/Grep
 that names `<skill>/references/<name>.md`:
 
-  PHP source   solid.md; ddd.md in a domain directory (Model, Entity, Domain,
-               ValueObject, Aggregate).
+  PHP source   solid.md; ddd.md in a domain directory (Api/Data, Model, Entity,
+               Domain, ValueObject, Aggregate).
   JS/TS source solid.md and javascript.md; react.md for a .jsx/.tsx file, under
                a tsconfig that sets `jsx`, or anywhere in a project whose
                package.json depends on React while no stack is detected;
@@ -105,7 +105,7 @@ SKILLS = (PHP_SKILL, JS_SKILL)
 # What stands in for SKILL.md: the implementer's cut of the rubric
 SKILL_EQUIVALENTS = {"SKILL.md", "implementer-checklist.md"}
 
-PHP_DOMAIN_DIRS = {"Model", "Entity", "Domain", "ValueObject", "ValueObjects", "Aggregate", "Aggregates"}
+PHP_DOMAIN_DIRS = {"Api/Data", "Model", "Entity", "Domain", "ValueObject", "ValueObjects", "Aggregate", "Aggregates"}
 JS_DOMAIN_DIRS = {"domain", "Domain", "model", "models", "entities", "entity", "value-objects", "valueObjects", "value_objects"}
 
 # Directories whose PHP is not the project's own source: nothing to design there

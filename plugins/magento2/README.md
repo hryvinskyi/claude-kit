@@ -38,13 +38,13 @@ A project is a Magento project when the nearest `composer.json` that any registe
 has a `type` starting with `magento2-` or requires a `magento/` package, or, when none does, its root
 has `bin/magento` or an `app/etc/` directory. On every PHP project of the session, a plan naming
 RequireJS, Knockout, `uiComponent`, `AssetRendererInterface`, `x-magento-init`, `data-mage-init` or
-`Alpine.data` orders browser work, and a file under `Api/Data/` needs the core skill's `ddd.md`.
+`Alpine.data` orders browser work.
 
 | Setup | What is gated |
 |---|---|
 | `guards` and `magento2` | the table above, for `Edit`/`Write` and for files written through the shell |
 | `guards` and `magento2` and another stack plugin | the same; a project both declarations recognise needs both stacks' skills |
-| `guards` without `magento2` | the core rules only: no stack skill, the words above do not count, `Api/Data/` is not a domain directory |
+| `guards` without `magento2` | the core rules only: no stack skill, and the words above do not count |
 | `magento2` without `guards` | nothing; the skills load when asked for |
 
 If the declaration cannot be registered (an unwritable state directory, say), the hook prints one

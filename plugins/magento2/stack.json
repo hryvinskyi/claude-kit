@@ -9,9 +9,6 @@
     "RequireJS", "Knockout", "uiComponent", "AssetRendererInterface",
     "x-magento-init", "data-mage-init", "Alpine.data"
   ],
-  "domain_dirs": {
-    "php": ["Api/Data"]
-  },
   "requires": {
     "php_source": ["magento2-architecture-php/SKILL.md"],
     "js_source": ["magento2-architecture-frontend/SKILL.md"],

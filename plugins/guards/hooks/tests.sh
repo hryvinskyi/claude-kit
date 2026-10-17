@@ -263,7 +263,7 @@ expect_exit "plan gate: nothing in the family loaded it, still blocked" 2 \
 # PHP source edits go through the rubric too (the standards' §Architecture and tech debt),
 # and the rubric is SKILL.md plus the references the target needs, not SKILL.md alone
 mkdir -p "$TMP/php/src/Service" "$TMP/php/tests/Service" "$TMP/php/vendor/acme/src" "$TMP/php/packages/billing/src" "$TMP/php/sub/dir"
-mkdir -p "$TMP/php/src/Domain" "$TMP/php/src/Model"
+mkdir -p "$TMP/php/src/Domain" "$TMP/php/src/Model" "$TMP/php/src/Api/Data"
 tl() { # transcript path, then rubric files to show as loaded ("skill" = Skill call)
   local out="$1"; shift; : > "$out"
   for f in "$@"; do
@@ -324,6 +324,8 @@ expect_exit "source gate: a Model directory needs ddd.md" 2 \
   "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/Model/Order.php")" "$P"
 expect_exit "source gate: a domain directory with ddd.md allowed" 0 \
   "$(gate Write "$TMP/php" "$TMP/t-ddd.jsonl" "$TMP/php/src/Domain/SurveyOptIn.php")" "$P"
+expect_exit "source gate: Api/Data needs ddd.md with no stack registered" 2 \
+  "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/Api/Data/SurveyOptIn.php")" "$P"
 expect_exit "source gate: test file untouched" 0 \
   "$(gate Edit "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/tests/Service/FooTest.php")" "$P"
 expect_exit "source gate: vendor untouched" 0 \
