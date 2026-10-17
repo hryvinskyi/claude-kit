@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""A stand-in for the `claude` command's plugin subcommands, for the installer's tests.
+
+It keeps what a real CLI keeps — the added marketplaces and the installed plugins — in the JSON file
+named by FAKE_CLAUDE_STATE, answers `plugin marketplace list --json` and `plugin list --json` in the
+shapes the CLI documents, and appends every call to FAKE_CLAUDE_LOG, one tab-separated line each.
+`marketplace add` reads the marketplace's name from its manifest; `install` refuses a plugin the
+marketplace does not list; `enable` of an enabled plugin fails, as the real one does.
+"""
+import json
+import os
+import sys
+
+STATE = os.environ["FAKE_CLAUDE_STATE"]
+
+
+def load():
+    try:
+        with open(STATE, encoding="utf-8") as handle:
+            return json.load(handle)
+    except OSError:
+        return {"marketplaces": [], "plugins": []}
+
+
+def save(state):
+    with open(STATE, "w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=1)
+
+
+def option(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+def listed(state, marketplace):
+    for entry in state["marketplaces"]:
+        if entry["name"] == marketplace:
+            with open(os.path.join(entry["path"], ".claude-plugin", "marketplace.json"), encoding="utf-8") as handle:
+                return [p["name"] for p in json.load(handle)["plugins"]]
+    return None
+
+
+def main(args):
+    with open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as log:
+        log.write("\t".join(args) + "\n")
+    if args[:1] == ["--version"]:
+        print("0.0.0 (Claude Code stand-in)")
+        return 0
+    if args[:1] != ["plugin"]:
+        print("the stand-in knows only the plugin commands", file=sys.stderr)
+        return 1
+    state = load()
+    rest = args[1:]
+    if rest[:2] == ["marketplace", "list"]:
+        print(json.dumps(state["marketplaces"]))
+        return 0
+    if rest[:2] == ["marketplace", "add"]:
+        path = os.path.realpath(rest[2])
+        with open(os.path.join(path, ".claude-plugin", "marketplace.json"), encoding="utf-8") as handle:
+            name = json.load(handle)["name"]
+        if not any(m["name"] == name for m in state["marketplaces"]):
+            state["marketplaces"].append({"name": name, "source": "directory", "path": path, "installLocation": path})
+            save(state)
+        print("Successfully added marketplace: " + name)
+        return 0
+    if rest[:1] == ["list"]:
+        print(json.dumps(state["plugins"]))
+        return 0
+    if rest[:1] in (["install"], ["enable"]):
+        plugin_id, scope = rest[1], option(rest, "--scope", "user")
+        name, _, marketplace = plugin_id.partition("@")
+        plugins = listed(state, marketplace)
+        if plugins is None or name not in plugins:
+            print('Plugin "%s" not found' % plugin_id, file=sys.stderr)
+            return 1
+        found = [p for p in state["plugins"] if p["id"] == plugin_id and p["scope"] == scope]
+        if rest[0] == "install":
+            if not found:
+                state["plugins"].append({"id": plugin_id, "version": "unknown", "scope": scope, "enabled": True,
+                                         "installPath": "/nowhere"})
+                save(state)
+            print("installed " + plugin_id)
+            return 0
+        if not found:
+            print('Plugin "%s" is not installed' % plugin_id, file=sys.stderr)
+            return 1
+        if found[0]["enabled"]:
+            print('Plugin "%s" is already enabled' % plugin_id)
+            return 1
+        found[0]["enabled"] = True
+        save(state)
+        print("Successfully enabled plugin: " + plugin_id)
+        return 0
+    print("the stand-in does not know: " + " ".join(args), file=sys.stderr)
+    return 1
+
+
+sys.exit(main(sys.argv[1:]))

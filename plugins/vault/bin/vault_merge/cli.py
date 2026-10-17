@@ -2,6 +2,7 @@
 
     vault-merge keyed|stamps|generated %O %A %B [%P]
     vault-merge selfcheck FILE...
+    vault-merge wire|unwire [OPTIONS]
 
 As a driver it writes the merged result over %A and exits 0 when the result is resolved, 1 when
 conflicts are left in it for a person. If a driver cannot merge — a version it cannot read, an
@@ -11,16 +12,19 @@ ever replaced whole, by renaming a finished file over it.
 
 `selfcheck` reads each file the way the keyed driver does, writes it back in memory and exits 1 if a
 byte differs; it prints counts only, never the file's text.
+
+`wire` registers the drivers in one vault clone and `unwire` removes them; see `vault_merge.wire`.
 """
 from __future__ import annotations
 
+import io
 import os
 import stat
 import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Dict, List, TextIO
+from typing import Callable, Dict, List, TextIO, Tuple
 
 from vault_merge import blocks as md
 from vault_merge.driver import Driver, MergeInput
@@ -28,9 +32,11 @@ from vault_merge.generated import GeneratedDriver
 from vault_merge.gitmerge import Git
 from vault_merge.keyed import KeyedDriver
 from vault_merge.stamps import ProjectHistory, StampsDriver
+from vault_merge.wire import Unwire, Wire
 
 Command = Callable[[List[str]], int]
-USAGE = "usage: vault-merge keyed|stamps|generated %O %A %B [%P] | vault-merge selfcheck FILE..."
+USAGE = ("usage: vault-merge keyed|stamps|generated %O %A %B [%P] | vault-merge selfcheck FILE... | "
+         "vault-merge wire|unwire [--help]")
 
 
 def replace(path: str, data: bytes) -> None:
@@ -118,6 +124,13 @@ class SelfCheck:
         return 0
 
 
+def read_back(name: str) -> Tuple[int, str]:
+    """The self-check of one file: its status and the line it would print."""
+    buffer = io.StringIO()
+    status = SelfCheck(buffer).check(name)
+    return status, buffer.getvalue().strip()
+
+
 def describe(document: md.Document) -> str:
     """Counts of what the document was read as: blocks, items, and how the items are keyed."""
     kinds = Counter(block.kind for block in document.blocks)
@@ -134,7 +147,7 @@ def describe(document: md.Document) -> str:
 
 
 def commands(git: Git, out: TextIO, err: TextIO) -> Dict[str, Command]:
-    """Every command by name: the drivers and the self-check."""
+    """Every command by name: the drivers, the self-check, and the wiring of a clone."""
     drivers: Dict[str, Driver] = {
         "keyed": KeyedDriver(git),
         "stamps": StampsDriver(ProjectHistory(Path.cwd())),
@@ -142,6 +155,8 @@ def commands(git: Git, out: TextIO, err: TextIO) -> Dict[str, Command]:
     }
     found: Dict[str, Command] = {name: DriverCommand(name, driver, git, err) for name, driver in drivers.items()}
     found["selfcheck"] = SelfCheck(out)
+    found["wire"] = Wire(out, read_back)
+    found["unwire"] = Unwire(out)
     return found
 
 

@@ -19,7 +19,27 @@ with it.
 
 ## Install
 
-From GitHub:
+From a clone, in one step:
+
+```sh
+git clone https://github.com/hryvinskyi/claude-kit.git ~/.local/share/claude-kit
+~/.local/share/claude-kit/install.sh --check   # what is missing; changes nothing
+~/.local/share/claude-kit/install.sh           # does it
+```
+
+`install.sh` writes the command shims (below), runs `npm ci` in `plugins/board-queue` (skip it with
+`--skip-npm`), adds the clone as a local-directory marketplace and installs and enables the plugins
+at user scope (all of them, or `--plugins architecture,pipeline,…`), imports the engineering
+standards into your user `CLAUDE.md`, and writes `${XDG_CONFIG_HOME:-~/.config}/claude-kit/policies.toml`
+with every policy at its default when there is none. It needs `git`, `python3` 3.9 or newer, the
+`claude` command, and Node 26 or newer with `npm` when `board-queue` is among the plugins. It is
+idempotent: a second run changes nothing, and anything it did not write that stands in its way —
+a file at a shim's path, a marketplace of the same name from another place, standards written into
+your `CLAUDE.md` by hand — is refused and named, never overwritten. `--check` exits 1 when something
+is missing and 2 when a step is refused. It works on the profile the `claude` command uses
+(`CLAUDE_CONFIG_DIR` when that is set).
+
+Or by hand, from GitHub:
 
 ```sh
 claude plugin marketplace add hryvinskyi/claude-kit
@@ -120,6 +140,16 @@ without the file drops the standards from every session. The helper writes
 `$CLAUDE_CONFIG_DIR/CLAUDE.md` when that variable is set, and writes through a symbolic link rather
 than replacing it. It refuses to add the import when your `CLAUDE.md` already carries the standards'
 sections inline (every rule would load twice) or imports a standards file from another path.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests       # the installer, in a fake home with stand-ins for claude, npm and node
+python3 -m unittest discover -s bin/tests   # the command shims
+plugins/vault/tests/tests.sh                # the vault plugin, its merge drivers and their wiring
+plugins/guards/hooks/tests.sh               # the guard hooks
+npm --prefix plugins/board-queue test       # the board queue (after npm ci)
+```
 
 ## Licence
 

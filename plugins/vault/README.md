@@ -34,6 +34,7 @@ The plugin's `bin/` is on the Bash tool's search path while the plugin is enable
 | `vault-search ensure \| refresh` | `bin/vault_search.py`: a `qmd` search index of the vault in `<project>/.qmd/` |
 | `vault-merge <driver> %O %A %B %P` | `bin/vault_merge/`: the git merge drivers below |
 | `vault-merge selfcheck FILE…` | reads each file as the `keyed` driver does and fails unless it writes back byte for byte; prints counts only |
+| `vault-merge wire \| unwire` | registers the drivers in a vault clone's git configuration, or removes them (below) |
 
 Anything outside a Claude Code session — a scheduled job, a git hook, a project's own script — calls
 them through the shims the kit's `bin/install-shims.sh` writes into `~/.local/bin`, which run the copy
@@ -57,7 +58,8 @@ because `git pull --rebase` swaps which of them is yours. A driver that fails fa
 ever replaced whole. Run `vault-merge selfcheck` on each keyed file before enabling the drivers.
 
 Wiring, in the vault's clone (a clone without it falls back to git's text merge, which is safe).
-`.gitattributes` patterns cannot hold a space, so it is written `[[:space:]]`:
+The vault carries a `.gitattributes` that gives files to the drivers; its patterns cannot hold a
+space, so it is written `[[:space:]]`:
 
 ```gitattributes
 /To[[:space:]]DO.md merge=vault-keyed
@@ -66,14 +68,24 @@ Wiring, in the vault's clone (a clone without it falls back to git's text merge,
 /Modules/*.md merge=vault-generated
 ```
 
+Each clone registers the drivers in its own configuration, which git never shares:
+
 ```sh
-for d in keyed stamps generated; do
-  git config merge.vault-$d.driver "$HOME/.local/bin/vault-merge $d %O %A %B %P"
-done
-git config vault-merge.generatedBegin '<!--\s*example:generated:start\s*-->'   # Python regular expressions
-git config vault-merge.generatedEnd   '<!--\s*example:generated:end\s*-->'
-git check-attr merge -- "To DO.md"                                                # vault-keyed
+vault-merge wire --check --vault <clone> --generated-begin '<!--\s*example:generated:start\s*-->' \
+                                         --generated-end   '<!--\s*example:generated:end\s*-->'
+vault-merge wire --vault <clone> ...            # the same options, applied
+vault-merge unwire --vault <clone>              # removes the drivers' configuration
 ```
+
+`wire` registers `merge.vault-<driver>.name` and `.driver` for the three drivers, running the
+`vault-merge` shim (`--command` names another), and the two region markers (Python regular
+expressions). It first reads back every tracked file the attributes give to the keyed driver and
+refuses when one would not survive, and it refuses a clone in the middle of a merge or rebase.
+`--attributes FILE` names the `.gitattributes` the vault should carry: an identical one is left
+alone, a missing one is written and committed with `--commit` (nothing is pushed) and otherwise
+reported, a different one is refused with the lines to fold in. `--expect PATH=DRIVER` checks what
+`git check-attr merge` answers for a path afterwards. `--check` writes nothing; the exit status is 0
+when nothing is left to do, 1 when a check found work, 2 when the run refused.
 
 ## Where things are written
 
