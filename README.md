@@ -9,7 +9,7 @@ rules (`CLAUDE.md`/`AGENTS.md`, its gates, its layout) and follows them.
 | `architecture` | Clean Architecture, onion-at-module-altitude, SOLID and DDD rubrics, with review and plan formats, an implementer's cut and detection recipes, in words that name no framework | skills `architecture:clean-architecture-php` (PHP), `architecture:clean-architecture-js` (JavaScript, TypeScript, React, Node, and the browser code a server-rendered application ships) |
 | stack plugins: `symfony`, `magento2` | The same rubrics in one framework's idiom: where each piece goes, how the container wires it, what its templates hand the browser, detection recipes in its spelling. Install the one your project runs on | skills `<stack>:<stack>-architecture-php` and `<stack>:<stack>-architecture-frontend`, loaded beside the core ones; see each plugin's README |
 | `pipeline` | A feature pipeline that plans and verifies on the main model and delegates each task to an implementer, an adversarial plan reviewer, a bug-fix loop that starts from a failing test, and an eval harness that regression-tests the agents | commands `/pipeline:feature`, `/pipeline:bug-fix`, `/pipeline:explain`, `/pipeline:learn`, `/pipeline:update-codemaps`, `/pipeline:agent-evals`; agents `pipeline:devils-advocate`, `pipeline:feature-implementer`, `pipeline:feature-contract-writer` |
-| `qa` | A browser bug hunt that proves what breaks, and a text tightener | skills `qa:bug-hunt`, `qa:tighten` |
+| `qa` | A text tightener | skill `qa:tighten` |
 | `guards` | Hooks that refuse catastrophic shell commands, PHP and JS/TS source or plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and hand edits inside generated regions, and lint each edited PHP file | hooks only: `PreToolUse` on `Edit\|Write` and `Bash`, `PostToolUse` on `Edit\|Write`; see [plugins/guards/README.md](plugins/guards/README.md) |
 | `vault` | A project knowledge vault beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index, git merge drivers for its busiest files | commands `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync`; agent `vault:wiki-updater`; hooks on `SessionStart`, `SessionEnd`, `Stop`; `find-vault`, `vault-check`, `vault-capture`, `vault-search`, `vault-merge` on the Bash path |
 | `board-queue` | A durable queue and paced single writer for shared GitHub Projects boards, with a scheduled worker per person | MCP server `plugin:board-queue:board-queue` (tools `board_enqueue`, `board_queue`, `board_status`, `board_release`, `board_cancel`, `board_retry`, `board_show`); `board-queue` on the Bash path. Needs `npm ci` in the clone; see its README |
@@ -132,8 +132,6 @@ which is the clone for a local-directory marketplace and for `--plugin-dir`.
 - **Engineering standards.** Where a command or skill cites §*Architecture and tech debt* or
   §*Tests run code*, it means `standards/CLAUDE.standards.md`, which your user `CLAUDE.md`
   imports (see below).
-- `qa:bug-hunt` drives a real browser: Node with Playwright installed in the project, and the
-  Playwright MCP server for the interactive walk.
 - `qa:tighten` finishes with the `humanizer:humanizer` skill when it is installed.
 
 ## Engineering standards

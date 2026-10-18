@@ -29,7 +29,7 @@
     {
       "name": "qa",
       "source": "./plugins/qa",
-      "description": "Quality skills: bug-hunt walks a live site in a real browser and proves what breaks; tighten shortens text without losing meaning."
+      "description": "Quality skills: tighten shortens text without losing meaning."
     },
     {
       "name": "guards",
