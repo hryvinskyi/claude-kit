@@ -40,6 +40,30 @@ mkvault "$TMP/p6" "kb1"; mkvault "$TMP/p6" "kb2"
 mkdir -p "$TMP/p7"; printf 'Knowledge-base directory: `./docs/kb/`\n' > "$TMP/p7/AGENTS.md"
 [ "$("$FV" "$TMP/p7")" = "docs/kb" ] && ok || ko "find-vault: AGENTS.md declaration normalized"
 (cd "$TMP/p1" && [ "$("$FV")" = "kb" ]) && ok || ko "find-vault: defaults to cwd"
+# A vault is a directory strictly inside the project: the session end commits and pushes one that is
+# a repository of its own, so a declaration that names the root or leads out of it is refused outright.
+mkdir -p "$TMP/out/sibling/Decisions" "$TMP/out/proj/Decisions"
+printf '## Now\n' > "$TMP/out/proj/To DO.md"; printf '## Now\n' > "$TMP/out/sibling/To DO.md"
+for DECL in './' '.' '' '..' '../sibling' '../sibling/' "$TMP/out/sibling" '/' 'kb/../..' 'kb/../../sibling' 'a/..'; do
+  printf 'Knowledge-base directory: `%s`\n' "$DECL" > "$TMP/out/proj/CLAUDE.md"
+  OUT=$("$FV" "$TMP/out/proj" 2>&1); CODE=$?
+  [ "$CODE" -eq 1 ] && [ -z "$OUT" ] && ok || ko "find-vault: declaration '$DECL' accepted (exit $CODE, '$OUT')"
+done
+ln -s .. "$TMP/out/proj/up"; ln -s . "$TMP/out/proj/self"; ln -s "$TMP/out/sibling" "$TMP/out/proj/elsewhere"
+for DECL in 'up/' 'self/' 'elsewhere/' 'up/sibling/' 'elsewhere/not-yet/'; do
+  printf 'Knowledge-base directory: `%s`\n' "$DECL" > "$TMP/out/proj/CLAUDE.md"
+  OUT=$("$FV" "$TMP/out/proj" 2>&1); CODE=$?
+  [ "$CODE" -eq 1 ] && [ -z "$OUT" ] && ok || ko "find-vault: link '$DECL' out of the root accepted (exit $CODE, '$OUT')"
+done
+printf 'Knowledge-base directory: `not-yet/kb/`\n' > "$TMP/out/proj/CLAUDE.md"
+[ "$("$FV" "$TMP/out/proj")" = "not-yet/kb" ] && ok || ko "find-vault: a declared vault not made yet is refused"
+mkdir -p "$TMP/out/proj/docs/kb"; ln -s docs/kb "$TMP/out/proj/kb-link"
+printf 'Knowledge-base directory: `kb-link/`\n' > "$TMP/out/proj/CLAUDE.md"
+[ "$("$FV" "$TMP/out/proj")" = "kb-link" ] && ok || ko "find-vault: a link that stays inside the root is refused"
+rm -f "$TMP/out/proj/CLAUDE.md"
+# The fallback search never yields the root or a directory outside it either, whatever a link says.
+OUT=$("$FV" "$TMP/out/proj" 2>&1); CODE=$?
+[ "$CODE" -eq 1 ] && [ -z "$OUT" ] && ok || ko "find-vault: fallback followed a link out of the root (exit $CODE, '$OUT')"
 
 # ---------- session_brief.sh ----------
 SB="$H/session_brief.sh"

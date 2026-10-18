@@ -24,11 +24,24 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
+BIN = Path(__file__).resolve().parent.parent / "bin"
+sys.path.insert(0, str(BIN))
 import vault_check as vc  # noqa: E402
 import vaultlib  # noqa: E402
+
+# A process that takes a lock, says so, and keeps it until its standard input closes.
+HOLDER = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import vaultlib
+from pathlib import Path
+held = vaultlib.claim(Path(sys.argv[2]))
+print("held" if held else "busy", flush=True)
+sys.stdin.read()
+"""
 
 
 class SpanTests(unittest.TestCase):
@@ -275,21 +288,45 @@ class MeasureTests(unittest.TestCase):
         self.assertIn("[VAULT] 3 hard finding(s) in 1 note(s)", printed)
         self.assertIn("is not a living note", err.getvalue())
 
-    def hold_the_lock(self) -> Path:
+    def hold_the_lock(self) -> tuple[Path, vaultlib.HeldLock]:
         lock = self.vault.state / "vault-check.lock"
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        lock.write_text("1", encoding="utf-8")
-        return lock
+        held = vaultlib.claim(lock)
+        self.assertIsNotNone(held)
+        self.addCleanup(held.release)
+        return lock, held
 
     def test_a_background_refresh_gives_way_to_a_running_check(self) -> None:
-        lock = self.hold_the_lock()
+        lock, _ = self.hold_the_lock()
         self.assertEqual(vc.main(["--refresh", "--root", str(self.root)]), 0)
         self.assertFalse((self.vault.state / "vault-check.txt").exists())
         self.assertTrue(lock.exists())
 
+    def test_a_check_never_removes_the_lock_of_a_process_that_holds_it_after_it(self) -> None:
+        lock = self.vault.state / "vault-check.lock"
+        other: list = []
+        real = vc.measure
+
+        def measure_while_the_lock_changes_hands(*args, **kwargs):
+            report = real(*args, **kwargs)
+            lock.unlink()  # the lock file this run holds is gone, and another process holds a new one
+            other.append(subprocess.Popen([sys.executable, "-c", HOLDER, str(BIN), str(lock)],
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True))
+            self.assertEqual(other[0].stdout.readline().strip(), "held")
+            return report
+
+        try:
+            with unittest.mock.patch.object(vc, "measure", measure_while_the_lock_changes_hands), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                vc.main(["--quiet", "--root", str(self.root)])
+            self.assertTrue(lock.exists(), "the run removed a lock another process holds")
+            self.assertIsNone(vaultlib.claim(lock))
+        finally:
+            for process in other:
+                process.communicate("")
+
     def test_a_foreground_check_waits_for_a_running_one_then_runs(self) -> None:
-        lock = self.hold_the_lock()
-        release = threading.Timer(0.3, lock.unlink)
+        lock, held = self.hold_the_lock()
+        release = threading.Timer(0.3, held.release)
         release.start()
         poll, vc.LOCK_POLL = vc.LOCK_POLL, 0.05
         try:

@@ -12,9 +12,19 @@ tool may write depends on where the vault lives, and that is the vault's *mode*:
 Machine-written files — the inbox, the review stamps — live beside the notes only in an `own-repo`
 or `ignored` vault. Every other vault's go under `~/.claude/state/vaults/<project>/`, so a
 project's tracked tree never changes because a tool ran. A project's repository is never committed.
+
+A vault is a directory strictly inside its project: `locate` refuses the project root itself and
+anything a path or a symbolic link leads to outside it, whatever the resolver printed. A vault is
+`own-repo` only when it is the top of a work tree whose repository is not the project's — a clone,
+a submodule, or a linked work tree of a vault repository; a linked work tree of the project's own
+repository is not.
+
+Locks are `flock(2)` locks on a file in the state directory, so a lock whose holder exited — however
+it exited — is free, and no process ever takes over a lock another one still holds.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -25,6 +35,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Union
+
+try:
+    import fcntl
+except ImportError:  # not a POSIX system: no lock is ever held, so nothing that needs one runs
+    fcntl = None
 
 HOME_CLAUDE = Path.home() / ".claude"
 FIND_VAULT = Path(__file__).resolve().parent / "find-vault.sh"
@@ -43,6 +58,21 @@ def disabled() -> bool:
 def spawning_allowed() -> bool:
     """Whether a tool may start a detached process (tests switch it off)."""
     return not os.environ.get("CLAUDE_VAULT_NO_SPAWN")
+
+
+# The variables that point git at a repository other than the one `git -C <dir>` names. A tool run
+# from inside a git hook inherits the hook's; left in place, a commit "in the vault" would land in the
+# repository that ran the hook.
+REPOSITORY_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+                        "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE", "GIT_NAMESPACE")
+
+
+def git_env(extra: Optional[dict] = None) -> dict:
+    """The environment for a git command that must act on the directory it is given and no other."""
+    env = {key: value for key, value in os.environ.items() if key not in REPOSITORY_VARIABLES}
+    env.update(extra or {})
+    return env
 
 
 def run(args: list[str], cwd: Optional[Path] = None, timeout: int = 120,
@@ -65,7 +95,7 @@ def git_out(root: Path, *args: str, timeout: int = 180) -> tuple[int, str]:
     """Run git in a directory and return its exit code and stdout; TIMED_OUT when it did not finish."""
     try:
         proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
-                              timeout=timeout, stdin=subprocess.DEVNULL)
+                              timeout=timeout, stdin=subprocess.DEVNULL, env=git_env())
     except subprocess.TimeoutExpired:
         return TIMED_OUT, ""
     except (OSError, subprocess.SubprocessError):
@@ -87,11 +117,19 @@ class Vault:
 
     @property
     def slug(self) -> str:
+        """The name of the project's state directory: readable, and told apart by its full path's hash."""
+        real = os.path.realpath(str(self.root))
+        readable = re.sub(r"[^A-Za-z0-9]+", "-", real).strip("-")[-80:].strip("-") or "root"
+        return f"{readable}-{hashlib.sha256(real.encode('utf-8')).hexdigest()[:12]}"
+
+    @property
+    def legacy_slug(self) -> str:
+        """The name state directories had before it carried a hash; two projects could share one."""
         return re.sub(r"[^A-Za-z0-9]+", "-", str(self.root)).strip("-") or "root"
 
     @property
     def state(self) -> Path:
-        return state_root() / self.slug
+        return state_dir(self)
 
     def machine_file(self, name: str) -> Path:
         """Where a machine-written file belongs: beside the notes only when that changes no project history."""
@@ -107,15 +145,74 @@ class Vault:
             return "~" + text[len(home):] if text.startswith(home) else text
 
 
+# The file in a state directory that names the project it belongs to, by its full resolved path.
+OWNER_FILE = "project"
+
+
+def state_dir(vault: Vault) -> Path:
+    """The project's state directory, adopting the one an older version named by the readable slug.
+
+    A legacy directory is adopted when no project claims it yet, or this one does; one that names
+    another project in its owner file is left to that project. The owner file is written either way.
+    """
+    target = state_root() / vault.slug
+    owner = os.path.realpath(str(vault.root))
+    if not target.is_dir():
+        legacy = state_root() / vault.legacy_slug
+        if legacy.is_dir() and legacy != target and _claimed_by(legacy) in (None, owner):
+            try:
+                os.rename(str(legacy), str(target))
+            except OSError:
+                pass  # another process adopted it first, or it went away
+    if target.is_dir() and _claimed_by(target) != owner:
+        try:
+            (target / OWNER_FILE).write_text(owner + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    return target
+
+
+def _claimed_by(directory: Path) -> Optional[str]:
+    try:
+        return (directory / OWNER_FILE).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def project_root(cwd: Path) -> Path:
     """The git work tree containing a directory, or the directory itself outside any."""
     code, out = git_out(cwd, "rev-parse", "--show-toplevel")
     return Path(out.strip()) if code == 0 and out.strip() else cwd
 
 
+def strictly_inside(root: Path, path: Path) -> bool:
+    """Whether `path`, every symbolic link followed, lies below `root` and is not `root` itself."""
+    real_root, real = Path(os.path.realpath(str(root))), Path(os.path.realpath(str(path)))
+    return real != real_root and real_root in real.parents
+
+
+def own_repository(root: Path, path: Path) -> bool:
+    """Whether a vault is the top of a work tree of a repository that is not the project's."""
+    if not (path / ".git").exists():
+        return False
+    code, top = git_out(path, "rev-parse", "--show-toplevel", timeout=20)
+    if code != 0 or os.path.realpath(top.strip()) != os.path.realpath(str(path)):
+        return False
+    mine = common_dir(path)
+    return mine is not None and common_dir(root) != mine
+
+
+def common_dir(directory: Path) -> Optional[str]:
+    """The resolved repository directory shared by every work tree of the repository `directory` is in."""
+    code, out = git_out(directory, "rev-parse", "--git-common-dir", timeout=20)
+    if code != 0 or not out.strip():
+        return None
+    return os.path.realpath(os.path.join(str(directory), out.strip()))
+
+
 def vault_mode(root: Path, path: Path) -> str:
     """Which of the five modes a vault is in (see the module docstring)."""
-    if (path / ".git").exists():
+    if own_repository(root, path):
         return "own-repo"
     code, _ = git_out(root, "rev-parse", "--is-inside-work-tree")
     if code != 0:
@@ -138,8 +235,11 @@ def locate(cwd: Union[str, Path, None] = None) -> Optional[Vault]:
     lines = out.strip().splitlines() if code == 0 else []
     if not lines:
         return None
-    path = root / lines[0].strip()
-    if not path.is_dir():
+    declared = lines[0].strip()
+    if not declared or os.path.isabs(declared) or ".." in Path(declared).parts:
+        return None
+    path = root / declared
+    if not path.is_dir() or not strictly_inside(root, path):
         return None
     return Vault(root=root, path=path, mode=vault_mode(root, path))
 
@@ -153,69 +253,76 @@ def project_owns(root: Path, event: str) -> bool:
     return f'"{event}"' in text
 
 
-def _claim(lock: Path, stale: int) -> Optional[str]:
-    """Create a lock file holding a token of this process; steal one that has gone stale. None when held."""
-    token = f"{os.getpid()} {uuid.uuid4().hex}"
-    try:
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.write(fd, token.encode())
-        os.close(fd)
-        return token
-    except FileExistsError:
-        try:
-            if time.time() - lock.stat().st_mtime < stale:
-                return None
-            lock.unlink()
-        except OSError:
-            return None
-        return _claim(lock, stale)
-    except OSError:
-        return None
-
-
-def take_lock(lock: Path, stale: int = 600) -> bool:
-    """Claim a lock file, stealing one that has gone stale."""
-    return _claim(lock, stale) is not None
-
-
 class HeldLock:
-    """A lock file this process holds."""
+    """A lock this process holds: an open descriptor carrying an exclusive `flock` on the lock file."""
 
-    def __init__(self, path: Path, token: str) -> None:
+    def __init__(self, path: Path, fd: int) -> None:
         self.path = path
-        self.token = token
-
-    def refresh(self) -> None:
-        """Mark the lock as alive, so a long run of steps never looks stale to a waiting process."""
-        try:
-            os.utime(str(self.path), None)
-        except OSError:
-            pass
+        self.fd = fd
 
     def release(self) -> None:
-        """Remove the lock file, but only while it is still this holder's — never one a waiter stole."""
+        """Remove the lock file while it is still this holder's, then let the lock go."""
         try:
-            if self.path.read_text(encoding="utf-8") == self.token:
-                self.path.unlink()
+            mine, there = os.fstat(self.fd), os.stat(str(self.path))
+            if (mine.st_dev, mine.st_ino) == (there.st_dev, there.st_ino):
+                os.unlink(str(self.path))
         except OSError:
             pass
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+def claim(lock: Path) -> Optional[HeldLock]:
+    """Take a lock without waiting; None while another process holds it.
+
+    The lock file is removed when it is released, so a waiter that locked a file just unlinked
+    checks that the path still names the file it locked, and tries again when it does not.
+    """
+    if fcntl is None:
+        return None
+    for _ in range(20):
+        try:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return None
+        try:
+            mine, there = os.fstat(fd), os.stat(str(lock))
+        except OSError:
+            os.close(fd)
+            continue
+        if (mine.st_dev, mine.st_ino) != (there.st_dev, there.st_ino):
+            os.close(fd)
+            continue
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()} {uuid.uuid4().hex}\n".encode())
+        except OSError:
+            pass
+        return HeldLock(lock, fd)
+    return None
 
 
 @contextmanager
-def holding(lock: Path, wait: float = 0.0, stale: int = 600, poll: float = 0.25,
+def holding(lock: Path, wait: float = 0.0, poll: float = 0.25,
             sleep: Callable[[float], None] = time.sleep,
             clock: Callable[[], float] = time.monotonic) -> Iterator[Optional[HeldLock]]:
-    """Hold a lock file for the block, waiting up to `wait` seconds for it; yields None when it stayed taken."""
+    """Hold a lock for the block, waiting up to `wait` seconds for it; yields None when it stayed taken."""
     deadline = clock() + wait
-    token = _claim(lock, stale)
-    while token is None and clock() < deadline:
+    held = claim(lock)
+    while held is None and clock() < deadline:
         sleep(poll)
-        token = _claim(lock, stale)
-    if token is None:
+        held = claim(lock)
+    if held is None:
         yield None
         return
-    held = HeldLock(lock, token)
     try:
         yield held
     finally:

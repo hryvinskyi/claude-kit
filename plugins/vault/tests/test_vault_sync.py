@@ -498,6 +498,136 @@ class MergeReportTests(SharedVault):
         self.assertEqual(sc.merge_lines(self.member("alice")), [])
 
 
+class UnfinishedTests(SharedVault):
+    """A clone git is not done with — a merge, rebase, cherry-pick or revert waiting for a person,
+    unmerged files, a detached head — is neither committed nor pushed, and the brief says why."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.alice = self.member("alice")
+        self.edit_row(self.alice, "theirs")
+        git(self.alice.path, "commit", "-q", "-am", "theirs")
+        self.theirs = head(self.alice.path)
+        git(self.alice.path, "reset", "-q", "--hard", "HEAD~1")
+        self.edit_row(self.alice, "ours")
+        git(self.alice.path, "commit", "-q", "-am", "ours")
+
+    def assertHeldOff(self, why: str) -> None:
+        before, remote = head(self.alice.path), head(self.remote, "main")
+        self.assertFalse(sc.commit_vault(self.alice, SESSION))
+        self.assertEqual(sc.integrate_vault(self.alice, sleep=no_wait([])), "unfinished")
+        self.assertEqual(head(self.alice.path), before, "the clone was committed")
+        self.assertEqual(head(self.remote, "main"), remote, "the clone was pushed")
+        self.assertNotIn("<<<<<<<", git(self.alice.path, "show", "HEAD:To DO.md"))
+        lines = sc.sync_lines(self.alice)
+        self.assertTrue(any(line.startswith("[VAULT] not committed or pushed:") and why in line for line in lines), lines)
+        self.assertTrue(any(why in line for line in sc.update_vault(self.alice, wait=0.0)))
+
+    def test_a_merge_waiting_for_a_person(self) -> None:
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.alice.path), "merge", "-q", self.theirs],
+                                           capture_output=True).returncode, 0)
+        self.assertHeldOff("in the middle of a merge")
+
+    def test_a_rebase_waiting_for_a_person(self) -> None:
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.alice.path), "rebase", "-q", self.theirs],
+                                           capture_output=True).returncode, 0)
+        self.assertHeldOff("in the middle of a rebase")
+
+    def test_a_cherry_pick_waiting_for_a_person(self) -> None:
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.alice.path), "cherry-pick", self.theirs],
+                                           capture_output=True).returncode, 0)
+        self.assertHeldOff("in the middle of a cherry-pick")
+
+    def test_a_revert_waiting_for_a_person(self) -> None:
+        self.note(self.alice, "To DO.md", BOARD.replace("first row", "a third version"))
+        git(self.alice.path, "commit", "-q", "-am", "again")
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.alice.path), "revert", "--no-edit", "HEAD~1"],
+                                           capture_output=True).returncode, 0)
+        self.assertHeldOff("in the middle of a revert")
+
+    def test_unmerged_files_without_an_operation(self) -> None:
+        self.edit_row(self.alice, "stashed")
+        git(self.alice.path, "stash", "-q")
+        self.edit_row(self.alice, "edited after the stash")
+        git(self.alice.path, "commit", "-q", "-am", "after")
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.alice.path), "stash", "pop", "-q"],
+                                           capture_output=True).returncode, 0)
+        self.assertHeldOff("unmerged files")
+
+    def test_a_detached_head(self) -> None:
+        git(self.alice.path, "checkout", "-q", "--detach")
+        self.note(self.alice, "Modules/a.md", "a note on no branch\n")
+        self.assertHeldOff("not on a branch")
+
+    def test_a_clone_put_right_is_committed_and_pushed_again(self) -> None:
+        subprocess.run(["git", "-C", str(self.alice.path), "merge", "-q", self.theirs], capture_output=True)
+        self.assertFalse(sc.commit_vault(self.alice, SESSION))
+        git(self.alice.path, "merge", "--abort")
+        self.note(self.alice, "Modules/a.md", "note\n")
+        self.assertTrue(sc.commit_vault(self.alice, SESSION))
+        self.assertEqual(sc.integrate_vault(self.alice, sleep=no_wait([])), "pushed")
+        self.assertEqual(sc.sync_lines(self.alice), [])
+
+
+class SshTests(SharedVault):
+    """The session end's fetch and push cannot prompt, and still go through the ssh the person set up."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.alice = self.member("alice")
+        git(self.alice.path, "remote", "set-url", "origin", "ssh://git@vault.invalid/vault.git")
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.calls = self.tmp / "calls"
+
+    def recorder(self, name: str) -> Path:
+        """A transport that writes down how it was called and fails like an unreachable host."""
+        path = self.bin / name
+        path.write_text(f"#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> '{self.calls}'\n"
+                        f"echo '--' >> '{self.calls}'\nexit 255\n")
+        path.chmod(0o755)
+        return path
+
+    def called(self) -> list:
+        self.assertTrue(self.calls.exists(), "the person's ssh was never run")
+        return self.calls.read_text().split("\n")
+
+    def test_core_ssh_command_is_kept_and_made_unable_to_prompt(self) -> None:
+        ssh = self.recorder("ssh")
+        git(self.alice.path, "config", "core.sshCommand", f"'{ssh}' -i '{self.tmp}/the key'")
+        code, _ = sc.net(self.alice, "ls-remote", "origin", timeout=30, connect=7)
+        self.assertNotEqual(code, 0)
+        args = self.called()
+        self.assertIn(f"{self.tmp}/the key", args)
+        self.assertIn("BatchMode=yes", args)
+        self.assertIn("ConnectTimeout=7", args)
+        self.assertLess(args.index("-i"), args.index("BatchMode=yes"), "the person's options come first")
+
+    def test_an_exported_git_ssh_command_is_kept_and_made_unable_to_prompt(self) -> None:
+        ssh = self.recorder("ssh")
+        with unittest.mock.patch.dict(os.environ, {"GIT_SSH_COMMAND": f"'{ssh}' -F '{self.tmp}/ssh config'"}):
+            sc.net(self.alice, "ls-remote", "origin", timeout=30)
+        args = self.called()
+        self.assertIn(f"{self.tmp}/ssh config", args)
+        self.assertIn("BatchMode=yes", args)
+
+    def test_plain_ssh_from_the_search_path_is_made_unable_to_prompt(self) -> None:
+        self.recorder("ssh")
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}):
+            sc.net(self.alice, "ls-remote", "origin", timeout=30)
+        args = self.called()
+        self.assertIn("BatchMode=yes", args)
+        self.assertIn("ConnectTimeout=20", args)
+
+    def test_a_transport_that_is_not_openssh_is_run_as_the_person_set_it(self) -> None:
+        wrapper = self.recorder("vault-transport")
+        git(self.alice.path, "config", "core.sshCommand", f"'{wrapper}' --profile work")
+        sc.net(self.alice, "ls-remote", "origin", timeout=30)
+        args = self.called()
+        self.assertIn("--profile", args)
+        self.assertNotIn("BatchMode=yes", args)
+
+
 class HandleTests(SharedVault):
     def test_a_configured_handle_wins_then_the_environment_then_the_git_user_name(self) -> None:
         alice = self.member("alice")
