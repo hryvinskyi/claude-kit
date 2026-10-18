@@ -115,6 +115,20 @@ printf '[other]\nforbid_assistant_commit_trailers = true\n' > "$POLICY"
 expect_exit "policy inside a table: not top level, trailer allowed" 0 "$(bash_json "$TRAILER_CMD")" "$B"
 printf 'forbid_assistant_commit_trailers = true  # on for this machine\n' > "$POLICY"
 expect_exit "policy with a trailing comment: on, trailer blocked" 2 "$(bash_json "$TRAILER_CMD")" "$B"
+# One malformed line elsewhere neither switches off a policy another line turns on, nor reads
+# differently on a Python that ships a TOML parser (a stand-in one that rejects the file included).
+printf 'forbid_assistant_commit_trailers = true\nx = yes\n' > "$POLICY"
+mkdir -p "$TMP/strict-toml"; printf 'def loads(text):\n    raise ValueError("invalid")\n' > "$TMP/strict-toml/tomllib.py"
+for PY in python3 python3.11 python3.12 python3.13 python3.14 strict-toml; do
+  if [ "$PY" = strict-toml ]; then
+    OUT=$(PYTHONPATH="$TMP/strict-toml" python3 "$H/policies.py" forbid_assistant_commit_trailers 2>&1)
+  else
+    command -v "$PY" >/dev/null 2>&1 || continue
+    OUT=$("$PY" "$H/policies.py" forbid_assistant_commit_trailers 2>&1)
+  fi
+  case "$OUT" in *"forbid_assistant_commit_trailers = true"*) ok ;;
+    *) ko "policies: $PY reads a file with one malformed line as the policy off"; echo "$OUT" ;; esac
+done
 OUT=$(XDG_CONFIG_HOME="relative/dir" HOME="$TMP/policy-home" python3 "$H/policies.py" forbid_assistant_commit_trailers)
 case "$OUT" in "# $TMP/policy-home/.config/claude-kit/policies.toml"*"forbid_assistant_commit_trailers = false"*) ok ;;
   *) ko "policies: a relative XDG_CONFIG_HOME falls back to ~/.config"; echo "$OUT" ;; esac
