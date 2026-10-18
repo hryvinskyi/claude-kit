@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { RefusedByRule } from '../domain/errors.ts';
 import { SEARCH_PATH, render, templateNamed, write, writeLauncher } from './schedule-files.ts';
 import type { Launcher, ScheduleOptions } from './schedule-files.ts';
 
@@ -28,14 +29,37 @@ export function installSchedule(options: ScheduleOptions): ScheduleInstallation 
     plistPath: path.join(options.home, 'Library', 'LaunchAgents', `${SCHEDULE_LABEL}.plist`),
   };
   write(installation.plistPath, render(templateNamed('com.user.board-queue.plist.template'), {
-    LABEL: installation.label,
-    LAUNCHER: installation.launcherPath,
-    INTERVAL: String(installation.intervalSec),
-    LOG: installation.logPath,
-    WORKDIR: installation.workDir,
-    PATH: SEARCH_PATH,
+    LABEL: xmlText(installation.label),
+    LAUNCHER: xmlText(installation.launcherPath),
+    INTERVAL: xmlText(String(installation.intervalSec)),
+    LOG: xmlText(installation.logPath),
+    WORKDIR: xmlText(installation.workDir),
+    PATH: xmlText(SEARCH_PATH),
   }));
   return installation;
+}
+
+/** The characters XML 1.0 does not allow in a document at all, escaped or not. */
+const NOT_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u;
+
+const XML_ENTITIES: ReadonlyMap<string, string> = new Map([
+  ['&', '&amp;'], ['<', '&lt;'], ['>', '&gt;'], ['"', '&quot;'], ['\'', '&apos;'],
+]);
+
+/**
+ * A value as the text of an element of the job description, so that a path
+ * holding an ampersand or an angle bracket is read back as the same path. A
+ * control character has no way to be written in XML; the job is refused rather
+ * than written as a file the scheduler rejects.
+ */
+function xmlText(value: string): string {
+  if (NOT_XML.test(value)) {
+    throw new RefusedByRule(
+      `the macOS job description cannot hold ${JSON.stringify(value)}: XML has no way to write a control `
+      + 'character; choose a state directory and home without one',
+    );
+  }
+  return value.replace(/[&<>"']/g, (char: string) => XML_ENTITIES.get(char) ?? char);
 }
 
 /**

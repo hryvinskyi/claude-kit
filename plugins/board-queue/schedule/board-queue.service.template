@@ -3,8 +3,8 @@ Description=board-queue: one pass of the board's single writer
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh {{LAUNCHER}}
+ExecStart=/bin/sh "{{LAUNCHER}}"
 WorkingDirectory={{WORKDIR}}
-Environment=PATH={{PATH}}
+Environment="PATH={{PATH}}"
 StandardOutput=append:{{LOG}}
 StandardError=append:{{LOG}}

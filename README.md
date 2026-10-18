@@ -48,7 +48,10 @@ is one that ships a `stack.json`), so a project gets no framework's idiom it doe
 installer names the stack plugins it left out; `--stack symfony` (or `--stack magento2`, or both,
 comma-separated) adds the one your project runs on, and the standards import then covers that stack
 plugin's standards file too. `--plugins architecture,pipeline,…` names the exact list instead and
-overrides both; a stack plugin in that list gets its standards import, one left out gets none.
+overrides both; a stack plugin in that list gets its standards import, one left out gets none. The
+command shims follow the same list: a plugin left out gets no shim, and a shim an earlier run wrote
+for it stays where it is, since the plugin itself stays installed (`bin/install-shims.sh --uninstall`
+removes the kit's shims).
 
 Or by hand, from GitHub:
 
@@ -97,8 +100,8 @@ A scheduled job, a git hook or a project's script cannot see a plugin's `bin/`, 
 plugin cache moves on every update. `bin/install-shims.sh [CLONE]` writes small shims into
 `~/.local/bin` (or `$SHIM_DIR`) — `board-queue`, `board-queue-mcp`, `find-vault`, `vault-check`,
 `vault-capture`, `vault-search`, `vault-merge` — each running the copy in the clone. It is idempotent,
-re-points the shims when run from another clone, never replaces a file it did not write, and `--check`
-reports without writing. Callers outside Claude Code use those paths; git's merge-driver
+re-points the shims when run from another clone, never replaces a file or a link it did not write,
+and `--check` reports without writing. `--plugins vault,…` limits it to the shims of those plugins. Callers outside Claude Code use those paths; git's merge-driver
 configuration names the `vault-merge` shim.
 
 ## Agent evals

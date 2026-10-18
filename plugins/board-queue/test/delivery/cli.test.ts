@@ -449,7 +449,7 @@ describe('the queue on a command line', () => {
 
       assert.equal(installed.code, 0, installed.err);
       assert.match(service, /^Type=oneshot$/m);
-      assert.match(service, new RegExp(`^ExecStart=/bin/sh ${launcherPath}$`, 'm'));
+      assert.match(service, new RegExp(`^ExecStart=/bin/sh "${launcherPath}"$`, 'm'));
       assert.match(service, new RegExp(`^WorkingDirectory=${space.stateDir}$`, 'm'));
       assert.match(service, new RegExp(`^StandardOutput=append:${join(space.stateDir, 'launchd.log')}$`, 'm'));
       assert.match(timer, /^OnUnitActiveSec=300s$/m);
@@ -528,8 +528,8 @@ function assertLauncherRunsThroughTheCommand(launcher: string, launcherPath: str
   // through the variable the program checks.
   assert.match(launcher, /^BOARD_QUEUE_SCHEDULED=1$/m);
   assert.match(launcher, /^export BOARD_QUEUE_SCHEDULED$/m);
-  assert.match(launcher, new RegExp(`^COMMAND="${command}"$`, 'm'));
-  assert.match(launcher, /NODE="\/.+"/);
+  assert.match(launcher, new RegExp(`^COMMAND='${command}'$`, 'm'));
+  assert.match(launcher, /^NODE='\/.+'$/m);
   assert.match(launcher, /^exec "\$COMMAND" tick$/m);
   assert.ok((statSync(launcherPath).mode & 0o111) !== 0, 'the launcher is not executable');
 }

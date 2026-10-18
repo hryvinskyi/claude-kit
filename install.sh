@@ -13,14 +13,27 @@
 #
 # By default every plugin the marketplace lists is enabled except the stack plugins, which add one
 # framework's idiom each and are enabled only by name. The standards import covers the standards
-# file of each stack plugin that ends up enabled.
+# file of each stack plugin that ends up enabled, and the command shims are those of the plugins
+# that end up enabled.
 #
 # The Claude Code profile is the one the `claude` command uses (CLAUDE_CONFIG_DIR when it is set).
 # Idempotent: a run that finds every step done changes nothing. A step that finds something it
 # did not write in its way refuses and names it; nothing is overwritten. An applying run stops at
 # the first refused step. Exit status: 0 done (or nothing to do), 1 something to do (--check), 2
-# refused.
+# refused. A run that stops before it finishes, in a step or in a command a step runs, is refused,
+# never read as something to do.
 set -euo pipefail
+
+# Every deliberate exit is 0 or 2, or the 1 of a check that found work to do. Any other way out — a
+# command that failed under set -e, a variable that is not set — is a run that did not finish.
+CHECK_FOUND_WORK=0
+on_exit() {
+  local status=$?
+  if [ "$status" -eq 0 ] || [ "$status" -eq 2 ] || [ "$CHECK_FOUND_WORK" = 1 ]; then return 0; fi
+  printf '\nRESULT: the installer stopped before it finished (exit %s); see the lines above.\n' "$status"
+  exit 2
+}
+trap on_exit EXIT
 
 CLONE="$(cd "$(dirname "$0")" && pwd -P)"
 MARKETPLACE_FILE="$CLONE/.claude-plugin/marketplace.json"
@@ -42,7 +55,7 @@ while [ $# -gt 0 ]; do
     --plugins=*) PLUGINS_ARG="${1#--plugins=}" ;;
     --stack) [ $# -ge 2 ] || { echo "--stack needs a comma-separated list" >&2; exit 2; }; STACK_ARG="$2"; shift ;;
     --stack=*) STACK_ARG="${1#--stack=}" ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -106,32 +119,46 @@ step_prerequisites() {
   fi
 }
 
+# What bin/install-shims.sh made of a run: its exit status and the RESULT line it ends every run it
+# finishes with, as "<status>:<result>"; a run that stopped before its end has no result.
+shims_verdict() {
+  printf '%s:%s\n' "$1" "$(printf '%s\n' "$2" | sed -n '$s/^RESULT: //p')"
+}
+
+# The report of a finished run, under its three header lines and without its RESULT line.
+shims_report() {
+  printf '%s\n' "$1" | sed -n '4,$p' | sed '$d'
+}
+
+# Only the shims of the chosen plugins are written; one written earlier for a plugin left out stays
+# for bin/install-shims.sh --uninstall, as the plugin itself stays installed.
 step_shims() {
   step "Command shims"
-  local out status=0
-  out="$("$CLONE/bin/install-shims.sh" --check "$CLONE" 2>&1)" || status=$?
-  if [ "$status" -eq 0 ]; then
-    printf '%s\n' "$out" | sed -n '4,$p'
-    return
-  fi
-  if case "$out" in *"  FAIL  "*) true ;; *) false ;; esac; then
-    printf '%s\n' "$out" | sed -n '4,$p'
-    bad "the shims cannot be written; see the lines above"
-    return
-  fi
+  local out status=0 plugins
+  plugins="$(IFS=,; printf '%s' "${PLUGINS[*]}")"
+  out="$("$CLONE/bin/install-shims.sh" --check --plugins "$plugins" "$CLONE" 2>&1)" || status=$?
+  case "$(shims_verdict "$status" "$out")" in
+    0:current) shims_report "$out"; return ;;
+    1:refused) shims_report "$out"; bad "the shims cannot be written; see the lines above"; return ;;
+    1:pending) ;;
+    *) printf '%s\n' "$out" | indent; bad "bin/install-shims.sh stopped before it finished (exit $status); see the lines above"; return ;;
+  esac
   if [ "$MODE" = check ]; then
-    printf '%s\n' "$out" | sed -n '4,$p'
+    shims_report "$out"
     PENDING=1
     return
   fi
   status=0
-  out="$("$CLONE/bin/install-shims.sh" "$CLONE" 2>&1)" || status=$?
-  printf '%s\n' "$out" | sed -n '4,$p'
-  [ "$status" -eq 0 ] || bad "bin/install-shims.sh failed"
+  out="$("$CLONE/bin/install-shims.sh" --plugins "$plugins" "$CLONE" 2>&1)" || status=$?
+  case "$(shims_verdict "$status" "$out")" in
+    0:current) shims_report "$out" ;;
+    1:refused) shims_report "$out"; bad "the shims cannot be written; see the lines above" ;;
+    *) printf '%s\n' "$out" | indent; bad "bin/install-shims.sh stopped before it finished (exit $status); see the lines above" ;;
+  esac
 }
 
-# 0 when node_modules holds exactly the packages the lockfile pins, 1 otherwise.
-dependencies_current() {
+# current when node_modules holds exactly the packages the lockfile pins, stale otherwise.
+dependencies_state() {
   python3 -I - "$BOARD_QUEUE_DIR" <<'EOF'
 import json, os, sys
 root = sys.argv[1]
@@ -139,13 +166,12 @@ try:
     lock = json.load(open(os.path.join(root, "package-lock.json"), encoding="utf-8"))["packages"]
     installed = json.load(open(os.path.join(root, "node_modules", ".package-lock.json"), encoding="utf-8"))["packages"]
 except (OSError, ValueError, KeyError):
-    sys.exit(1)
+    print("stale")
+    sys.exit(0)
 wanted = {name: entry for name, entry in lock.items() if name}
-for name, entry in installed.items():
-    if wanted.get(name, {}).get("version") != entry.get("version"):
-        sys.exit(1)
+stale = any(wanted.get(name, {}).get("version") != entry.get("version") for name, entry in installed.items())
 missing = [name for name, entry in wanted.items() if name not in installed and not entry.get("optional")]
-sys.exit(1 if missing else 0)
+print("stale" if stale or missing else "current")
 EOF
 }
 
@@ -153,11 +179,12 @@ step_node_dependencies() {
   [ "$WITH_BOARD_QUEUE" = 1 ] || return 0
   step "board-queue's Node dependencies"
   if [ "$SKIP_NPM" = 1 ]; then info "left alone (--skip-npm)"; return; fi
-  if dependencies_current; then ok "node_modules matches package-lock.json"; return; fi
+  local log state
+  state="$(dependencies_state)"
+  if [ "$state" = current ]; then ok "node_modules matches package-lock.json"; return; fi
   if [ "$MODE" = check ]; then todo "would run npm ci in $BOARD_QUEUE_DIR"; return; fi
-  local log
   log="$(mktemp "${TMPDIR:-/tmp}/claude-kit-npm.XXXXXX")"
-  if npm ci --prefix "$BOARD_QUEUE_DIR" --no-audit --no-fund >"$log" 2>&1 && dependencies_current; then
+  if npm ci --prefix "$BOARD_QUEUE_DIR" --no-audit --no-fund >"$log" 2>&1 && [ "$(dependencies_state)" = current ]; then
     ok "npm ci in $BOARD_QUEUE_DIR"
     rm -f "$log"
   else
@@ -321,6 +348,12 @@ step_policies() {
   step "Policies"
   local file tmp
   file="$(policy_file)"
+  # A link at the file's place is the person's, wherever it leads; one that leads nowhere is kept
+  # too, never replaced and never written through.
+  if [ -L "$file" ] && [ ! -e "$file" ]; then
+    info "$file is a link to $(readlink "$file"), which does not exist; left as it is (every policy takes its default until it does)"
+    return
+  fi
   if [ -e "$file" ]; then ok "$file present; left as it is"; return; fi
   if [ "$MODE" = check ]; then todo "would write $file with every policy at its default"; return; fi
   mkdir -p "$(dirname "$file")"
@@ -336,6 +369,10 @@ STEPS=(step_prerequisites step_shims step_node_dependencies step_marketplace ste
 # ---------------------------------------------------------------------------------------------
 printf 'claude-kit install (%s)\nclone: %s\n' "$MODE" "$CLONE"
 have python3 || { echo "python3 is not installed ($MIN_PYTHON or newer)" >&2; exit 2; }
+case "${HOME:-}" in
+  /*) ;;
+  *) echo "HOME is not set to an absolute directory; the installer writes under the home directory of the person running it" >&2; exit 2 ;;
+esac
 [ -f "$MARKETPLACE_FILE" ] || { echo "$MARKETPLACE_FILE is missing; this is not a claude-kit clone" >&2; exit 2; }
 MARKETPLACE="$(manifest name)"
 LISTED=()
@@ -388,7 +425,11 @@ done
 printf '\n'
 if [ "$REFUSED" -ne 0 ]; then echo "RESULT: some steps are refused (FAIL above)."; exit 2; fi
 if [ "$MODE" = check ]; then
-  if [ "$PENDING" -ne 0 ]; then echo "RESULT: something is missing; ./install.sh would do the steps marked .."; exit 1; fi
+  if [ "$PENDING" -ne 0 ]; then
+    echo "RESULT: something is missing; ./install.sh would do the steps marked .."
+    CHECK_FOUND_WORK=1
+    exit 1
+  fi
   echo "RESULT: everything is installed."
   exit 0
 fi

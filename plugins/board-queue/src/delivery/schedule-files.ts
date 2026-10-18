@@ -75,13 +75,22 @@ export function writeLauncher(options: ScheduleOptions): Launcher {
     intervalSec: INTERVAL_SEC,
   };
   write(launcher.launcherPath, render(templateNamed('board-queue-tick.sh.template'), {
-    NODE: launcher.nodePath,
-    COMMAND: launcher.commandPath,
+    NODE: insideSingleQuotes(launcher.nodePath),
+    COMMAND: insideSingleQuotes(launcher.commandPath),
   }));
   // The scheduler runs it through a shell, but a person has to be able to run it
   // by hand to find out what the job actually does.
   chmodSync(launcher.launcherPath, 0o755);
   return launcher;
+}
+
+/**
+ * A value as the inside of a single-quoted shell word. Every character stands
+ * for itself between single quotes except the quote, which is written as one
+ * that closes the word, an escaped quote, and one that opens it again.
+ */
+function insideSingleQuotes(value: string): string {
+  return value.replaceAll('\'', '\'\\\'\'');
 }
 
 /** This package's own directory, from this file's place inside it. */
