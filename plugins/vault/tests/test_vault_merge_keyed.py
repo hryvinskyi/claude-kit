@@ -450,6 +450,27 @@ class LineEndingTests(merge_support.IsolatedGitTestCase):
         self.assertNotIn("\n", merged.replace("\r\n", ""))
         self.assertIn(ANNOTATION + "\r\n", merged)
 
+    def test_rows_from_a_side_with_other_line_endings_take_the_current_sides(self) -> None:
+        base = "## Now\r\n- a\r\n- b\r\n- c\r\n"
+        current = base + "- e\r\n"
+        incoming = "## Now\n- a\n- b\n- d\n- c\n"
+        merged, _ = merge(base, current, incoming)
+        self.assertEqual(merged, "## Now\r\n- a\r\n- b\r\n- d\r\n- c\r\n- e\r\n")
+        merged, _ = merge(base.replace("\r\n", "\n"), current.replace("\r\n", "\n"), incoming.replace("\n", "\r\n"))
+        self.assertEqual(merged, "## Now\n- a\n- b\n- d\n- c\n- e\n")
+
+    def test_a_side_that_only_converted_line_endings_changed_no_row(self) -> None:
+        base = BOARD.replace("\n", "\r\n")
+        current = edit(base, "billing, added", "billing (current), added")
+        incoming = edit(BOARD, "cached too long", "cached far too long")
+        merged, outcome = merge(base, current, incoming)
+        self.assertEqual(merged, edit(current, "cached too long", "cached far too long"))
+        self.assertEqual(outcome.notes, [])
+        current = edit(base, "second point", "second point, sharpened")
+        merged, outcome = merge(base, current, incoming)
+        self.assertEqual(merged, edit(current, "cached too long", "cached far too long"))
+        self.assertEqual(outcome.notes, [], "a row whose lines only changed their endings was taken for an edit")
+
     def test_a_row_appended_to_a_file_without_a_final_newline(self) -> None:
         base = BOARD.rstrip("\n")
         current = edit(base, "rounding**", "rounding again**")

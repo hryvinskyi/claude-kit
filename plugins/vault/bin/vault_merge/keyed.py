@@ -27,8 +27,11 @@ Rules, in base/current/incoming terms (see `driver`):
   a row it moved to another section, a row it kept that the current side deleted) goes directly
   after the nearest block before it, in the incoming order, that the result keeps in the same
   section — else at the start of that section, else after the nearest block before it at all.
-- The current side's line ending is the result's. The result ends in a newline when the side that
-  changed that says so.
+- The current side's line ending is the result's: every line of the result ends in it, whichever
+  side the line came from, and a line ending alone is never a change to a row. So a side that only
+  converted the file's line endings changed no row, and when the other side changed anything too,
+  the current side's ending is kept and the incoming conversion is not. The result ends in a
+  newline when the side that changed that says so.
 """
 from __future__ import annotations
 
@@ -319,15 +322,18 @@ class KeyedDriver(Driver):
         quick = trivial(given)
         if quick is not None:
             return quick
-        base, current, incoming = (md.parse(data.decode("utf-8"))
-                                   for data in (given.base, given.current, given.incoming))
+        texts = [data.decode("utf-8") for data in (given.base, given.current, given.incoming)]
+        eol = md.parse(texts[1]).eol
+        base, current, incoming = (md.parse(text.replace("\r\n", "\n")) for text in texts)
         base_keys = base_version(base)
         rows = RowMerge(base_keys, side_version(base_keys, current), side_version(base_keys, incoming),
-                        current.eol, self.text_merge)
+                        "\n", self.text_merge)
         merged = rows.run()
         final_newline, _, _ = three(base.final_newline if given.base else current.final_newline,
                                     current.final_newline, incoming.final_newline)
-        text = md.serialise(merged, current.eol, final_newline)
+        text = md.serialise(merged, "\n", final_newline)
+        if eol != "\n":
+            text = text.replace("\n", eol)
         notes = []
         if rows.twins:
             notes.append("%s: %d %s two versions; keep one of each (look for '%s')" % (
