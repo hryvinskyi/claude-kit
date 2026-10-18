@@ -23,7 +23,9 @@ Rules (each has cases in tests.sh):
          a "+branch" refspec, --delete, or a ":branch" refspec aimed at main/
          master/develop/production, including a bare force-push while the
          checked-out branch is protected (or cannot be resolved), forced --all,
-         and --mirror (which force-updates and prunes every remote ref);
+         a forced glob refspec whose destination can match one of them,
+         --prune with --all, such a glob, or no refspec given, and --mirror
+         (which force-updates and prunes every remote ref);
          branch -D / update-ref -d on main/master;
          commit whose message carries a Co-Authored-By: or Claude-Session:
          trailer (in -m, in a -F/--file message file, in a --trailer, or in a
@@ -71,6 +73,7 @@ Each command name maps to its rule in SEGMENT_RULES; a new rule is one entry.
 
 Fails open: any internal error exits 0. A hook must never wedge a session.
 """
+import fnmatch
 import json
 import os
 import re
@@ -389,8 +392,23 @@ def branch_of(refspec):
     return dst.rsplit("/", 1)[-1]
 
 
+def destination(refspec):
+    """The remote ref a push refspec writes, qualified as git does an unqualified one (`x` -> `refs/heads/x`)."""
+    ref = refspec.lstrip("+")
+    dst = ref.split(":", 1)[1] if ":" in ref else ref
+    if dst.startswith("refs/"):
+        return dst
+    return "refs/" + dst if dst.startswith("heads/") else "refs/heads/" + dst
+
+
+def glob_reaches_protected(refspec):
+    """Report whether a pattern refspec's destination can match a protected branch (`*` spans `/`)."""
+    dst = destination(refspec)
+    return "*" in dst and any(fnmatch.fnmatchcase(f"refs/heads/{b}", dst) for b in PROTECTED)
+
+
 def push_danger(args, cwd):
-    force = delete = everything = mirror = False
+    force = delete = everything = mirror = prune = False
     positional, skip = [], False
     for a in args:
         if skip:
@@ -405,6 +423,8 @@ def push_danger(args, cwd):
             mirror = everything = True
         elif a in ("--all", "--branches"):
             everything = True
+        elif a == "--prune":
+            prune = True
         elif a in ("--repo", "--receive-pack", "--exec", "-o", "--push-option"):
             skip = True
         elif a.startswith("--"):
@@ -430,6 +450,15 @@ def push_danger(args, cwd):
     if mirror:
         return ("push --mirror force-updates and prunes every remote ref, protected branches included. "
                 "Push the branches you mean by name, or ask the user.")
+    globbed = [r for r in refspecs if glob_reaches_protected(r)]
+    if prune and (everything or globbed or not refspecs):
+        # without a refspec on the command line the pushed namespaces come from config this guard does not read
+        return ("push --prune deletes every remote branch without a local counterpart, and this push can "
+                "reach a protected branch (--all, a glob over the branches, or the configured refspecs). "
+                "Delete the branches you mean by name, or ask the user.")
+    if globbed and (force or any(r.startswith("+") for r in globbed)):
+        return ("forced glob refspec whose destination matches a protected branch (main/master/develop/"
+                "production). Push the branches you mean by name, or ask the user.")
     if forced & PROTECTED:
         return ("force-push ('+' refspec) to a protected branch (main/master/develop/production). "
                 "Use --force-with-lease on a feature branch, or ask the user.")

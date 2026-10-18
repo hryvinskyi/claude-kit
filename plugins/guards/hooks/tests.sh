@@ -95,6 +95,21 @@ expect_exit "bash: --mirror to a remote blocked" 2 "$(bash_json 'git push --mirr
 expect_exit "bash: +feature refspec allowed" 0 "$(bash_json 'git push origin +feat/x')" "$B"
 expect_exit "bash: +HEAD on a feature branch allowed" 0 "$(bash_json 'git push origin +HEAD' "$TMP/repo-feat")" "$B"
 expect_exit "bash: unforced --all allowed" 0 "$(bash_json 'git push --all origin')" "$B"
+# a forced glob refspec overwrites every remote ref its destination pattern matches
+expect_exit "bash: --force with a refs/heads/* glob blocked" 2 "$(bash_json "git push --force origin 'refs/heads/*:refs/heads/*'")" "$B"
+expect_exit "bash: +refs/heads/* glob refspec blocked" 2 "$(bash_json "git push origin '+refs/heads/*:refs/heads/*'")" "$B"
+expect_exit "bash: +refs/* glob refspec blocked" 2 "$(bash_json "git push origin '+refs/*:refs/*'")" "$B"
+expect_exit "bash: unqualified +*:* glob refspec blocked" 2 "$(bash_json "git push origin '+*:*'")" "$B"
+expect_exit "bash: +glob into a remote-tracking namespace allowed" 0 "$(bash_json "git push origin '+refs/heads/*:refs/remotes/x/*'")" "$B"
+expect_exit "bash: --force with a feature-namespace glob allowed" 0 "$(bash_json "git push --force origin 'refs/heads/feat/*:refs/heads/feat/*'")" "$B"
+expect_exit "bash: unforced refs/heads/* glob allowed" 0 "$(bash_json "git push origin 'refs/heads/*:refs/heads/*'")" "$B"
+# --prune deletes remote refs without a local counterpart in the pushed namespaces
+expect_exit "bash: --prune with --all blocked" 2 "$(bash_json 'git push --prune --all origin')" "$B"
+expect_exit "bash: --prune with a refs/heads/* glob blocked" 2 "$(bash_json "git push --prune origin 'refs/heads/*:refs/heads/*'")" "$B"
+expect_exit "bash: bare --prune blocked" 2 "$(bash_json 'git push --prune' "$TMP/repo-feat")" "$B"
+expect_exit "bash: --prune to a remote without a refspec blocked" 2 "$(bash_json 'git push --prune origin' "$TMP/repo-feat")" "$B"
+expect_exit "bash: --prune with a glob outside the branches allowed" 0 "$(bash_json "git push --prune origin 'refs/heads/*:refs/tmp/*'")" "$B"
+expect_exit "bash: --prune with an explicit feature refspec allowed" 0 "$(bash_json 'git push --prune origin feat/x')" "$B"
 # blocked: attribution trailers in a commit message, while the policy is on
 printf 'feat: x\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n' > "$TMP/msg-trailer.txt"
 printf 'feat: x\n\nRefs #1\n' > "$TMP/msg-clean.txt"
