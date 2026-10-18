@@ -10,7 +10,7 @@ Usage (anywhere inside the project, or with --root DIR):
 
 Exits 1 while a hard finding stands (never with --brief), 0 otherwise, and 0 when there is no vault.
 One check runs per vault at a time: the detached --refresh gives way to a running one, every other
-run waits for it (a lock older than ten minutes is taken over).
+run waits for it (the lock is free the moment its holder exits, however it exits).
 
 **Living notes** describe the code as it is: every note in a folder named for units of code —
 Modules, Bridges, Plugins, Kernel, Packages, Services — the Runbooks, and the `00 …` overview at the
@@ -750,12 +750,12 @@ def main(argv: list[str]) -> int:
 
     write = "--check" not in argv or bool(restamp)
     lock = vault.state / "vault-check.lock"
-    held = vaultlib.take_lock(lock)
-    if not held and "--refresh" in argv:
+    held = vaultlib.claim(lock)
+    if held is None and "--refresh" in argv:
         return 0
-    while not held:
+    while held is None:
         time.sleep(LOCK_POLL)
-        held = vaultlib.take_lock(lock)
+        held = vaultlib.claim(lock)
     try:
         report = measure(vault, write=write, restamp=restamp)
         if write:
@@ -765,7 +765,7 @@ def main(argv: list[str]) -> int:
             if restamp:
                 print(f"stamped: {', '.join(sorted(restamp))}")
     finally:
-        lock.unlink(missing_ok=True)
+        held.release()
     return 1 if report.hard else 0
 
 

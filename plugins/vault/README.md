@@ -22,6 +22,13 @@ One rule, in `bin/find-vault.sh`: a `Knowledge-base directory: \`<dir>/\`` line 
 `CLAUDE.md` or `AGENTS.md`, otherwise a unique directory holding `To DO.md` and `Decisions/`, at
 depth 1 or under `.claude/`. Exit 0 found, 1 none, 2 ambiguous.
 
+A vault is a directory strictly inside the project. A declaration that is empty, names the project
+root (`./`), is absolute, has a `..` component, or leads out of the project through a symbolic link
+is refused (exit 1, and no fallback search); the tools check it again before they write anything. A
+vault counts as a repository of its own only when it is the top of a work tree whose repository is
+not the project's — a clone, a submodule or a linked work tree of a vault repository, never a work
+tree of the project's own repository.
+
 ## Commands
 
 The plugin's `bin/` is on the Bash tool's search path while the plugin is enabled:
@@ -98,7 +105,9 @@ vault-merge unwire --vault <clone>              # removes the drivers' configura
 `wire` registers `merge.vault-<driver>.name` and `.driver` for the three drivers, running the
 `vault-merge` shim (`--command` names another), and the two region markers (Python regular
 expressions). It first reads back every tracked file the attributes give to the keyed driver and
-refuses when one would not survive, and it refuses a clone in the middle of a merge or rebase.
+refuses when one would not survive, and it refuses a clone git is not done with — a merge, rebase,
+cherry-pick or revert waiting for a person, unmerged files, a head on no branch — by the same check
+the session end makes before it commits.
 `--attributes FILE` names the `.gitattributes` the vault should carry: an identical one is left
 alone, a missing one is written and committed with `--commit` (nothing is pushed) and otherwise
 reported, a different one is refused with the lines to fold in. `--expect PATH=DRIVER` checks what
@@ -112,6 +121,14 @@ inbox and review stamps beside the notes. Every other vault's machine files go u
 `~/.claude/state/vaults/<project>/` (`$CLAUDE_VAULT_STATE` moves it), so a project's tracked tree never
 changes because a tool ran. A project's repository is never committed.
 
+`<project>` is the project's path made readable, followed by a hash of the full path, so two projects
+whose paths differ only in punctuation (`shop.dk`, `shop-dk`) never share one. A directory named the
+older way, without the hash, is adopted by the first project it fits that no other project claimed;
+the `project` file inside a state directory names the project it belongs to.
+
+The locks are `flock(2)` locks, so the tools run on macOS and Linux: a lock is free the moment the
+process holding it exits, however it exits, and no process takes over a lock another one holds.
+
 ## A vault shared by several people
 
 A vault that is a repository of its own can be cloned by a team. Then:
@@ -121,7 +138,12 @@ A vault that is a repository of its own can be cloned by a team. Then:
   state directory, so several sessions on one machine never work on the clone at once.
 - **Commit, then rebase, then push.** The session end commits what changed, rebases onto the remote
   (never stashing) and pushes; a refused push is fetched, rebased and retried, three attempts in all,
-  with waits of one to four seconds.
+  with waits of one to four seconds. Fetch and push never wait on a prompt: they run the ssh command
+  git would run (`$GIT_SSH_COMMAND`, `core.sshCommand`, `$GIT_SSH`, else `ssh`), and when that is
+  OpenSSH they add `-o BatchMode=yes -o ConnectTimeout=N` after its own options.
+- **A clone git is not done with** — a merge, rebase, cherry-pick or revert waiting for a person,
+  unmerged files, a detached head — is neither committed nor pushed, and the brief says
+  `[VAULT] not committed or pushed: …` with the way out until a session end finds it put right.
 - **Notes that do not rebase** are pushed to `conflict/<handle>/<UTC yyyymmdd-hhmm>`, and the clone is
   reset to the remote only once that push succeeded and nothing in the tree is uncommitted. The brief
   says `[VAULT CONFLICT] your notes from <time> are on branch <name> — merge them` until the branch

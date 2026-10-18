@@ -71,8 +71,11 @@ forbid_assistant_commit_trailers = true
 | `forbid_assistant_commit_trailers` | `false` | `bash_guard.py` refuses a `git commit` whose message carries a `Co-Authored-By:` or `Claude-Session:` trailer, wherever the message comes from: `-m`, `-F`/`--file`, `--trailer` or a heredoc. It matches every `Co-Authored-By:` line, a human co-author's included |
 | `github_rest_only` | `false` | `bash_guard.py` refuses the `gh` commands that run on GitHub's GraphQL API, whose rate-limit allowance the whole account shares: `gh issue`, `gh pr`, `gh project` and `gh search` (any action), `gh repo view`, `gh release list` and `gh api graphql`, also when reached as `command gh`, `env … gh`, an absolute path, after `&&`/`;`/`|` or inside `$(…)`, and with `-R`/`--repo`/`--hostname` before the subcommand. The refusal names the REST form (`gh api --method POST repos/OWNER/REPO/issues …`) or, for `gh project`, the board queue. `gh api repos/…`, `gh auth`, `gh run`, `gh repo clone` and `gh release create` are never refused |
 
-A missing file, an unreadable one, a value that is not a boolean, or a key inside a `[table]`
-leaves the policy at its default.
+The file is read line by line, the same way on every Python: each top-level `name = true` or
+`name = false` line (a trailing `# comment` allowed) sets that policy, a `[table]` header ends the
+top level, and any other line is ignored — so one malformed line does not switch off a policy that
+another line turns on. A missing file, an unreadable one, a value that is not a boolean, or a key
+inside a `[table]` leaves the policy at its default.
 
 The environment overrides the file: `CLAUDE_KIT_<POLICY NAME IN CAPITALS>` (`1` or `true` for on,
 `0` or `false` for off, any case; any other value is ignored and the file decides). That is how a

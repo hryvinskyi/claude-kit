@@ -8,8 +8,8 @@ top-level boolean:
     # ~/.config/claude-kit/policies.toml
     forbid_assistant_commit_trailers = true
 
-A policy that is absent, not a boolean, or in a file that cannot be read or
-parsed takes its default, so a missing or broken file never blocks anything.
+A policy that is absent, not a boolean, or in a file that cannot be read takes
+its default, so a missing or broken file never blocks anything.
 
 The environment overrides the file, so a project can switch a policy on for
 itself (in its `.claude/settings.json` `env` block) without touching the
@@ -17,8 +17,12 @@ person's machine-wide file: `CLAUDE_KIT_<NAME IN CAPITALS>`, for example
 `CLAUDE_KIT_GITHUB_REST_ONLY=1`. `1`/`true` turn the policy on and `0`/`false`
 turn it off, in any case; any other value is ignored and the file decides.
 
-On Python 3.11+ the file is parsed with tomllib; older interpreters read the
-top-level `key = true|false` lines and nothing else.
+The file is read the same way on every Python: line by line, each top-level
+`key = true|false` line (a trailing comment allowed) sets that key, a table
+header ends the top level, and every other line is ignored. A full TOML parser
+would reject the whole file over one malformed line and switch off a policy
+another line plainly turns on, and only on the interpreters that ship one; here a
+line that says `name = true` means it on every machine.
 
 Run as a script to print the effective value of each known policy and the file
 it came from: `python3 policies.py [name ...]`.
@@ -26,11 +30,6 @@ it came from: `python3 policies.py [name ...]`.
 import os
 import re
 import sys
-
-try:
-    import tomllib
-except ImportError:  # Python < 3.11
-    tomllib = None
 
 # Every policy the hooks read, with the value it takes when the file says nothing
 DEFAULTS = {
@@ -55,13 +54,7 @@ def policy_file() -> str:
 
 
 def _parse(text: str) -> dict:
-    """Read the top-level booleans of a policy file's text; {} when it is not valid TOML."""
-    if tomllib is not None:
-        try:
-            data = tomllib.loads(text)
-        except Exception:
-            return {}
-        return {k: v for k, v in data.items() if isinstance(v, bool)}
+    """Read the top-level `key = true|false` lines of a policy file's text, ignoring every other line."""
     found = {}
     for line in text.splitlines():
         if TABLE_LINE.match(line):

@@ -76,8 +76,8 @@ def ensure(vault: vaultlib.Vault, qmd: str) -> bool:
     """Create the project's index and its collection over the vault, then embed; True when anything was made."""
     if has_index(vault.root) and covered(qmd, vault):
         return False
-    lock = vault.state / "search.lock"
-    if not vaultlib.take_lock(lock, 3600):
+    held = vaultlib.claim(vault.state / "search.lock")
+    if held is None:
         return False
     try:
         exclude_locally(vault.root, ".qmd/")
@@ -102,7 +102,7 @@ def ensure(vault: vaultlib.Vault, qmd: str) -> bool:
             vaultlib.log(vault, "search.log", f"qmd embed failed: {out.strip()[:300]}")
         return True
     finally:
-        lock.unlink(missing_ok=True)
+        held.release()
 
 
 def refresh(vault: vaultlib.Vault, qmd: str) -> None:

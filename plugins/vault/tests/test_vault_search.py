@@ -19,9 +19,21 @@ import unittest.mock
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
+BIN = Path(__file__).resolve().parent.parent / "bin"
+sys.path.insert(0, str(BIN))
 import vault_search as vs  # noqa: E402
 import vaultlib  # noqa: E402
+
+# A process that takes a lock, says so, and keeps it until its standard input closes.
+HOLDER = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import vaultlib
+from pathlib import Path
+held = vaultlib.claim(Path(sys.argv[2]))
+print("held" if held else "busy", flush=True)
+sys.stdin.read()
+"""
 
 
 class FakeQmd:
@@ -70,6 +82,33 @@ class SearchTests(unittest.TestCase):
         self.assertIn(".qmd/", (self.root / ".git" / "info" / "exclude").read_text().splitlines())
         self.assertEqual(subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"],
                                         capture_output=True, text=True).stdout.count(".qmd"), 0)
+
+    def test_an_index_being_made_is_not_made_twice_and_a_lock_held_after_it_is_left_alone(self) -> None:
+        lock = self.vault.state / "search.lock"
+        held = vaultlib.claim(lock)
+        with unittest.mock.patch.object(vaultlib, "run", FakeQmd()):
+            self.assertFalse(vs.ensure(self.vault, "qmd"))
+        held.release()
+
+        other: list = []
+
+        class ChangesHands(FakeQmd):
+            def __call__(self, args, cwd=None, timeout=120, env=None):
+                if args[1:] == ["embed"]:
+                    lock.unlink()  # this run's lock file is gone, and another process holds a new one
+                    other.append(subprocess.Popen([sys.executable, "-c", HOLDER, str(BIN), str(lock)],
+                                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True))
+                    assert other[0].stdout.readline().strip() == "held"
+                return super().__call__(args, cwd, timeout, env)
+
+        try:
+            with unittest.mock.patch.object(vaultlib, "run", ChangesHands()):
+                self.assertTrue(vs.ensure(self.vault, "qmd"))
+            self.assertTrue(lock.exists(), "the run removed a lock another process holds")
+            self.assertIsNone(vaultlib.claim(lock))
+        finally:
+            for process in other:
+                process.communicate("")
 
     def test_an_index_that_already_covers_the_vault_is_left_alone(self) -> None:
         (self.root / ".qmd").mkdir()

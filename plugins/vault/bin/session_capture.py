@@ -24,7 +24,9 @@ a SessionEnd hook is given seconds. The worker:
    the rebase onto the remote after it, never a stash. A push the remote refuses is retried after a
    fresh fetch and rebase, a few times, with jittered waits. Notes that do not rebase are pushed to a
    `conflict/<handle>/<UTC time>` branch, and the clone steps back to the remote only when nothing in
-   it is uncommitted. How it ended is left in the state directory for the next brief.
+   it is uncommitted. A clone in the middle of a merge, rebase, cherry-pick or revert, with unmerged
+   paths, or not on a branch is neither committed nor pushed: a person finishes what git started.
+   How it ended is left in the state directory for the next brief.
 4. **Refreshes the project's qmd index** (`vault_search.py refresh`).
 
 Where the inbox lives follows `vaultlib`: beside the notes for a vault that is its own repository or
@@ -44,6 +46,7 @@ import json
 import os
 import random
 import re
+import shlex
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -347,7 +350,6 @@ def capture(vault: vaultlib.Vault, session_id: str, lines: list[str], day: str,
 # after; it never stashes, so a stash that would not re-apply can never leave conflict markers for
 # the next commit to publish.
 
-LOCK_STALE = 300
 CAPTURE_WAIT = 600.0
 BRIEF_WAIT = 3.0
 PUSH_ATTEMPTS = 3
@@ -368,27 +370,66 @@ def shown_time(moment: datetime) -> str:
     return moment.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
+def git(vault: vaultlib.Vault, *args: str, timeout: int = 120, env: Optional[dict] = None) -> tuple[int, str]:
+    """Run git in the vault, and only there; stdout and stderr come back together."""
+    return vaultlib.run(["git", "-C", str(vault.path), *args], timeout=timeout, env=vaultlib.git_env(env))
+
+
+def ssh_command(vault: vaultlib.Vault, connect: int) -> Optional[str]:
+    """The ssh command git would run for the vault, made unable to prompt; None to leave git's own.
+
+    The command is the one git picks — `$GIT_SSH_COMMAND`, else `core.sshCommand`, else `$GIT_SSH`,
+    else `ssh` — so a key, a config file or a proxy the person set up still applies. Only OpenSSH
+    (a program named `ssh`) is given `-o BatchMode=yes -o ConnectTimeout=N`, after the person's own
+    options, which ssh lets win; another program is left as it is, bounded by the timeout alone.
+    """
+    command = os.environ.get("GIT_SSH_COMMAND", "").strip()
+    if not command:
+        code, out = vaultlib.git_out(vault.path, "config", "--get", "core.sshCommand", timeout=10)
+        command = out.strip() if code == 0 else ""
+    if not command:
+        program = os.environ.get("GIT_SSH", "").strip()
+        command = shlex.quote(program) if program else "ssh"
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if not words or os.path.basename(words[0]) != "ssh":
+        return None
+    return f"{command} -o BatchMode=yes -o ConnectTimeout={connect}"
+
+
 def net(vault: vaultlib.Vault, *args: str, timeout: int, connect: int = 20) -> tuple[int, str]:
     """Run a git command that talks to the remote, never waiting on a prompt."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0",
-               GIT_SSH_COMMAND=f"ssh -o BatchMode=yes -o ConnectTimeout={connect}")
-    return vaultlib.run(["git", "-C", str(vault.path), *args], timeout=timeout, env=env)
+    env = {"GIT_TERMINAL_PROMPT": "0"}
+    ssh = ssh_command(vault, connect)
+    if ssh is not None:
+        env["GIT_SSH_COMMAND"] = ssh
+    return git(vault, *args, timeout=timeout, env=env)
+
+
+def hold_off(vault: vaultlib.Vault, why: str) -> str:
+    """Leave a clone git is not done with as it is, and say so on the next brief."""
+    return settle(vault, "unfinished", f"[VAULT] not committed or pushed: {why}; the next session end does it")
 
 
 def commit_vault(vault: vaultlib.Vault, session_id: str, wait: float = 0.0, sleep=time.sleep) -> bool:
     """Commit what changed in a vault that is its own repository; never anything else."""
     if vault.mode != "own-repo":
         return False
-    with vaultlib.holding(lock_path(vault), wait, LOCK_STALE, sleep=sleep) as held:
+    with vaultlib.holding(lock_path(vault), wait, sleep=sleep) as held:
         if held is None:
             return False
         code, status = vaultlib.git_out(vault.path, "status", "--porcelain")
         if code != 0 or not status.strip():
             return False
+        why = vaultlib.unfinished(vault.path, vault.rel)
+        if why is not None:
+            hold_off(vault, why)
+            return False
         vaultlib.git_out(vault.path, "add", "-A")
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        code, out = vaultlib.run(["git", "-C", str(vault.path), "commit", "-q", "-m",
-                                  f"session {stamp} ({session_id[:8]})"])
+        code, out = git(vault, "commit", "-q", "-m", f"session {stamp} ({session_id[:8]})")
         if code != 0:
             vaultlib.log(vault, "session-capture.log", f"vault commit failed: {out.strip()[:300]}")
             return False
@@ -462,6 +503,13 @@ def write_state(vault: vaultlib.Vault, state: dict) -> None:
         pass
 
 
+def add_notice(vault: vaultlib.Vault, line: str) -> None:
+    """Put one more line on the next brief, beside whatever the last integration left there."""
+    state = read_state(vault)
+    state["notice"] = "\n".join(filter(None, (state["notice"], line)))
+    write_state(vault, state)
+
+
 def settle(vault: vaultlib.Vault, outcome: str, notice: Optional[str], conflict: Optional[dict] = None) -> str:
     """Record how an integration ended for the next brief, and answer its outcome."""
     state = read_state(vault)
@@ -482,13 +530,12 @@ def free_branch(vault: vaultlib.Vault, base: str) -> str:
     return name
 
 
-def park_conflict(vault: vaultlib.Vault, branch: str, held: vaultlib.HeldLock, now) -> str:
+def park_conflict(vault: vaultlib.Vault, branch: str, now) -> str:
     """Move notes that will not rebase onto a branch of their own on the remote, and step aside."""
     vaultlib.git_out(vault.path, "rebase", "--abort")
     moment = now()
     name = free_branch(vault, f"conflict/{vaultlib.handle(vault.path)}/{moment.strftime('%Y%m%d-%H%M')}")
     vaultlib.git_out(vault.path, "branch", name, "HEAD")
-    held.refresh()
     code, out = net(vault, "push", "--quiet", "origin", f"refs/heads/{name}:refs/heads/{name}", timeout=180)
     when = shown_time(moment)
     if code != 0:
@@ -509,21 +556,22 @@ def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
     """Bring this clone's vault commits onto the remote: fetch, rebase, push, a few times if refused."""
     if vault.mode != "own-repo" or not vault_remote(vault):
         return "no-remote"
-    with vaultlib.holding(lock_path(vault), wait, LOCK_STALE, sleep=sleep) as held:
+    with vaultlib.holding(lock_path(vault), wait, sleep=sleep) as held:
         if held is None:
             vaultlib.log(vault, "session-capture.log", "vault not integrated: another process held the lock")
             return "busy"
+        why = vaultlib.unfinished(vault.path, vault.rel)
+        if why is not None:
+            return hold_off(vault, why)
         branch = current_branch(vault)
         if branch is None:
-            vaultlib.log(vault, "session-capture.log", "vault not integrated: it is not on a branch")
-            return "detached"
+            return hold_off(vault, "the vault is not on a branch")
         if unpushed(vault) == 0:
             return settle(vault, "current", None)
         upstream = f"refs/remotes/origin/{branch}"
         for attempt in range(1, PUSH_ATTEMPTS + 1):
             if attempt > 1:
                 sleep(jitter(1.0, 4.0))
-            held.refresh()
             code, out = net(vault, "fetch", "--quiet", "--prune", "origin", timeout=60)
             when = shown_time(now())
             if code != 0:
@@ -536,17 +584,14 @@ def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
                     return settle(vault, "deferred", f"[VAULT] the remote had new vault commits at {when} while "
                                                      "this clone had uncommitted edits — not rebased; the next "
                                                      "session end integrates them")
-                held.refresh()
-                code, out = vaultlib.run(["git", "-C", str(vault.path), "rebase", "--no-autostash", "--quiet",
-                                          upstream], timeout=180)
+                code, out = git(vault, "rebase", "--no-autostash", "--quiet", upstream, timeout=180)
                 if code != 0:
                     if rebasing(vault):
-                        return park_conflict(vault, branch, held, now)
+                        return park_conflict(vault, branch, now)
                     vaultlib.log(vault, "session-capture.log", f"vault rebase failed: {out.strip()[:300]}")
                     return settle(vault, "unrebased", f"[VAULT] the vault could not be rebased onto its remote "
                                                       f"at {when} — {vault.shown(vault.state)}/session-capture.log "
                                                       "says why")
-            held.refresh()
             code, out = net(vault, "push", "--quiet", "-u", "origin", f"refs/heads/{branch}:refs/heads/{branch}",
                             timeout=180)
             if code == 0:
@@ -582,12 +627,12 @@ def update_vault(vault: vaultlib.Vault, wait: float = BRIEF_WAIT, sleep=time.sle
     """Bring the vault up to date at session start — fetch, then fast-forward or say why not. Never rebases."""
     if vault.mode != "own-repo" or not vault_remote(vault):
         return []
-    with vaultlib.holding(lock_path(vault), wait, LOCK_STALE, sleep=sleep) as held:
+    with vaultlib.holding(lock_path(vault), wait, sleep=sleep) as held:
         if held is None:
             return ["[VAULT] not brought up to date — another session is syncing the vault"]
-        if rebasing(vault):
-            return [f"[VAULT] the vault is in the middle of a rebase — finish it or "
-                    f"git -C \"{vault.rel}\" rebase --abort"]
+        why = vaultlib.unfinished(vault.path, vault.rel)
+        if why is not None:
+            return [f"[VAULT] not brought up to date: {why}"]
         branch = current_branch(vault)
         if branch is None:
             return ["[VAULT] not brought up to date — the vault is not on a branch"]
@@ -679,17 +724,27 @@ def worker(payload_path: Path) -> int:
     transcript = Path(str(payload.get("transcript_path") or ""))
     lines = read_lines(transcript_files(transcript, session_id))
     # Under the lock, so a session start's fast-forward cannot land between reading the inbox and
-    # writing it back — the write would quietly undo the entries the fast-forward brought.
-    with vaultlib.holding(lock_path(vault), CAPTURE_WAIT, LOCK_STALE):
-        try:
-            capture(vault, session_id, lines, datetime.now().strftime("%Y-%m-%d"))
-        except Exception as exc:  # a detached worker has no caller; the log is its only reader
-            vaultlib.log(vault, "session-capture.log", f"inbox capture failed for {session_id}: {exc!r}")
+    # writing it back — the write would quietly undo the entries the fast-forward brought. A lock
+    # that stays taken means the inbox is not written at all, and the next brief says so.
+    filed = True
+    with vaultlib.holding(lock_path(vault), CAPTURE_WAIT) as held:
+        if held is None:
+            filed = False
+            vaultlib.log(vault, "session-capture.log",
+                         f"inbox not written for {session_id}: another process held the vault's lock")
+        else:
+            try:
+                capture(vault, session_id, lines, datetime.now().strftime("%Y-%m-%d"))
+            except Exception as exc:  # a detached worker has no caller; the log is its only reader
+                vaultlib.log(vault, "session-capture.log", f"inbox capture failed for {session_id}: {exc!r}")
     here = Path(__file__).resolve().parent
     vaultlib.run([sys.executable, str(here / "vault_check.py"), "--quiet", "--root", str(vault.root)],
                  cwd=vault.root, timeout=900)
     commit_vault(vault, session_id, wait=CAPTURE_WAIT)
     integrate_vault(vault, wait=CAPTURE_WAIT)
+    if not filed:
+        add_notice(vault, f"[VAULT] session {session_id[:8]} was not checked for the inbox — another process "
+                          f"held the vault's lock; {vault.shown(vault.state)}/session-capture.log says when")
     vaultlib.run([sys.executable, str(here / "vault_search.py"), "refresh", "--root", str(vault.root)],
                  cwd=vault.root, timeout=3600)
     return 0

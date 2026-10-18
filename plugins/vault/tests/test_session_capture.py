@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import date, datetime
 from pathlib import Path
 
@@ -199,6 +200,107 @@ class ProjectTests(unittest.TestCase):
         (self.root / ".claude" / "settings.json").write_text('{"hooks": {"SessionEnd": []}}')
         sc.hook(json.dumps(payload), spawn=lambda args, cwd: spawned.append(args))
         self.assertEqual(len(spawned), 1)
+
+
+class NeverTheProjectTests(unittest.TestCase):
+    """A session end commits and pushes a vault that is a repository of its own — and never the
+    project's repository, a sibling's, or one the environment names."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        empty = self.tmp / "gitconfig"
+        empty.write_text("")
+        self.env = unittest.mock.patch.dict(os.environ, {
+            "CLAUDE_VAULT_STATE": str(self.tmp / "state"), "CLAUDE_VAULT_NO_SPAWN": "1",
+            "GIT_CONFIG_GLOBAL": str(empty), "GIT_CONFIG_NOSYSTEM": "1"})
+        self.env.start()
+        for key in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+            os.environ.pop(key, None)
+
+    def tearDown(self) -> None:
+        self.env.stop()
+
+    def published(self, name: str) -> Path:
+        """A repository with a commit, pushed to a bare remote, holding an untracked secret."""
+        repo = self.tmp / name
+        repo.mkdir()
+        make_repo(repo)
+        commit(repo, "init", "2026-09-01T10:00:00+00:00", "README.txt")
+        remote = self.tmp / f"{name}.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        git(repo, "remote", "add", "origin", str(remote))
+        git(repo, "push", "-q", "-u", "origin", "main")
+        (repo / ".env.local").write_text("SECRET=1\n")
+        return repo
+
+    def end_session(self, root: Path) -> None:
+        payload = self.tmp / "state" / "payload.json"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text(json.dumps({"session_id": SESSION, "cwd": str(root), "transcript_path": "/none.jsonl"}))
+        self.assertEqual(sc.worker(payload), 0)
+
+    def assertUntouched(self, repo: Path) -> None:
+        self.assertEqual(git(repo, "rev-list", "--count", "HEAD").strip(), "1", f"{repo} was committed")
+        self.assertEqual(git(repo, "rev-list", "--count", "origin/main").strip(), "1")
+        remote = self.tmp / f"{repo.name}.git"
+        self.assertEqual(git(remote, "rev-list", "--count", "main").strip(), "1", f"{repo} was pushed")
+        self.assertIn("?? .env.local", git(repo, "status", "--porcelain"))
+
+    def test_a_declaration_naming_the_root_or_a_place_outside_it_commits_nothing(self) -> None:
+        project, sibling = self.published("project"), self.published("sibling")
+        os.symlink(str(sibling), str(project / "linked"))
+        for declared in ("./", ".", "../sibling/", str(sibling) + "/", "linked/"):
+            with self.subTest(declared=declared):
+                (project / "CLAUDE.md").write_text(f"Knowledge-base directory: `{declared}`\n")
+                self.end_session(project)
+                self.assertUntouched(project)
+                self.assertUntouched(sibling)
+
+    def test_a_vault_commit_never_lands_in_the_repository_a_git_hook_handed_down(self) -> None:
+        project = self.published("project")
+        vault_dir = project / "kb"
+        (vault_dir / "Decisions").mkdir(parents=True)
+        (vault_dir / "To DO.md").write_text("## Now\n")
+        make_repo(vault_dir)
+        (project / "CLAUDE.md").write_text("Knowledge-base directory: `kb/`\n")
+        with unittest.mock.patch.dict(os.environ, {"GIT_DIR": str(project / ".git"),
+                                                   "GIT_INDEX_FILE": str(project / ".git" / "index")}):
+            vault = vaultlib.locate(project)
+            self.assertEqual(vault.mode, "own-repo")
+            self.assertTrue(sc.commit_vault(vault, SESSION))
+        self.assertUntouched(project)
+        self.assertEqual(git(vault_dir, "rev-list", "--count", "HEAD").strip(), "1")
+        self.assertIn("To DO.md", git(vault_dir, "ls-files"))
+
+    def test_an_inbox_whose_lock_stays_taken_is_not_written_and_the_brief_says_so(self) -> None:
+        project = self.published("project")
+        vault_dir = project / "kb"
+        (vault_dir / "Decisions").mkdir(parents=True)
+        (vault_dir / "To DO.md").write_text("## Now\n")
+        (project / "CLAUDE.md").write_text("Knowledge-base directory: `kb/`\n")
+        sha = commit(project, "feat: shipped quietly", datetime.now().astimezone().isoformat(), "work.txt")
+        transcript = self.tmp / "session.jsonl"
+        now = datetime.now().astimezone().isoformat()
+        transcript.write_text("\n".join([
+            result("t0", "start", now), use("t1", "Bash", command="git commit -q -m 'feat: shipped quietly'"),
+            result("t1", sha[:9], now)]) + "\n")
+        vault = vaultlib.locate(project)
+        payload = vault.state / "payload.json"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text(json.dumps({"session_id": SESSION, "cwd": str(project),
+                                       "transcript_path": str(transcript)}))
+        inbox = vault.machine_file("Inbox.md")
+        with vaultlib.holding(sc.lock_path(vault)) as held, \
+                unittest.mock.patch.object(sc, "CAPTURE_WAIT", 0.0):
+            self.assertIsNotNone(held)
+            self.assertEqual(sc.worker(payload), 0)
+            self.assertFalse(inbox.exists(), "the inbox was written without the lock")
+        self.assertTrue(any("was not checked for the inbox" in line for line in sc.sync_lines(vault)))
+
+        payload.write_text(json.dumps({"session_id": SESSION, "cwd": str(project),
+                                       "transcript_path": str(transcript)}))
+        self.assertEqual(sc.worker(payload), 0)
+        self.assertIn("feat: shipped quietly", inbox.read_text())
 
 
 class InboxTests(unittest.TestCase):
