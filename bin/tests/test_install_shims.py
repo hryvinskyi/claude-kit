@@ -134,10 +134,36 @@ class InstallShimsTests(unittest.TestCase):
         missing = self.install("--check")
         self.assertEqual(missing.returncode, 1)
         self.assertIn("would write find-vault", missing.stdout)
+        self.assertNotIn("  FAIL", missing.stdout, "a missing shim is work to do, not a refusal")
         self.assertFalse(self.shims.exists(), "a check writes nothing")
 
         self.install()
         self.assertEqual(self.install("--check").returncode, 0)
+
+    def test_check_tells_a_blocked_shim_from_a_missing_one(self) -> None:
+        self.shims.mkdir(parents=True)
+        mine = self.shims / "find-vault"
+        mine.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+
+        checked = self.install("--check")
+
+        self.assertEqual(checked.returncode, 1)
+        fails = [line for line in checked.stdout.splitlines() if line.startswith("  FAIL")]
+        self.assertEqual(fails, [f"  FAIL  {mine} exists and was not written by this script; move it away, "
+                                 "then run this again"])
+        self.assertIn("would write vault-check", checked.stdout)
+
+    def test_uninstall_with_nothing_installed_passes(self) -> None:
+        self.install()
+        self.assertEqual(self.install("--uninstall").returncode, 0)
+
+        again = self.install("--uninstall")
+
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(list(self.shims.iterdir()), [])
+        self.env["SHIM_DIR"] = str(self.tmp / "never-made")
+        self.assertEqual(self.install("--uninstall").returncode, 0)
+        self.assertFalse((self.tmp / "never-made").exists())
 
     def test_a_clone_missing_a_command_is_refused(self) -> None:
         (self.clone / "plugins" / "vault" / "bin" / "vault-search").unlink()
