@@ -19,8 +19,9 @@ import unittest
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent.parent
-SHIMS = ("board-queue", "board-queue-mcp", "find-vault", "vault-check", "vault-capture", "vault-search",
-         "vault-merge")
+QUEUE_SHIMS = ("board-queue", "board-queue-mcp")
+VAULT_SHIMS = ("find-vault", "vault-check", "vault-capture", "vault-search", "vault-merge")
+SHIMS = QUEUE_SHIMS + VAULT_SHIMS
 
 
 def fake_clone(where: Path) -> Path:
@@ -193,6 +194,104 @@ class InstallShimsTests(unittest.TestCase):
 
         self.assertEqual(removed.returncode, 0)
         self.assertEqual(sorted(p.name for p in self.shims.iterdir()), ["find-vault"])
+
+    def test_only_the_shims_of_the_named_plugins_are_written(self) -> None:
+        done = self.install("--plugins", "vault,architecture")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for name in VAULT_SHIMS:
+            self.assertTrue(os.access(self.shims / name, os.X_OK), name)
+        for name in QUEUE_SHIMS:
+            self.assertFalse(os.path.lexists(self.shims / name), name)
+        checked = self.install("--check", "--plugins", "vault,architecture")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertNotIn("would write", checked.stdout)
+
+    def test_a_file_in_the_place_of_a_shim_of_a_plugin_left_out_does_not_refuse_the_run(self) -> None:
+        self.shims.mkdir(parents=True)
+        mine = self.shims / "board-queue"
+        mine.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+
+        done = self.install("--plugins=vault")
+        checked = self.install("--check", "--plugins=vault")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertNotIn("  FAIL", done.stdout + checked.stdout)
+        self.assertEqual(mine.read_text(encoding="utf-8"), "#!/bin/sh\necho mine\n")
+
+    def test_a_shim_written_earlier_for_a_plugin_left_out_stays_as_it_is(self) -> None:
+        self.install()
+        before = {name: ((self.shims / name).read_bytes(), (self.shims / name).stat().st_mtime_ns)
+                  for name in QUEUE_SHIMS}
+        other = fake_clone(self.tmp / "other")
+
+        moved = self.install("--plugins", "vault", clone=other)
+        checked = self.install("--check", "--plugins", "vault", clone=other)
+
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual({name: ((self.shims / name).read_bytes(), (self.shims / name).stat().st_mtime_ns)
+                          for name in QUEUE_SHIMS}, before)
+        self.assertIn(str(other), (self.shims / "find-vault").read_text(encoding="utf-8"))
+        self.assertIn("left %s as it is" % (self.shims / "board-queue"), moved.stdout)
+
+    def test_a_dangling_link_in_a_shims_place_is_left_alone_and_the_run_refuses(self) -> None:
+        self.shims.mkdir(parents=True)
+        link = self.shims / "find-vault"
+        link.symlink_to(self.tmp / "nowhere" / "find-vault")
+
+        refused = self.install()
+        checked = self.install("--check")
+        removed = self.install("--uninstall")
+
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn(f"  FAIL  {link} exists and was not written by this script", refused.stdout)
+        self.assertIn(f"  FAIL  {link} exists and was not written by this script", checked.stdout)
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertIn(f"left {link} alone", removed.stdout)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(self.tmp / "nowhere" / "find-vault"))
+
+    def test_a_link_to_a_shim_elsewhere_is_not_taken_for_one_of_its_own(self) -> None:
+        elsewhere = self.tmp / "elsewhere"
+        self.env["SHIM_DIR"] = str(elsewhere)
+        self.assertEqual(self.install().returncode, 0)
+        del self.env["SHIM_DIR"]
+        self.shims.mkdir(parents=True)
+        link = self.shims / "find-vault"
+        link.symlink_to(elsewhere / "find-vault")
+
+        refused = self.install()
+        removed = self.install("--uninstall")
+
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn(f"  FAIL  {link} exists and was not written by this script", refused.stdout)
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertTrue(link.is_symlink(), "a link the person made is never removed")
+        self.assertTrue((elsewhere / "find-vault").is_file())
+
+    def test_an_unset_home_with_no_shim_directory_named_is_refused(self) -> None:
+        del self.env["HOME"]
+
+        for args in ((), ("--check",), ("--uninstall",)):
+            refused = self.install(*args)
+
+            self.assertEqual(refused.returncode, 2, args)
+            self.assertIn("HOME is not set", refused.stderr, args)
+            self.assertNotIn("unbound variable", refused.stderr, args)
+        self.env["SHIM_DIR"] = str(self.tmp / "named")
+        self.assertEqual(self.install().returncode, 0)
+        self.assertTrue((self.tmp / "named" / "find-vault").is_file())
+
+    def test_every_run_that_finishes_says_so_on_its_last_line(self) -> None:
+        self.assertEqual(self.install("--check").stdout.splitlines()[-1], "RESULT: pending")
+        self.assertEqual(self.install().stdout.splitlines()[-1], "RESULT: current")
+        self.assertEqual(self.install("--check").stdout.splitlines()[-1], "RESULT: current")
+        (self.shims / "find-vault").unlink()
+        (self.shims / "find-vault").write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+        self.assertEqual(self.install("--check").stdout.splitlines()[-1], "RESULT: refused")
+        self.assertEqual(self.install().stdout.splitlines()[-1], "RESULT: refused")
 
 
 if __name__ == "__main__":

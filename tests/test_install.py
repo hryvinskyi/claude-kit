@@ -24,7 +24,9 @@ KIT = Path(__file__).resolve().parent.parent
 FAKES = Path(__file__).resolve().parent / "fakes"
 PLUGINS = ["architecture", "pipeline", "qa", "guards", "vault", "board-queue"]
 STACK_PLUGINS = ["symfony", "magento2"]
-SHIMS = ["board-queue", "board-queue-mcp", "find-vault", "vault-check", "vault-capture", "vault-search", "vault-merge"]
+QUEUE_SHIMS = ["board-queue", "board-queue-mcp"]
+VAULT_SHIMS = ["find-vault", "vault-check", "vault-capture", "vault-search", "vault-merge"]
+SHIMS = QUEUE_SHIMS + VAULT_SHIMS
 
 NPM = """#!/bin/sh
 # npm ci --prefix DIR …: leaves the hidden lockfile a real install writes, and logs the call.
@@ -320,6 +322,110 @@ class InstallTests(unittest.TestCase):
         self.assertIn("was not written by this script", done.stdout)
         self.assertEqual(mine.read_text(encoding="utf-8"), "#!/bin/sh\necho mine\n")
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_shims_of_plugins_left_out_are_not_written(self) -> None:
+        chosen = ("--plugins", "architecture,guards,vault", "--skip-npm")
+
+        done = self.install(*chosen)
+        checked = self.install("--check", *chosen)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for name in VAULT_SHIMS:
+            self.assertTrue(os.access(self.home / ".local" / "bin" / name, os.X_OK), name)
+        for name in QUEUE_SHIMS:
+            self.assertFalse(os.path.lexists(self.home / ".local" / "bin" / name), name)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertIn("RESULT: everything is installed.", checked.stdout)
+
+    def test_a_file_in_the_place_of_a_shim_of_a_plugin_left_out_does_not_stop_the_install(self) -> None:
+        mine = self.home / ".local" / "bin" / "board-queue"
+        mine.parent.mkdir(parents=True)
+        mine.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+
+        done = self.install("--plugins", "architecture,vault", "--skip-npm")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(mine.read_text(encoding="utf-8"), "#!/bin/sh\necho mine\n")
+        self.assertEqual(self.enabled(), ["architecture@claude-kit", "vault@claude-kit"])
+
+    def test_a_shim_written_for_a_plugin_no_longer_chosen_is_left_as_it_is(self) -> None:
+        self.assertEqual(self.install().returncode, 0)
+        queue_shims = {name: (self.home / ".local" / "bin" / name).read_bytes() for name in QUEUE_SHIMS}
+
+        checked = self.install("--check", "--plugins", "architecture,vault", "--skip-npm")
+        done = self.install("--plugins", "architecture,vault", "--skip-npm")
+
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual({name: (self.home / ".local" / "bin" / name).read_bytes() for name in QUEUE_SHIMS},
+                         queue_shims)
+
+    def test_a_dangling_link_in_a_shims_place_is_refused_and_kept(self) -> None:
+        link = self.home / ".local" / "bin" / "find-vault"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(self.tmp / "nowhere")
+
+        checked = self.install("--check")
+        done = self.install()
+
+        self.assertEqual(checked.returncode, 2, checked.stdout)
+        self.assertEqual(done.returncode, 2, done.stdout)
+        self.assertIn("was not written by this script", done.stdout)
+        self.assertEqual(os.readlink(link), str(self.tmp / "nowhere"))
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_dangling_link_at_the_policy_file_is_left_as_it_is(self) -> None:
+        link = self.policy_file()
+        link.parent.mkdir(parents=True)
+        link.symlink_to(self.tmp / "dotfiles" / "policies.toml")
+
+        checked = self.install("--check")
+        done = self.install()
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(link.is_symlink(), "the link was replaced")
+        self.assertEqual(os.readlink(link), str(self.tmp / "dotfiles" / "policies.toml"))
+        self.assertFalse((self.tmp / "dotfiles").exists(), "nothing is written through the link")
+        self.assertNotIn("would write %s" % link, checked.stdout)
+
+    def test_an_unset_home_is_refused_by_a_check_and_by_an_install(self) -> None:
+        env = dict(self.env)
+        del env["HOME"]
+
+        checked = self.install("--check", env=env)
+        done = self.install(env=env)
+
+        for run in (checked, done):
+            self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+            self.assertIn("HOME is not set", run.stderr)
+            self.assertNotIn("unbound variable", run.stdout + run.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_shim_step_that_stops_without_its_report_is_a_refusal_not_work_to_do(self) -> None:
+        crashing = self.clone / "bin" / "install-shims.sh"
+        crashing.write_text("#!/bin/sh\necho 'install-shims.sh: line 9: X: unbound variable' >&2\nexit 1\n",
+                            encoding="utf-8")
+
+        checked = self.install("--check")
+        done = self.install()
+
+        self.assertEqual(checked.returncode, 2, checked.stdout)
+        self.assertIn("unbound variable", checked.stdout)
+        self.assertIn("  FAIL  bin/install-shims.sh stopped before it finished", checked.stdout)
+        self.assertEqual(done.returncode, 2, done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_check_whose_own_step_breaks_is_a_refusal_not_work_to_do(self) -> None:
+        queue = self.clone / "plugins" / "board-queue"
+        (queue / "package-lock.json").write_text('{"packages": []}\n', encoding="utf-8")
+        (queue / "node_modules").mkdir()
+        (queue / "node_modules" / ".package-lock.json").write_text('{"packages": {}}\n', encoding="utf-8")
+
+        checked = self.install("--check")
+
+        self.assertEqual(checked.returncode, 2, checked.stdout + checked.stderr)
+        self.assertIn("RESULT: the installer stopped before it finished", checked.stdout)
+        self.assertNotIn("would run npm ci", checked.stdout)
 
 
 if __name__ == "__main__":
