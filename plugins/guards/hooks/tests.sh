@@ -326,6 +326,15 @@ expect_exit "source gate: a domain directory with ddd.md allowed" 0 \
   "$(gate Write "$TMP/php" "$TMP/t-ddd.jsonl" "$TMP/php/src/Domain/SurveyOptIn.php")" "$P"
 expect_exit "source gate: Api/Data needs ddd.md with no stack registered" 2 \
   "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/Api/Data/SurveyOptIn.php")" "$P"
+# a domain directory is one of the project's own: a directory above the project root never counts
+mkdir -p "$TMP/Model/shop/src/Service" "$TMP/Model/shop/src/Api/Data" "$TMP/Model/shop/src/Model"
+echo '{}' > "$TMP/Model/shop/composer.json"
+expect_exit "source gate: a domain-named directory above the project root needs no ddd.md" 0 \
+  "$(gate Write "$TMP" "$TMP/t-skill-solid.jsonl" "$TMP/Model/shop/src/Service/Cart.php")" "$P"
+expect_exit "source gate: Api/Data inside a project under a domain-named directory needs ddd.md" 2 \
+  "$(gate Write "$TMP" "$TMP/t-skill-solid.jsonl" "$TMP/Model/shop/src/Api/Data/CartInterface.php")" "$P"
+expect_exit "source gate: a domain directory counts when the cwd is inside it" 2 \
+  "$(gate Write "$TMP/Model/shop/src/Model" "$TMP/t-skill-solid.jsonl" "Order.php")" "$P"
 expect_exit "source gate: test file untouched" 0 \
   "$(gate Edit "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/tests/Service/FooTest.php")" "$P"
 expect_exit "source gate: vendor untouched" 0 \
@@ -431,6 +440,14 @@ expect_exit "js gate: a model/ directory needs ddd.md" 2 \
   "$(gate Write "$TMP/js" "$TMP/tj-base.jsonl" "$TMP/js/src/cart/model/cart.js")" "$P"
 expect_exit "js gate: a model/ directory with ddd.md allowed" 0 \
   "$(gate Write "$TMP/js" "$TMP/tj-ddd.jsonl" "$TMP/js/src/cart/model/cart.js")" "$P"
+mkdir -p "$TMP/models/app/src/models"
+echo '{"name":"app"}' > "$TMP/models/app/package.json"
+expect_exit "js gate: a models/ directory above the project root needs no ddd.md" 0 \
+  "$(gate Write "$TMP/models/app" "$TMP/tj-base.jsonl" "$TMP/models/app/src/util.js")" "$P"
+expect_exit "js gate: a models/ directory inside that project needs ddd.md" 2 \
+  "$(gate Write "$TMP/models/app" "$TMP/tj-base.jsonl" "$TMP/models/app/src/models/user.js")" "$P"
+expect_exit "js gate: a domain directory counts when the cwd is inside it" 2 \
+  "$(gate Write "$TMP/models/app/src/models" "$TMP/tj-base.jsonl" "user.js")" "$P"
 expect_exit "js gate: with no stack detected, a PHP host depending on React needs react.md" 2 \
   "$(gate Write "$TMP/host" "$TMP/tj-base.jsonl" "$TMP/host/assets/controllers/coupon_controller.js")" "$P"
 expect_exit "js gate: with no stack detected, a PHP host depending on React with react.md allowed" 0 \
