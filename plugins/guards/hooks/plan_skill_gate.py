@@ -562,7 +562,10 @@ def is_js_source(root: str, cwd: str, path: str) -> bool:
 
 
 def in_domain_dir(path: str, domain_dirs) -> bool:
-    """Report whether the target sits in one of the domain directories (nested ones included)."""
+    """Report whether the target sits in one of the domain directories (nested ones included).
+
+    @param path The target relative to its project root, so a directory above the project never counts.
+    """
     directories = path.split("/")[:-1]
     return bool(domain_dirs & set(directories)) or any("/" in d and d in "/".join(directories) for d in domain_dirs)
 
@@ -580,6 +583,7 @@ def php_source_requirements(detected, registered, path: str) -> set:
 
     @param detected The stacks the target belongs to.
     @param registered Every registered stack: their domain directories apply everywhere.
+    @param path The target relative to its project root.
     """
     required = {f"{PHP_SKILL}/SKILL.md", f"{PHP_SKILL}/solid.md"} | stack_requirements(detected, "php_source")
     domain_dirs = PHP_DOMAIN_DIRS.union(*(stack.php_domain_dirs for stack in registered))
@@ -593,6 +597,7 @@ def js_source_requirements(detected, registered, react: bool, path: str) -> set:
 
     @param detected The stacks hosting the target.
     @param registered Every registered stack: their domain directories apply everywhere.
+    @param path The target relative to its project root.
     """
     required = {f"{JS_SKILL}/SKILL.md", f"{JS_SKILL}/solid.md", f"{JS_SKILL}/javascript.md"}
     required |= stack_requirements(detected, "js_source")
@@ -684,7 +689,8 @@ def missing_for(cwd: str, path: str, transcript_path: str, text=None):
         if root is None or not is_php_source(root, cwd, path):
             return None  # not a PHP project, or not its own source — the rubric does not apply
         detected = stacks_of(root, cwd, path, registered)
-        what, required = "PHP source", php_source_requirements(detected, registered, path)
+        own = "/".join(own_parts(root, cwd, path))
+        what, required = "PHP source", php_source_requirements(detected, registered, own)
     else:
         root = nearest_root(cwd, path, ("package.json", "tsconfig.json", "composer.json"))
         if root is None or not is_js_source(root, cwd, path):
@@ -693,7 +699,8 @@ def missing_for(cwd: str, path: str, transcript_path: str, text=None):
         detected = stacks_of(php_root, cwd, path, registered) if php_root else ()
         react = (extension in JSX_EXTENSIONS or tsconfig_sets_jsx(cwd, path, root)
                  or (not detected and depends_on_react(cwd, path, root)))
-        what, required = "JavaScript/TypeScript source", js_source_requirements(detected, registered, react, path)
+        own = "/".join(own_parts(root, cwd, path))
+        what, required = "JavaScript/TypeScript source", js_source_requirements(detected, registered, react, own)
     if not required:
         return None
     owners = skill_owners(registered)
