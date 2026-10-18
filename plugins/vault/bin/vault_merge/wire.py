@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, TextIO, Tuple
 
+import vaultlib
+
 DRIVERS = ("keyed", "stamps", "generated")
 BEGIN_KEY = "vault-merge.generatedBegin"
 END_KEY = "vault-merge.generatedEnd"
@@ -117,15 +119,6 @@ def toplevel(directory: Path) -> Tuple[Optional[Path], str]:
     if top != directory.resolve():
         return None, "%s is not the top of a git repository (that is %s)" % (directory, top)
     return top, ""
-
-
-def operation_in_progress(vault: Vault) -> Optional[str]:
-    """The merge or rebase a clone is in the middle of, if any."""
-    git_dir = Path(vault.run("rev-parse", "--absolute-git-dir").stdout.strip())
-    for name, what in (("MERGE_HEAD", "a merge"), ("rebase-merge", "a rebase"), ("rebase-apply", "a rebase")):
-        if (git_dir / name).exists():
-            return what
-    return None
 
 
 def assignments(repo: Path, paths: Sequence[str]) -> Dict[str, str]:
@@ -210,11 +203,11 @@ def open_vault(options: argparse.Namespace, report: Report) -> Optional[Vault]:
         return None
     vault = Vault(top)
     report.ok("%s is a git repository of its own" % top)
-    busy = operation_in_progress(vault)
+    busy = vaultlib.unfinished(top, str(top))
     if busy:
-        report.bad("%s is in progress in the vault; finish it first" % busy)
+        report.bad(busy)
         return None
-    report.ok("no merge or rebase in progress")
+    report.ok("nothing in progress in the vault, and it is on a branch")
     return vault
 
 

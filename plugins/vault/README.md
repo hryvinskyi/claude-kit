@@ -105,7 +105,9 @@ vault-merge unwire --vault <clone>              # removes the drivers' configura
 `wire` registers `merge.vault-<driver>.name` and `.driver` for the three drivers, running the
 `vault-merge` shim (`--command` names another), and the two region markers (Python regular
 expressions). It first reads back every tracked file the attributes give to the keyed driver and
-refuses when one would not survive, and it refuses a clone in the middle of a merge or rebase.
+refuses when one would not survive, and it refuses a clone git is not done with — a merge, rebase,
+cherry-pick or revert waiting for a person, unmerged files, a head on no branch — by the same check
+the session end makes before it commits.
 `--attributes FILE` names the `.gitattributes` the vault should carry: an identical one is left
 alone, a missing one is written and committed with `--commit` (nothing is pushed) and otherwise
 reported, a different one is refused with the lines to fold in. `--expect PATH=DRIVER` checks what

@@ -244,6 +244,34 @@ def locate(cwd: Union[str, Path, None] = None) -> Optional[Vault]:
     return Vault(root=root, path=path, mode=vault_mode(root, path))
 
 
+# What git leaves in the repository directory while an operation waits for a person, and how to
+# step out of it.
+UNFINISHED = (("rebase-merge", "a rebase", "rebase --abort"), ("rebase-apply", "a rebase", "rebase --abort"),
+              ("MERGE_HEAD", "a merge", "merge --abort"), ("CHERRY_PICK_HEAD", "a cherry-pick", "cherry-pick --abort"),
+              ("REVERT_HEAD", "a revert", "revert --abort"))
+
+
+def unfinished(clone: Path, shown: str) -> Optional[str]:
+    """Why a vault's clone must not be committed or rewired now, said with the way out; None when it may.
+
+    A merge, rebase, cherry-pick or revert waiting for a person, unmerged files, or a head on no
+    branch. `shown` is how the clone is named in the command the reason suggests.
+    """
+    for name, what, abort in UNFINISHED:
+        code, out = git_out(clone, "rev-parse", "--git-path", name, timeout=20)
+        if code != 0 or not out.strip():
+            return "git cannot read the vault's repository"
+        if (clone / out.strip()).exists():
+            return f"the vault is in the middle of {what} — finish it or git -C \"{shown}\" {abort}"
+    code, out = git_out(clone, "ls-files", "--unmerged", timeout=20)
+    if code != 0 or out.strip():
+        return "the vault has unmerged files — resolve them and commit"
+    code, out = git_out(clone, "symbolic-ref", "--quiet", "--short", "HEAD", timeout=20)
+    if code != 0 or not out.strip():
+        return f"the vault is not on a branch — git -C \"{shown}\" switch <branch>"
+    return None
+
+
 def project_owns(root: Path, event: str) -> bool:
     """Whether the project ships its own hook for an event, which the global tools then leave to it."""
     try:

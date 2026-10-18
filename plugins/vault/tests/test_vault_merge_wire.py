@@ -152,7 +152,35 @@ class WireTests(merge_support.IsolatedGitTestCase):
         done = self.run_wire(*self.wire_args())
 
         self.assertEqual(done.returncode, 2, done.stdout)
-        self.assertIn("a merge is in progress", done.stdout)
+        self.assertIn("in the middle of a merge", done.stdout)
+
+    def conflicting(self) -> str:
+        """A commit on a side branch whose row edit conflicts with the one now on main."""
+        git(self.vault, self.env, "checkout", "-q", "-b", "side")
+        (self.vault / "To DO.md").write_text(BOARD.replace("\n", " (side)\n", 1), encoding="utf-8")
+        git(self.vault, self.env, "commit", "-q", "-am", "side")
+        side = self.head()
+        git(self.vault, self.env, "checkout", "-q", "main")
+        (self.vault / "To DO.md").write_text(BOARD.replace("\n", " (main)\n", 1), encoding="utf-8")
+        git(self.vault, self.env, "commit", "-q", "-am", "main")
+        return side
+
+    def test_a_vault_in_the_middle_of_a_cherry_pick_or_a_revert_is_refused(self) -> None:
+        side = self.conflicting()
+        self.assertNotEqual(git(self.vault, self.env, "cherry-pick", side, check=False).returncode, 0)
+        done = self.run_wire(*self.wire_args())
+        self.assertEqual(done.returncode, 2, done.stdout)
+        self.assertIn("in the middle of a cherry-pick", done.stdout)
+        self.assertNotIn("merge.vault-keyed", self.local_config())
+        git(self.vault, self.env, "cherry-pick", "--abort")
+
+        (self.vault / "To DO.md").write_text(BOARD.replace("\n", " (again)\n", 1), encoding="utf-8")
+        git(self.vault, self.env, "commit", "-q", "-am", "again")
+        self.assertNotEqual(git(self.vault, self.env, "revert", "--no-edit", "HEAD~1", check=False).returncode, 0)
+        done = self.run_wire(*self.wire_args())
+        self.assertEqual(done.returncode, 2, done.stdout)
+        self.assertIn("in the middle of a revert", done.stdout)
+        self.assertNotIn("merge.vault-keyed", self.local_config())
 
     def test_a_directory_below_the_top_is_refused(self) -> None:
         done = subprocess.run([str(COMMAND), "wire", "--vault", str(self.vault / "Modules"), *self.wire_args()],

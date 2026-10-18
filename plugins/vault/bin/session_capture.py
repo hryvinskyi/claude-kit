@@ -408,29 +408,6 @@ def net(vault: vaultlib.Vault, *args: str, timeout: int, connect: int = 20) -> t
     return git(vault, *args, timeout=timeout, env=env)
 
 
-# What git leaves in the repository directory while an operation waits for a person, and how to
-# step out of it.
-UNFINISHED = (("rebase-merge", "a rebase", "rebase --abort"), ("rebase-apply", "a rebase", "rebase --abort"),
-              ("MERGE_HEAD", "a merge", "merge --abort"), ("CHERRY_PICK_HEAD", "a cherry-pick", "cherry-pick --abort"),
-              ("REVERT_HEAD", "a revert", "revert --abort"))
-
-
-def unfinished(vault: vaultlib.Vault) -> Optional[str]:
-    """Why the vault's clone must not be committed or pushed now, as the brief says it; None when it may."""
-    for name, what, abort in UNFINISHED:
-        code, out = vaultlib.git_out(vault.path, "rev-parse", "--git-path", name, timeout=20)
-        if code != 0 or not out.strip():
-            return "git cannot read the vault's repository"
-        if (vault.path / out.strip()).exists():
-            return f"the vault is in the middle of {what} — finish it or git -C \"{vault.rel}\" {abort}"
-    code, out = vaultlib.git_out(vault.path, "ls-files", "--unmerged", timeout=20)
-    if code != 0 or out.strip():
-        return "the vault has unmerged files — resolve them and commit"
-    if current_branch(vault) is None:
-        return f"the vault is not on a branch — git -C \"{vault.rel}\" switch <branch>"
-    return None
-
-
 def hold_off(vault: vaultlib.Vault, why: str) -> str:
     """Leave a clone git is not done with as it is, and say so on the next brief."""
     return settle(vault, "unfinished", f"[VAULT] not committed or pushed: {why}; the next session end does it")
@@ -446,7 +423,7 @@ def commit_vault(vault: vaultlib.Vault, session_id: str, wait: float = 0.0, slee
         code, status = vaultlib.git_out(vault.path, "status", "--porcelain")
         if code != 0 or not status.strip():
             return False
-        why = unfinished(vault)
+        why = vaultlib.unfinished(vault.path, vault.rel)
         if why is not None:
             hold_off(vault, why)
             return False
@@ -583,7 +560,7 @@ def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
         if held is None:
             vaultlib.log(vault, "session-capture.log", "vault not integrated: another process held the lock")
             return "busy"
-        why = unfinished(vault)
+        why = vaultlib.unfinished(vault.path, vault.rel)
         if why is not None:
             return hold_off(vault, why)
         branch = current_branch(vault)
@@ -653,7 +630,7 @@ def update_vault(vault: vaultlib.Vault, wait: float = BRIEF_WAIT, sleep=time.sle
     with vaultlib.holding(lock_path(vault), wait, sleep=sleep) as held:
         if held is None:
             return ["[VAULT] not brought up to date — another session is syncing the vault"]
-        why = unfinished(vault)
+        why = vaultlib.unfinished(vault.path, vault.rel)
         if why is not None:
             return [f"[VAULT] not brought up to date: {why}"]
         branch = current_branch(vault)
