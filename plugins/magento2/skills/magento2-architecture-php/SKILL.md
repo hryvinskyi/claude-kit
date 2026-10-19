@@ -62,7 +62,7 @@ A `<preference>` binds a contract to an implementation — the inversion the cor
 ```
 Always **inject the interface** by constructor; let Magento's compiled DI resolve it:
 ```php
-final class PlaceOrder implements PlaceOrderInterface   // Api/ port
+class PlaceOrder implements PlaceOrderInterface   // Api/ port
 {
     public function __construct(
         private readonly OrderRepositoryInterface $orders,     // contract, not the Model
@@ -71,6 +71,9 @@ final class PlaceOrder implements PlaceOrderInterface   // Api/ port
 }
 ```
 The generated `…Factory` is the factory the no-`new` rule asks for (`solid.md` §DIP): a new instance is `$this->orderFactory->create()`, never `new Order()` and never a static named constructor. A value object gets one the same way: Magento generates a `…Factory` for any class a constructor asks for, so nobody writes a factory class by hand. Publish a `…FactoryInterface` of its own, bound by `<preference>` to the generated factory, only when other modules must hold it.
+
+### No `final` classes
+Magento classes are never `final`, and the core skill's `final` in its examples does not carry over. Magento builds every plugin as a generated `…\Interceptor` that extends the intercepted class, and every lazy `…\Proxy` the same way: a `final` class cannot take a plugin or a proxy — the generated subclass is a fatal error — so it closes the extension point to every module that would add one. Encapsulation comes from `private` members and `private readonly` dependencies instead; a `final` in new or edited Magento code is a review finding.
 
 ### The `ObjectManager` anti-pattern (DIP + SRP violation)
 Never call `ObjectManager::get()`/`create()` in business code. It hides dependencies, defeats constructor injection, breaks testability, and is a hard review-fail. Allowed only in a few framework corners (factories you can't inject, static test setup). If you see it in a Block, Model, or service — that is debt to remediate.
@@ -92,7 +95,7 @@ namespace Acme\Shipping\Model;
 
 use Acme\Shipping\Api\ShippingRateInterface;   // supports()/cost()
 
-final class ShippingCostCalculator
+class ShippingCostCalculator
 {
     /** @param ShippingRateInterface[] $rates */
     public function __construct(private readonly array $rates) {}
@@ -136,7 +139,7 @@ This "pool via di.xml array" is the idiomatic Magento OCP pattern (the core uses
 
 Presentation logic belongs in a **ViewModel** (`Magento\Framework\View\Element\Block\ArgumentInterface`), injected into the template — not a fat Block:
 ```php
-final class OrderSummary implements ArgumentInterface
+class OrderSummary implements ArgumentInterface
 {
     public function __construct(private readonly OrderRepositoryInterface $orders) {}
     public function totalFor(int $orderId): string { /* format for view */ }
@@ -175,6 +178,7 @@ The script itself — its structure, how the page loads it, what it may assume �
 ## Magento 2 review checklist
 - [ ] Consumers depend on `Api/` + `Api/Data/`, never on concrete `Model\`.
 - [ ] No `ObjectManager` in business code; everything is constructor-injected.
+- [ ] No `final` class — plugins and proxies are generated subclasses (§2).
 - [ ] No `switch`/`elseif` behavioral dispatch — variants are a `di.xml`-injected strategy pool.
 - [ ] `around` plugins are justified (not used where an `after` plugin or injected strategy would do); no plugin silently breaks a method's contract.
 - [ ] No business logic in controllers, Blocks, `.phtml`, or fat Observers; ViewModels handle view logic.
@@ -260,6 +264,7 @@ Read with the core skill's `references/implementer-checklist.md`.
 - Inner code names no `Magento\Framework` class and no `ObjectManager`.
 - What crosses a boundary: `Api/` + `Api/Data/` contracts, never `AbstractModel`s. Wiring is a `di.xml` preference or plugin; a class that is built but never wired ships nothing, so a test resolves it through the real container.
 - Factories: Magento generates `…Factory`, whose `create()` asks the ObjectManager; nobody writes one by hand. The composition root is Magento's bootstrap.
+- No class is `final`: Magento's plugins and proxies are generated subclasses of it (§2).
 - Declared dependencies are the `module.xml` sequence and the composer require; a neighbour's name appears in neither the code nor the wiring unless it is declared there.
 - The browser seam: the ViewModel builds the config, the template prints it escaped and asks the renderer for the asset (§8). JS/TS source is written against `architecture:clean-architecture-js` and `magento2:magento2-architecture-frontend`.
 
