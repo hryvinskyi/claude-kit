@@ -15,6 +15,7 @@ const IMPORT_LAST_RUN = 'import.lastRun';
 /** How many items were open at the last import that said it was complete. */
 export const IMPORT_LAST_COMPLETE_OPEN = 'import.lastCompleteOpen';
 const SYNC_REFUSED = 'sync.refused';
+const FORGE_LAST_RUN = 'forge.lastRun';
 
 const Moment = z.string().datetime({ offset: true });
 
@@ -70,6 +71,61 @@ const ImportRunSchema = z.object({
 });
 
 export type ImportRun = z.infer<typeof ImportRunSchema>;
+
+const Count = z.number().int().nonnegative();
+
+const ForgeRepositoryRunSchema = z.object({
+  repo: z.string(),
+  /** How far its listing of pull requests has read; null before the first listing. */
+  cursor: Moment.nullable(),
+  /** Whether this pass started its listing from now, taking in only the pull requests open at the moment. */
+  seeded: z.boolean(),
+  /** Pull requests read in the listing's window. */
+  listed: Count,
+  /** Whether the coordination server lists this repository; one it does not gets no status and no footprint. */
+  listedByServer: z.boolean(),
+  /** Merges and closes reported. */
+  merged: Count,
+  closed: Count,
+  /** Merges reported without their files, because those could not be read. */
+  mergesWithoutFiles: Count,
+  /** Reports the server refused; each one is in the log, and none is sent again by the listing. */
+  refusedReports: Count,
+  /** Reports of whether a pull request merges cleanly. */
+  mergeability: Count,
+  statuses: Count,
+  /** Statuses taken back because the repository, the context or the author no longer called for one. */
+  statusesWithdrawn: Count,
+  /** Statuses left for the next pass because this pass, or the hour, wrote as many as it may. */
+  statusesDeferred: Count,
+  footprints: Count,
+  /** Claimed branches the forge no longer has; nothing was sent for them. */
+  branchesGone: Count,
+  holdsReleased: Count,
+  /** Requests for one thing that failed; each one is in the log, and the pass went on. */
+  failures: Count,
+  /** Why the listing did not read this pass, when it did not. */
+  listingError: z.string().nullable(),
+  /** Why this repository's jobs ended early, when they did: GitHub did not answer. */
+  stoppedBecause: z.string().nullable(),
+});
+
+const ForgeRunSchema = z.object({
+  at: Moment,
+  /** Requests made to GitHub, and how many of them answered "unchanged". */
+  requests: Count,
+  notModified: Count,
+  repos: z.array(ForgeRepositoryRunSchema),
+  /** Why the pass stopped short, when it did: a limiter's refusal, an unreachable server, its time or allowance. */
+  stoppedBecause: z.string().nullable(),
+  /** Why the pass did not start at all, when it did not: this worker is not where the jobs may run. */
+  refused: z.string().nullable(),
+  /** Rows the pass forgot because no pass needs them any more. */
+  pruned: z.object({ statuses: Count, pulls: Count }),
+});
+
+export type ForgeRepositoryRun = z.infer<typeof ForgeRepositoryRunSchema>;
+export type ForgeRun = z.infer<typeof ForgeRunSchema>;
 
 const RefusalSchema = z.object({ at: Moment, reason: z.string() });
 
@@ -136,6 +192,14 @@ export async function readImportRun(repository: ActionRepository): Promise<Impor
 
 export async function writeImportRun(repository: ActionRepository, run: ImportRun): Promise<void> {
   await repository.setMeta(IMPORT_LAST_RUN, JSON.stringify(run));
+}
+
+export async function readForgeRun(repository: ActionRepository): Promise<ForgeRun | null> {
+  return readJson(repository, FORGE_LAST_RUN, ForgeRunSchema);
+}
+
+export async function writeForgeRun(repository: ActionRepository, run: ForgeRun): Promise<void> {
+  await repository.setMeta(FORGE_LAST_RUN, JSON.stringify(run));
 }
 
 /** When an import was last started, finished or not; it is what holds the cadence. */

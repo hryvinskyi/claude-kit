@@ -152,6 +152,15 @@ export class TransientFailure extends BoardQueueError {
 }
 
 /**
+ * The other side did not answer at all: the network failed, the deadline passed,
+ * or it answered with a fault of its own (a 5xx). It may well work next time, as
+ * any transient failure may; it is told apart from a refusal of one request — a
+ * 4xx, an answer of the wrong shape — because a caller that sends many requests
+ * stops sending them when nobody answers, and goes on past one that was refused.
+ */
+export class NoAnswer extends TransientFailure {}
+
+/**
  * The credential was refused, and minting a fresh one did not help either.
  *
  * It is kept apart from the retryable failures on purpose: nothing this system

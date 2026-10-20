@@ -37,6 +37,7 @@
       "status": { "claimed": "In progress", "released": "Todo", "review": "In review" },
       "assignees": true
     },
-    "importer": { "enabled": false, "modules": { "Checkout": ["checkout"] } }
+    "importer": { "enabled": false, "modules": { "Checkout": ["checkout"] } },
+    "forge": { "enabled": false }
   }
 }

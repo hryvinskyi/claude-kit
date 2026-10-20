@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 export const READER_GENERATION = 1;
 
 /** The layout this version writes; it only ever grows, and older readers never look at it. */
-export const LAYOUT_REVISION = 2;
+export const LAYOUT_REVISION = 3;
 
 const READER_GENERATION_KEY = 'schema_version';
 const LAYOUT_REVISION_KEY = 'layout_revision';
@@ -58,6 +58,53 @@ CREATE TABLE IF NOT EXISTS import_fetches (
   fetched_at INTEGER NOT NULL,
   issue_updated_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS forge_repos (
+  repo TEXT PRIMARY KEY,
+  cursor_at INTEGER,
+  listing_etag TEXT,
+  default_branch TEXT,
+  default_branch_etag TEXT
+);
+CREATE TABLE IF NOT EXISTS forge_pulls (
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  open INTEGER NOT NULL,
+  reported INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  head_sha TEXT NOT NULL,
+  record TEXT NOT NULL,
+  PRIMARY KEY (repo, number)
+);
+CREATE INDEX IF NOT EXISTS forge_pulls_open ON forge_pulls (repo, open, number);
+CREATE INDEX IF NOT EXISTS forge_pulls_ended ON forge_pulls (open, reported, updated_at);
+CREATE INDEX IF NOT EXISTS forge_pulls_heads ON forge_pulls (repo, head_sha, open);
+CREATE TABLE IF NOT EXISTS forge_statuses (
+  repo TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  context TEXT NOT NULL,
+  state TEXT NOT NULL,
+  description TEXT NOT NULL,
+  written_at INTEGER NOT NULL,
+  PRIMARY KEY (repo, sha, context)
+);
+CREATE INDEX IF NOT EXISTS forge_statuses_written ON forge_statuses (written_at);
+CREATE TABLE IF NOT EXISTS forge_status_writes (
+  written_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS forge_status_writes_at ON forge_status_writes (written_at);
+CREATE TABLE IF NOT EXISTS forge_commits (
+  sha TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  full_sha TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS forge_measures (
+  repo TEXT NOT NULL,
+  base TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  etag TEXT,
+  measure TEXT NOT NULL,
+  PRIMARY KEY (repo, base, branch)
+);
 `;
 
 /** One change of layout, and the revision a file has once it is applied. */
@@ -70,6 +117,10 @@ type Step = {
  * Every change of layout since the first, oldest first. Each one keeps the file
  * readable by the first generation of readers: it adds what those readers never
  * select, and stores nothing in a column they do select that they cannot read.
+ *
+ * A layout that only adds tables needs no step: the tables are in the base schema,
+ * which runs over every file whose layout is behind, and no older reader ever
+ * names them.
  */
 const STEPS: readonly Step[] = [
   {

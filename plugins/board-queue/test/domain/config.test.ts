@@ -122,4 +122,31 @@ describe('keeping in step with a coordination server', () => {
     assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, importer: { everyMinutes: 5 } } })
       .length > 0);
   });
+
+  it('keeps the forge jobs off unless the configuration turns them on, paced a second apart', () => {
+    const parsed = ConfigSchema.parse({ boards: [ORG], fields: ['Status'], dibs });
+    assert.deepEqual(parsed.dibs?.forge, {
+      enabled: false,
+      paceMs: 1000,
+      overlapMinutes: 10,
+      minRemaining: 500,
+      maxStatusWritesPerPass: 20,
+      maxStatusWritesPerHour: 300,
+      maxPassMinutes: 4,
+      allowPersonalToken: false,
+    });
+  });
+
+  it('refuses forge requests closer than a second apart, a pass the tick lock would outlive, and a key it does not know', () => {
+    for (const forge of [
+      { paceMs: 500 },
+      { maxPassMinutes: 30 },
+      { maxStatusWritesPerPass: 0 },
+      { maxStatusWritesPerPass: 36 },
+      { maxStatusWritesPerHour: 0 },
+      { pace: 1000 },
+    ]) {
+      assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, forge } }).length > 0, JSON.stringify(forge));
+    }
+  });
 });

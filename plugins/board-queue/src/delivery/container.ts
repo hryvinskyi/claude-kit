@@ -15,6 +15,8 @@ import { RetryAction } from '../application/retry-action.ts';
 import { ImportReadyWork } from '../application/import-ready-work.ts';
 import { LimiterWait } from '../application/limiter-wait.ts';
 import { MirrorClaims } from '../application/mirror-claims.ts';
+import { ForgePass } from '../application/forge-pass.ts';
+import type { Forge, ForgeCoordination, ForgeIdentity } from '../application/forge-ports.ts';
 import { RunTick } from '../application/run-tick.ts';
 import type { SyncJobs } from '../application/run-tick.ts';
 import { SyncOwner } from '../application/sync-owner.ts';
@@ -24,11 +26,15 @@ import { BoardDirectory } from '../domain/board-directory.ts';
 import type { BoardKey, BoardPlacement } from '../domain/board-directory.ts';
 import type { IssueRef } from '../domain/issue-ref.ts';
 import type { Config } from '../domain/config.ts';
+import { RefusedByRule } from '../domain/errors.ts';
 import { defaultKindRegistry } from '../domain/kinds/default-kinds.ts';
 import type { KindRegistry } from '../domain/kinds/registry.ts';
 import type { SyncConfig } from '../domain/sync-config.ts';
 import { syncIsOn } from '../domain/sync-config.ts';
 import { DibsHttpClient, tokenFromEnvironment } from '../infrastructure/dibs-http.ts';
+import { DibsForgeClient } from '../infrastructure/dibs-forge-http.ts';
+import { GitHubRestForge } from '../infrastructure/github-rest-forge.ts';
+import { SqliteForgeLedger } from '../infrastructure/sqlite-forge-ledger.ts';
 import { GhCliIdentity } from '../infrastructure/gh-cli-identity.ts';
 import { GitHubRestDependencies } from '../infrastructure/github-rest-dependencies.ts';
 import { SqliteDependencyCache } from '../infrastructure/sqlite-dependency-cache.ts';
@@ -62,6 +68,12 @@ export type ContainerOverrides = {
   dependencies?: DependencyReader;
   /** Stands in for the login this machine's GitHub command line tool is signed in as. */
   identity?: LocalIdentity;
+  /** Stands in for GitHub's pull requests, branches, workflow runs and commit statuses. */
+  forge?: Forge;
+  /** Stands in for the coordination server, as the forge jobs reach it. */
+  forgeCoordination?: ForgeCoordination;
+  /** Stands in for whose credential each repository's forge calls go out under. */
+  forgeIdentity?: ForgeIdentity;
 };
 
 export type BuildContainerOptions = {
@@ -181,7 +193,16 @@ export function buildContainer(options: BuildContainerOptions): Container {
     overrides,
     stateDir,
     closers,
-    dependencyHttp: memoised((ref) => directory.placementOf(ref), httpFor),
+    dependencyHttp: memoised((ref: IssueRef) => directory.placementOf(ref), httpFor),
+    forgeHttp: memoised((repo: string) => placementOfRepository(directory, repo), (placement) =>
+      new GitHubHttp({
+        tokens: overrides.tokens ?? credentials.appFor(placement.board) ?? credentials.for(placement.board),
+        logger,
+        ledger,
+      })),
+    forgeIdentity: overrides.forgeIdentity ?? {
+      usesAppIdentity: (repo) => credentials.appFor(placementOfRepository(directory, repo).board) !== null,
+    },
   });
 
   return {
@@ -243,6 +264,14 @@ type SyncWiring = {
   closers: (() => void)[];
   /** The REST transport an issue's dependency lists are read through: that of the board that carries it. */
   dependencyHttp: (ref: IssueRef) => GitHubHttp;
+  /**
+   * The REST transport the forge jobs reach a repository through: the App's own
+   * credential for the account of the board that carries it, with no fallback,
+   * where the deployment names an App; the board's usual chain otherwise.
+   */
+  forgeHttp: (repo: string) => GitHubHttp;
+  /** Whose credential each repository's forge calls go out under. */
+  forgeIdentity: ForgeIdentity;
 };
 
 /**
@@ -301,17 +330,50 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
     });
     jobs.importer = () => importer.execute();
   }
+  if (sync.forge.enabled) {
+    const ledger = new SqliteForgeLedger(dbPath(wiring.stateDir));
+    wiring.closers.push(() => {
+      ledger.close();
+    });
+    const pass = new ForgePass({
+      forge: overrides.forge ?? new GitHubRestForge(wiring.forgeHttp),
+      identity: wiring.forgeIdentity,
+      coordination: overrides.forgeCoordination ?? new DibsForgeClient({
+        server: sync.server,
+        token: tokenFromEnvironment(process.env, sync.tokenEnv),
+        logger,
+      }),
+      ledger,
+      repository,
+      wait: new LimiterWait({ repository, policy: wiring.policy, logger }),
+      sync,
+      settings: sync.forge,
+      clock,
+      sleeper: wiring.sleeper,
+      logger,
+    });
+    jobs.forge = () => pass.execute();
+  }
   return jobs;
 }
 
-/** One transport per board, built the first time an issue of that board is asked about. */
-function memoised(
-  placementOf: (ref: IssueRef) => BoardPlacement,
+/** The board that carries a repository; the configuration refuses a repository kept in step that none carries. */
+function placementOfRepository(directory: BoardDirectory, repo: string): BoardPlacement {
+  const placement = directory.find(repo);
+  if (placement === null) {
+    throw new RefusedByRule(`${repo} is carried by no configured board`);
+  }
+  return placement;
+}
+
+/** One transport per board, built the first time something of that board is asked about. */
+function memoised<K>(
+  placementOf: (key: K) => BoardPlacement,
   build: (placement: BoardPlacement) => GitHubHttp,
-): (ref: IssueRef) => GitHubHttp {
+): (key: K) => GitHubHttp {
   const built = new Map<BoardKey, GitHubHttp>();
-  return (ref) => {
-    const placement = placementOf(ref);
+  return (key) => {
+    const placement = placementOf(key);
     const held = built.get(placement.key) ?? build(placement);
     built.set(placement.key, held);
     return held;

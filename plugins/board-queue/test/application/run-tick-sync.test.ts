@@ -155,6 +155,36 @@ describe('a tick that keeps the board in step', () => {
     assert.match(mirrored.error ?? '', /could not be reached/);
   });
 
+  it('runs the forge pass after the queue is drained, under the lock, and not while another tick holds it', async () => {
+    const fixture = tickFixture({ items: [seedItem(TWELVE, 'item-12', {})], issues: [{ ref: TWELVE }] });
+    await fixture.file({ id: 'mine', payload: setFields(12, { severity: 'S2' }) });
+    const order: string[] = [];
+    const forge = async () => {
+      order.push(`forge after ${String((await fixture.repository.counts()).done)} done`);
+      return { skipped: 'nothing to do' };
+    };
+    const sync: SyncJobs = {
+      owner: new SyncOwner({ identity: identity('alice'), sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+      forge,
+    };
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      sync,
+    });
+
+    const report = await tick.run();
+    fixture.repository.pretendAnotherTickHolds = true;
+    const locked = await tick.run();
+
+    assert.deepEqual(order, ['forge after 1 done']);
+    assert.deepEqual(report.sync?.forge, { skipped: 'nothing to do' });
+    assert.deepEqual(locked.sync?.forge, { skipped: 'the tick did not get to drain the queue, so nothing is read' });
+  });
+
   it('does not run the mirror while another tick holds the lock', async () => {
     const fixture = tickFixture();
     fixture.repository.pretendAnotherTickHolds = true;

@@ -46,6 +46,24 @@ describe('reading the coordination server\'s log', () => {
     });
   });
 
+  it('reads a pull request dropped from a claim, or merged and set aside, as no move of the claim', async () => {
+    const { dibs } = client([{
+      body: {
+        events: [
+          { id: 6, at: '2026-03-02T09:00:00Z', kind: 'pr_dropped', payload: { item: 12, member: 7, pr: 'acme/api#3' },
+            members: { 7: 'alice' } },
+          { id: 7, at: '2026-03-02T09:01:00Z', kind: 'pr_merged', payload: { item: 12, member: 7, pr: 'acme/api#4' },
+            members: { 7: 'alice' } },
+        ],
+        next: 7,
+      },
+    }]);
+
+    const page = await dibs.page(5, 500);
+
+    assert.deepEqual(page, { claims: [], shown: 2, next: 7 });
+  });
+
   it('passes over a claim event it cannot read, says so, and keeps the rest', async () => {
     const { dibs, logger } = client([{
       body: { events: [{ id: 3, kind: 'released', payload: { item: 'twelve' }, members: {} }], next: 3 },

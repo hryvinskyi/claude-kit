@@ -10,23 +10,16 @@ import type {
   WorkImport,
   WorkMember,
 } from '../application/sync-ports.ts';
-import { CursorExpired, RefusedByRule, TransientFailure } from '../domain/errors.ts';
+import { CursorExpired } from '../domain/errors.ts';
 import type { ClaimEvent, ClaimEventKind } from '../domain/sync/claim-moves.ts';
-import type { FetchLike } from './github-http.ts';
-import { redactSecrets } from './redaction.ts';
+import { DibsTransport } from './dibs-transport.ts';
+import type { DibsHttpDeps } from './dibs-transport.ts';
 
-/** Every call is answered within this, or it is a call that failed. */
-const DEFAULT_TIMEOUT_MS = 10_000;
-const USER_AGENT = 'board-queue';
+export { tokenFromEnvironment } from './dibs-transport.ts';
+export type { DibsHttpDeps } from './dibs-transport.ts';
+
 const NOT_FOUND = 404;
 const GONE = 410;
-
-const ErrorEnvelope = z.object({
-  error: z.object({
-    code: z.string(),
-    details: z.record(z.string(), z.unknown()).optional(),
-  }),
-});
 
 const PrunedThrough = z.object({ pruned_through: z.number().int().nonnegative() });
 
@@ -103,16 +96,6 @@ function isClaimKind(kind: string): kind is ClaimEventKind {
   return Object.hasOwn(CLAIM_PAYLOADS, kind);
 }
 
-export type DibsHttpDeps = {
-  /** The server's address, without a trailing slash. */
-  server: string;
-  /** The integration's token, read when a call needs it. */
-  token: () => string;
-  logger: Logger;
-  fetchImpl?: FetchLike;
-  timeoutMs?: number;
-};
-
 /**
  * The coordination server, as the mirror and the importer reach it: its event
  * log, its members, its items, and the import of the board's work.
@@ -125,30 +108,24 @@ export type DibsHttpDeps = {
  * keeps is a `CursorExpired`.
  */
 export class DibsHttpClient implements ClaimFeed, WorkImport {
-  readonly #server: string;
-  readonly #token: () => string;
+  readonly #http: DibsTransport;
   readonly #logger: Logger;
-  readonly #fetch: FetchLike;
-  readonly #timeoutMs: number;
 
   constructor(deps: DibsHttpDeps) {
-    this.#server = deps.server.replace(/\/+$/, '');
-    this.#token = deps.token;
+    this.#http = new DibsTransport(deps);
     this.#logger = deps.logger;
-    this.#fetch = deps.fetchImpl ?? ((url, init) => globalThis.fetch(url, init));
-    this.#timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
   async page(after: number, limit: number): Promise<ClaimFeedPage> {
     const query = new URLSearchParams({ after: String(after), limit: String(limit) });
-    const answer = await this.#call('GET', `/v1/events?${query.toString()}`, 'the event log');
+    const answer = await this.#http.call('GET', `/v1/events?${query.toString()}`, 'the event log');
     if (answer.status === GONE) {
       const pruned = PrunedThrough.safeParse(answer.details);
       if (pruned.success) {
         throw new CursorExpired(pruned.data.pruned_through);
       }
     }
-    const page = this.#decode(EventPage, this.#ok(answer, 'the event log'), 'the event log');
+    const page = this.#http.decode(EventPage, this.#http.ok(answer, 'the event log'), 'the event log');
     const claims: ClaimEvent[] = [];
     for (const event of page.events) {
       if (!isClaimKind(event.kind)) {
@@ -168,31 +145,31 @@ export class DibsHttpClient implements ClaimFeed, WorkImport {
   }
 
   async liveClaims(): Promise<LiveClaim[]> {
-    const answer = await this.#call('GET', '/v1/claims', 'the live claims');
-    return this.#decode(ClaimsAnswer, this.#ok(answer, 'the live claims'), 'the live claims').claims
+    const answer = await this.#http.call('GET', '/v1/claims', 'the live claims');
+    return this.#http.decode(ClaimsAnswer, this.#http.ok(answer, 'the live claims'), 'the live claims').claims
       .map((claim) => ({ item: claim.item, holder: claim.holder, inReview: claim.state === 'in_review' }));
   }
 
   async members(): Promise<WorkMember[]> {
-    const answer = await this.#call('GET', '/v1/members', 'the members');
-    return this.#decode(MembersAnswer, this.#ok(answer, 'the members'), 'the members').members
+    const answer = await this.#http.call('GET', '/v1/members', 'the members');
+    return this.#http.decode(MembersAnswer, this.#http.ok(answer, 'the members'), 'the members').members
       .map((member) => ({ handle: member.handle, login: member.external_login ?? null }));
   }
 
   async itemRef(id: number): Promise<string | null> {
     const subject = `the work item ${String(id)}`;
-    const answer = await this.#call('GET', `/v1/items/${String(id)}`, subject);
+    const answer = await this.#http.call('GET', `/v1/items/${String(id)}`, subject);
     if (answer.status === NOT_FOUND) {
       return null;
     }
-    return this.#decode(ItemAnswer, this.#ok(answer, subject), subject).item.ref;
+    return this.#http.decode(ItemAnswer, this.#http.ok(answer, subject), subject).item.ref;
   }
 
   async putItems(batch: ImportBatch): Promise<ImportAnswer> {
     const subject = 'the import of the board\'s work';
     const body = { source: batch.source, complete: batch.complete, items: batch.items.map(wireItem) };
-    const answer = await this.#call('PUT', '/v1/items', subject, body);
-    const parsed = this.#decode(ImportAnswerSchema, this.#ok(answer, subject), subject);
+    const answer = await this.#http.call('PUT', '/v1/items', subject, body);
+    const parsed = this.#http.decode(ImportAnswerSchema, this.#http.ok(answer, subject), subject);
     const outcomes: Record<string, number> = {};
     for (const item of parsed.items) {
       outcomes[item.outcome] = (outcomes[item.outcome] ?? 0) + 1;
@@ -209,61 +186,7 @@ export class DibsHttpClient implements ClaimFeed, WorkImport {
         item.dropped_hints.map((hint) => ({ ref: item.ref, area: hint.area, reason: hint.reason }))),
     };
   }
-
-  async #call(method: string, path: string, subject: string, body?: unknown): Promise<Answer> {
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${this.#token()}`,
-      accept: 'application/json',
-      'user-agent': USER_AGENT,
-    };
-    const init: RequestInit = { method, headers, signal: AbortSignal.timeout(this.#timeoutMs) };
-    if (body !== undefined) {
-      headers['content-type'] = 'application/json';
-      init.body = JSON.stringify(body);
-    }
-    let response: Response;
-    let text: string;
-    try {
-      response = await this.#fetch(`${this.#server}${path}`, init);
-      text = await response.text();
-    } catch (cause) {
-      throw new TransientFailure(`${subject} could not be reached: ${causeOf(cause)}`);
-    }
-    const json = parsedJson(text);
-    const envelope = ErrorEnvelope.safeParse(json);
-    return {
-      status: response.status,
-      json,
-      code: envelope.success ? envelope.data.error.code : null,
-      details: envelope.success ? envelope.data.error.details ?? {} : {},
-    };
-  }
-
-  #ok(answer: Answer, subject: string): unknown {
-    if (answer.status >= 200 && answer.status < 300) {
-      return answer.json;
-    }
-    const code = answer.code === null ? '' : ` (${answer.code})`;
-    throw new TransientFailure(`${subject} was refused by the coordination server: ${String(answer.status)}${code}`);
-  }
-
-  #decode<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, value: unknown, subject: string): T {
-    const parsed = schema.safeParse(value);
-    if (parsed.success) {
-      return parsed.data;
-    }
-    const first = parsed.error.issues[0];
-    const at = first === undefined || first.path.length === 0 ? 'the answer' : first.path.join('.');
-    throw new TransientFailure(`${subject} answered an unexpected shape at ${at}`);
-  }
 }
-
-type Answer = {
-  status: number;
-  json: unknown;
-  code: string | null;
-  details: Record<string, unknown>;
-};
 
 /** An item in the server's own spelling: a carried blocker says only that it is one. */
 function wireItem(item: ImportedItem): Record<string, unknown> {
@@ -281,37 +204,4 @@ function wireItem(item: ImportedItem): Record<string, unknown> {
     listed['source_status'] = item.listing.sourceStatus;
   }
   return listed;
-}
-
-function parsedJson(text: string): unknown {
-  if (text.trim() === '') {
-    return null;
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return null;
-  }
-}
-
-function causeOf(cause: unknown): string {
-  if (cause instanceof Error) {
-    return cause.name === 'TimeoutError' ? 'no answer within the deadline' : redactSecrets(cause.message);
-  }
-  return 'the reason was not stated';
-}
-
-/**
- * The integration's token, read from the environment variable the configuration
- * names. The variable is read at the moment of a call, so a worker that keeps in
- * step with nothing never asks for it, and its value is never repeated anywhere.
- */
-export function tokenFromEnvironment(env: Readonly<Record<string, string | undefined>>, name: string): () => string {
-  return () => {
-    const value = (env[name] ?? '').trim();
-    if (value === '') {
-      throw new RefusedByRule(`${name} holds no token for the coordination server; set it in the worker's environment`);
-    }
-    return value;
-  };
 }

@@ -1,6 +1,7 @@
 import type { BudgetPolicy } from './budget-policy.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { DrainQueue, TickReport } from './drain-queue.ts';
+import type { ForgeReport } from './forge-pass.ts';
 import type { ImportReport } from './import-ready-work.ts';
 import type { MirrorReport } from './mirror-claims.ts';
 import type { SyncOwner } from './sync-owner.ts';
@@ -23,6 +24,8 @@ export type SyncJobs = {
   mirror?: () => Promise<MirrorReport>;
   /** Reports the board's work to the server; runs after the queue and the report, when there is room. */
   importer?: () => Promise<ImportReport>;
+  /** Keeps GitHub's pull requests, statuses, branches and runs in step with the server; runs last, when there is room. */
+  forge?: () => Promise<ForgeReport>;
 };
 
 /** What the tick did about keeping in step, beside what it did to the queue. */
@@ -31,6 +34,7 @@ export type SyncTickReport = {
   refused?: string;
   mirror?: MirrorReport | { skipped: string };
   import?: ImportReport;
+  forge?: ForgeReport | { skipped: string };
 };
 
 export type WorkerReport = TickReport & { sync?: SyncTickReport };
@@ -87,8 +91,10 @@ export class RunTick {
 
   /**
    * The mirror runs first, so the moves it files are drained in the same tick; the
-   * import runs last, because it reads, and reading waits for the work somebody
-   * asked for. Either one failing is recorded and the rest of the tick goes on.
+   * import and the forge pass run last, because they read, and reading waits for
+   * the work somebody asked for. Any one of them failing is recorded and the rest
+   * of the tick goes on. Each runs under the single tick lock, so a pass that is
+   * still running when the next tick starts is never joined by a second.
    */
   async run(): Promise<WorkerReport> {
     const sync = this.#sync;
@@ -108,6 +114,11 @@ export class RunTick {
     if (mayKeepInStep && sync.importer !== undefined) {
       syncReport.import = await this.#queueIsFree(report)
         ? await this.#locked('the import', sync.importer)
+        : { skipped: 'the tick did not get to drain the queue, so nothing is read' };
+    }
+    if (mayKeepInStep && sync.forge !== undefined) {
+      syncReport.forge = await this.#queueIsFree(report)
+        ? await this.#locked('the forge pass', sync.forge)
         : { skipped: 'the tick did not get to drain the queue, so nothing is read' };
     }
     return sync === null ? report : { ...report, sync: syncReport };

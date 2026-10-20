@@ -22,13 +22,14 @@ const VIEW: SyncView = {
   owner: 'alice',
   mirror: { enabled: true, lastRun: null },
   importer: { enabled: false, lastRun: null },
+  forge: { enabled: false, lastRun: null },
   refused: null,
 };
 
 describe('what keeping in step looks like on a terminal', () => {
   it('says which directions are on and whose worker runs them', () => {
     assert.deepEqual(syncStatusLines(VIEW), [
-      'in step with https://dibs.example.com (widgets): mirror on · importer off · only in alice\'s worker',
+      'in step with https://dibs.example.com (widgets): mirror on · importer off · forge off · only in alice\'s worker',
     ]);
   });
 
@@ -86,15 +87,87 @@ describe('what keeping in step looks like on a terminal', () => {
       + '2 dependency requests (1 unchanged), read cost 3'));
   });
 
+  it('says what the last forge pass did in each repository, and why it stopped', () => {
+    const lines = syncStatusLines({
+      ...VIEW,
+      forge: {
+        enabled: true,
+        lastRun: {
+          at: '2026-03-02T09:00:00.000Z',
+          requests: 12,
+          notModified: 9,
+          stoppedBecause: 'the secondary rate limit asked for a wait',
+          repos: [{
+            repo: 'example-org/first-repo',
+            cursor: '2026-03-02T08:58:00.000Z',
+            seeded: false,
+            listed: 3,
+            listedByServer: false,
+            merged: 1,
+            closed: 0,
+            mergesWithoutFiles: 1,
+            refusedReports: 0,
+            mergeability: 1,
+            statuses: 2,
+            statusesWithdrawn: 1,
+            statusesDeferred: 1,
+            footprints: 4,
+            branchesGone: 1,
+            holdsReleased: 0,
+            failures: 1,
+            listingError: null,
+            stoppedBecause: 'GitHub did not answer 3 requests in a row',
+          }],
+          refused: null,
+          pruned: { statuses: 2, pulls: 0 },
+        },
+      },
+    });
+
+    assert.ok(lines.includes('forge 2026-03-02T09:00:00.000Z — 12 requests (9 unchanged) · forgot 2 statuses and '
+      + '0 pull requests — stopped: the secondary rate limit asked for a wait'));
+    assert.ok(lines.includes('forge example-org/first-repo: 3 listed · cursor 2026-03-02T08:58:00.000Z · 1 merged '
+      + '(1 without their files) · 0 closed · 1 mergeability · 2 statuses (1 taken back) (1 left for a later pass) · '
+      + '4 footprints (1 branches gone) · 0 holds released · 1 failed, see the log · stopped: '
+      + 'GitHub did not answer 3 requests in a row'));
+    assert.ok(lines.includes('forge example-org/first-repo: the coordination server does not list it, so it gets no '
+      + 'status and no footprint'));
+  });
+
+  it('says why the forge jobs declined to start', () => {
+    const lines = syncStatusLines({
+      ...VIEW,
+      forge: {
+        enabled: true,
+        lastRun: {
+          at: '2026-03-02T09:00:00.000Z',
+          requests: 0,
+          notModified: 0,
+          repos: [],
+          stoppedBecause: null,
+          refused: 'the forge jobs run only under an App\'s credential',
+          pruned: { statuses: 0, pulls: 0 },
+        },
+      },
+    });
+
+    assert.ok(lines.includes('forge 2026-03-02T09:00:00.000Z — declined: the forge jobs run only under an App\'s credential'));
+  });
+
   it('adds a line per direction to what a tick reports', () => {
     const report: WorkerReport = {
       ...QUIET_TICK,
-      sync: { mirror: { skipped: 'another tick holds the lock' }, import: { skipped: 'the last import was recent' } },
+      sync: {
+        mirror: { skipped: 'another tick holds the lock' },
+        import: { skipped: 'the last import was recent' },
+        forge: { skipped: 'the queue is waiting out a refusal' },
+      },
     };
 
     assert.deepEqual(tickLines(report).slice(1), [
       'mirror: skipped — another tick holds the lock',
       'import: skipped — the last import was recent',
+      'forge: skipped — the queue is waiting out a refusal',
     ]);
   });
 });

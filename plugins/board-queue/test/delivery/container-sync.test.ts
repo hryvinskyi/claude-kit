@@ -13,6 +13,8 @@ import { statusLines } from '../../src/delivery/human-text.ts';
 import { FakeBoardGateway, catalogField, catalogOf, seedItem } from '../fakes/fake-board-gateway.ts';
 import { FakeCoordination, claim } from '../fakes/fake-coordination.ts';
 import { FakeDependencyReader } from '../fakes/fake-dependencies.ts';
+import { FakeForge, pullRequest } from '../fakes/fake-forge.ts';
+import { FakeForgeCoordination } from '../fakes/fake-forge-coordination.ts';
 import { FakeIssueGateway } from '../fakes/fake-issue-gateway.ts';
 import { FakeClock, FakeSleeper } from '../fakes/in-memory-time.ts';
 import { testConfig } from '../fixtures/config.ts';
@@ -130,5 +132,95 @@ describe('a worker that keeps the board in step, on a real queue file', () => {
     assert.equal(report.sync, undefined);
     assert.deepEqual(it_.coordination.calls, []);
     assert.deepEqual((await container.status.execute()).sync?.mirror.enabled, false);
+  });
+
+  it('builds no forge pass unless the configuration turns it on', async (t) => {
+    const it_ = world('alice');
+    const forge = new FakeForge();
+    const dibs = new FakeForgeCoordination();
+    const container = containerFor(t, syncConfig, { ...it_.overrides, forge, forgeCoordination: dibs });
+
+    const report = await container.tick.run();
+
+    assert.equal(report.sync?.forge, undefined);
+    assert.deepEqual(dibs.calls, []);
+    assert.equal((await container.status.execute()).sync?.forge.enabled, false);
+  });
+
+  it('runs the forge pass on the queue\'s own file when it is on, and says so in its status', async (t) => {
+    const it_ = world('alice');
+    const forge = new FakeForge().put(pullRequest('example-org/first-repo', 5));
+    const dibs = new FakeForgeCoordination().repository('web', 'example-org/first-repo').member('alice', 'alice-gh')
+      .wants('web', 'main', { enabled: true, status: { state: 'success', description: 'Nothing freezes main.', context: 'dibs' } });
+    const config = ConfigSchema.parse({
+      ...testConfig,
+      dibs: { ...syncConfig.dibs, mirror: undefined, importer: { enabled: false }, forge: { enabled: true } },
+    });
+    const container = containerFor(t, config, {
+      ...it_.overrides,
+      forge,
+      forgeCoordination: dibs,
+      forgeIdentity: { usesAppIdentity: () => true },
+    });
+
+    const report = await container.tick.run();
+    const status = await container.status.execute();
+
+    const forged = report.sync?.forge;
+    assert.ok(forged !== undefined && 'run' in forged);
+    assert.equal(forged.run.repos[0]?.seeded, true);
+    assert.equal(forge.statuses.length, 1);
+    assert.equal(status.sync?.forge.lastRun?.requests, forged.run.requests);
+    assert.ok(statusLines(status).some((line) => line.startsWith('forge example-org/first-repo: started with 1 open')));
+  });
+
+  it('declines the forge pass on a worker whose calls would go out under a person\'s credential, and says so', async (t) => {
+    const it_ = world('alice');
+    const forge = new FakeForge();
+    const dibs = new FakeForgeCoordination();
+    const config = ConfigSchema.parse({
+      ...testConfig,
+      dibs: { ...syncConfig.dibs, mirror: undefined, importer: { enabled: false }, forge: { enabled: true } },
+    });
+    const container = containerFor(t, config, {
+      ...it_.overrides,
+      forge,
+      forgeCoordination: dibs,
+      forgeIdentity: { usesAppIdentity: () => false },
+    });
+
+    const report = await container.tick.run();
+    const status = await container.status.execute();
+
+    assert.match(JSON.stringify(report.sync?.forge), /only under an App/);
+    assert.deepEqual(dibs.calls, []);
+    assert.deepEqual(forge.asked, []);
+    assert.ok(statusLines(status).some((line) => /^forge .* — declined: the forge jobs run only under an App/.test(line)));
+  });
+
+  it('runs the forge pass under a person\'s credential only where the configuration allows it', async (t) => {
+    const it_ = world('alice');
+    const dibs = new FakeForgeCoordination();
+    const config = ConfigSchema.parse({
+      ...testConfig,
+      dibs: {
+        ...syncConfig.dibs,
+        mirror: undefined,
+        importer: { enabled: false },
+        forge: { enabled: true, allowPersonalToken: true },
+      },
+    });
+    const container = containerFor(t, config, {
+      ...it_.overrides,
+      forge: new FakeForge(),
+      forgeCoordination: dibs,
+      forgeIdentity: { usesAppIdentity: () => false },
+    });
+
+    const report = await container.tick.run();
+
+    const forged = report.sync?.forge;
+    assert.ok(forged !== undefined && 'run' in forged);
+    assert.ok(dibs.calls.includes('repositories'));
   });
 });

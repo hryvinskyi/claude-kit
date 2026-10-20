@@ -268,6 +268,7 @@ export class AccountCredentials {
   readonly #deps: AccountCredentialsDeps;
   readonly #pinnedInstallation: boolean;
   readonly #chains = new Map<string, TokenProvider>();
+  readonly #apps = new Map<string, TokenProvider | null>();
 
   constructor(deps: AccountCredentialsDeps) {
     this.#deps = deps;
@@ -284,6 +285,33 @@ export class AccountCredentials {
     const chain = this.#chainFor(board);
     this.#chains.set(account, chain);
     return chain;
+  }
+
+  /**
+   * The App's own credential for the account that owns this board, with nothing to
+   * fall back to, or nothing when the deployment names no App. What is reached
+   * through it is reached as the App or not at all: a call that would quietly go
+   * out under a person's credential instead fails.
+   */
+  appFor(board: AppTokenBoard): TokenProvider | null {
+    const account = board.owner.toLowerCase();
+    if (this.#apps.has(account)) {
+      return this.#apps.get(account) ?? null;
+    }
+    let app: AppTokenProvider | null;
+    try {
+      app = AppTokenProvider.fromEnv(this.#deps.env, board, {
+        pinnedInstallation: this.#pinnedInstallation,
+        fetchImpl: this.#deps.fetchImpl,
+        clock: this.#deps.clock,
+      });
+    } catch (error) {
+      this.#deps.logger.warn('the App named in the environment cannot be used', { reason: sentenceOf(error) });
+      app = null;
+    }
+    const provider = app === null ? null : new CachingTokenProvider(app, this.#deps.clock);
+    this.#apps.set(account, provider);
+    return provider;
   }
 
   #chainFor(board: AppTokenBoard): TokenProvider {

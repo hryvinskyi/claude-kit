@@ -7,12 +7,15 @@ import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { Action } from '../../src/domain/action.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
+import { LAYOUT_REVISION } from '../../src/infrastructure/queue-database.ts';
 import { SqliteActionRepository } from '../../src/infrastructure/sqlite-action-repository.ts';
+import { SqliteForgeLedger } from '../../src/infrastructure/sqlite-forge-ledger.ts';
 import { FakeClock } from '../fakes/in-memory-time.ts';
 
 const FIRST = 'example-org/first-repo';
 const BASE = new Date('2026-01-01T09:00:00.000Z');
-const BACKUP = 'queue.db.before-layout2.bak';
+const LAYOUT = String(LAYOUT_REVISION);
+const BACKUP = `queue.db.before-layout${LAYOUT}.bak`;
 
 /** The layout the first release wrote, exactly as it wrote it. */
 const FIRST_LAYOUT = `
@@ -98,6 +101,65 @@ function backupsIn(dir: string): string[] {
   return fs.readdirSync(dir).filter((name) => name.endsWith('.bak'));
 }
 
+/**
+ * What the second layout added over the first, as the release that wrote it left
+ * a file: the dedupe key, the ending column, the import's answers, and the layout
+ * recorded apart from the generation.
+ */
+const SECOND_LAYOUT = `
+ALTER TABLE actions ADD COLUMN dedupe_key TEXT;
+CREATE UNIQUE INDEX actions_by_dedupe_key ON actions (dedupe_key);
+ALTER TABLE actions ADD COLUMN ended_as TEXT;
+CREATE TABLE import_fetches (
+  key TEXT PRIMARY KEY, etag TEXT, answer TEXT NOT NULL, fetched_at INTEGER NOT NULL, issue_updated_at INTEGER
+);
+INSERT INTO import_fetches (key, etag, answer, fetched_at) VALUES ('blocked_by:example-org/first-repo#12', '"a"', '[]', 1);
+INSERT INTO queue_state (key, value) VALUES ('layout_revision', '2');
+INSERT INTO queue_state (key, value) VALUES ('meta:mirror.cursor:https://dibs.example.com:widgets', '41');
+`;
+
+function tableNames(file: string): string[] {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    return db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all()
+      .map((row) => String(row['name']));
+  } finally {
+    db.close();
+  }
+}
+
+describe('a queue file of the second layout', () => {
+  it('is copied once, gains the forge\'s tables and keeps everything it held', async (t) => {
+    const dir = directory(t);
+    const file = fileIn(dir, FIRST_LAYOUT, SECOND_LAYOUT);
+
+    const repository = opened(t, file);
+
+    assert.deepEqual(backupsIn(dir), [BACKUP]);
+    assert.equal(stateKey(file, 'schema_version'), '1');
+    assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
+    assert.equal((await repository.get('old-1'))?.state, 'queued');
+    assert.equal(await repository.getMeta('mirror.cursor:https://dibs.example.com:widgets'), '41');
+    const tables = tableNames(file);
+    for (const table of ['forge_repos', 'forge_pulls', 'forge_statuses', 'forge_measures', 'import_fetches']) {
+      assert.ok(tables.includes(table), `${table} is there`);
+    }
+  });
+
+  it('is brought up to date by the forge\'s own store as much as by the queue', async (t) => {
+    const dir = directory(t);
+    const file = fileIn(dir, FIRST_LAYOUT, SECOND_LAYOUT);
+
+    const ledger = new SqliteForgeLedger(file);
+    t.after(() => {
+      ledger.close();
+    });
+
+    assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
+    assert.equal(await ledger.listing('example-org/first-repo'), null);
+  });
+});
+
 describe('a queue file of the first layout', () => {
   it('is copied whole beside itself, readable by its owner alone, before anything in it changes', (t) => {
     const dir = directory(t);
@@ -124,7 +186,7 @@ describe('a queue file of the first layout', () => {
     opened(t, file);
 
     assert.equal(stateKey(file, 'schema_version'), '1');
-    assert.equal(stateKey(file, 'layout_revision'), '2');
+    assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
   });
 
   it('keeps every action and note it held, and reads them as before', async (t) => {
@@ -165,7 +227,7 @@ describe('a queue file of the first layout', () => {
     opened(t, file);
 
     assert.equal(fs.readFileSync(path.join(dir, BACKUP), 'utf8'), 'the copy an earlier opener took');
-    assert.equal(stateKey(file, 'layout_revision'), '2');
+    assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
   });
 });
 
@@ -178,7 +240,7 @@ describe('a file whose layout was recorded under the generation\'s key', () => {
 
     assert.deepEqual(backupsIn(dir), [BACKUP]);
     assert.equal(stateKey(file, 'schema_version'), '1');
-    assert.equal(stateKey(file, 'layout_revision'), '2');
+    assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
     assert.equal((await repository.get('skipped-1'))?.state, 'skipped');
     const raw = new DatabaseSync(file, { readOnly: true });
     try {
@@ -251,7 +313,7 @@ describe('a new queue file', () => {
     opened(t, file);
 
     assert.equal(stateKey(file, 'schema_version'), '1');
-    assert.equal(stateKey(file, 'layout_revision'), '2');
+    assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
     assert.deepEqual(backupsIn(dir), []);
   });
 });

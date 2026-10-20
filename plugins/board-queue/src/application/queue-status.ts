@@ -1,8 +1,8 @@
 import type { Action } from '../domain/action.ts';
 import type { SyncConfig } from '../domain/sync-config.ts';
 import { readLastAudit, readLastBudget, readLastTickAt } from './queue-meta.ts';
-import { readImportRun, readMirrorRun, readSyncRefusal } from './sync-meta.ts';
-import type { ImportRun, MirrorRun, SyncRefusal } from './sync-meta.ts';
+import { readForgeRun, readImportRun, readMirrorRun, readSyncRefusal } from './sync-meta.ts';
+import type { ForgeRun, ImportRun, MirrorRun, SyncRefusal } from './sync-meta.ts';
 import type { ActionCounts, ActionRepository, Clock } from './ports.ts';
 
 export type PauseView = {
@@ -76,6 +76,7 @@ export type SyncView = {
   owner: string;
   mirror: { enabled: boolean; lastRun: MirrorRun | null };
   importer: { enabled: boolean; lastRun: ImportRun | null };
+  forge: { enabled: boolean; lastRun: ForgeRun | null };
   refused: SyncRefusal | null;
 };
 
@@ -182,9 +183,10 @@ export class QueueStatus {
     if (sync === null) {
       return null;
     }
-    const [mirrorRun, importRun, refused] = await Promise.all([
+    const [mirrorRun, importRun, forgeRun, refused] = await Promise.all([
       readMirrorRun(this.#repository),
       readImportRun(this.#repository),
+      readForgeRun(this.#repository),
       readSyncRefusal(this.#repository),
     ]);
     return {
@@ -193,6 +195,7 @@ export class QueueStatus {
       owner: sync.mirrorOwner,
       mirror: { enabled: sync.mirror?.enabled === true, lastRun: mirrorRun },
       importer: { enabled: sync.importer.enabled, lastRun: importRun },
+      forge: { enabled: sync.forge.enabled, lastRun: forgeRun },
       refused,
     };
   }

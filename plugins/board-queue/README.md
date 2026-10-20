@@ -282,7 +282,81 @@ so an item that left the board is closed on the server, while a board that sudde
 nothing and says why in `status`. It writes nothing to GitHub and files nothing in
 the queue, and what it sends changes no claim, so it never sets off a move of the mirror.
 
-`status` shows both: the last run of each, the cursor, what an import cost to read, and why either stopped.
+**The forge jobs** (GitHub ↔ server) are for one service that runs under an identity of its own — a GitHub App
+installed on the repositories kept in step, with Pull requests, Contents and Actions read and Commit statuses
+read/write — not for a person's worker. They are off unless `forge.enabled` says otherwise, run behind the same
+`mirrorOwner` check, and start only where every repository's calls go out under the App's credential: there the
+App's credential is used with nothing to fall back to, so a call never quietly goes out as a person. A worker
+whose calls would use a person's credential declines, and `status` says why, unless the configuration sets
+`allowPersonalToken`:
+
+```json
+"forge": { "enabled": true, "paceMs": 1000, "overlapMinutes": 10, "minRemaining": 500,
+           "maxStatusWritesPerPass": 20, "maxStatusWritesPerHour": 300, "maxPassMinutes": 4,
+           "allowPersonalToken": false }
+```
+
+Each tick, after the queue is drained and under the same single lock, one pass reads the server first —
+`GET /v1/me` (its repositories and the remote each is cloned from), `/v1/members`, `/v1/review-claims`,
+`/v1/claims` and `/v1/slots` — and sends nothing when any of those fails. Then, for each repository in `repos`:
+
+- **Pull requests.** `GET /repos/{o}/{r}/pulls?state=all&sort=updated&direction=desc`, page 1 conditional on its
+  tag, paged until a page reaches back past the repository's cursor less `overlapMinutes` (the listing has no
+  "since", and GitHub's clock is not this machine's). What the window holds is handled oldest first: each merge
+  or close the server was not told about is reported — `POST /v1/prs/merged { pr, base, head, merged_at, files }`
+  or `POST /v1/prs/closed` — and the pull request is kept with the cursor moved up to it, in one transaction, the
+  moment the server answers. A pass that stops on the way leaves the cursor at the last pull request it finished;
+  the next carries on from there and sends nothing twice. The files come from `GET …/pulls/{n}/files`, a page per
+  request (at most 3000; a rename counts both its paths); when they cannot be read the merge is sent without
+  them, and `status` says so. A merge from a fork's branch names no `head`. A report the server refuses is
+  recorded and not sent again by the listing. A first listing reads only what is open and starts its cursor at
+  the time GitHub's answer carries.
+- **The claims in review.** Every pull request a claim in review waits for is asked where it stands
+  (`GET …/pulls/{n}`, conditional — nothing kept is taken on trust, a closed one may have been reopened) and
+  reported once it ended, however long ago: that is how a pull request merged before its holder recorded it
+  reaches the server at all.
+- **Mergeability.** For each open pull request of a member with a GitHub login, and each one a claim waits for,
+  `POST /v1/prs/state { pr, mergeable }` when what GitHub says changed since it was last told.
+- **The PR status.** For each open pull request of a member with a GitHub login, `GET /v1/pr-status?repo=&base=`
+  once per base, and `POST /repos/{o}/{r}/statuses/{sha}` only where the server says the repository wants one and
+  only when the state or description differs from the last written for that commit and context. A status this
+  worker wrote and no longer stands behind is taken back: when the repository stops wanting one, its context
+  changes, or the author is no longer a member, a head whose last status here was a failure gets one success,
+  "no longer checked by <context>", and the status is forgotten. Every write counts against GitHub's
+  content-creation limit, which the queue's own writes spend too: a pass writes at most `maxStatusWritesPerPass`
+  (at most 35), every pass together at most `maxStatusWritesPerHour`, and the rest wait for a later pass.
+- **Footprints.** For each branch of a live claim in that repository, `GET …/compare/{base}...{branch}`
+  (conditional; the base is that of the open pull request from the repository's own branch of that name, or the
+  default branch) and `PUT /v1/items/{id}/footprint { repo, branch, base, base_sha, base_at, paths, truncated }`
+  — `base_sha` the merge base, `base_at` its committer time, a rename by both its paths. An unchanged comparison
+  sends the measure kept from the last one; a branch GitHub no longer has, and a comparison that names no files,
+  send nothing. A claim a merge of this pass completed is not measured; one the server set aside, or put back to
+  work, still is.
+- **Holds until a run.** A hold names a commit, often by a short id, and no repository: the commit is resolved
+  once with `GET …/commits/{sha}`, in the first repository that holds it, and kept. Its runs are then asked there
+  only (`GET …/actions/runs?head_sha=`); once the latest run of the hold's own workflow for that commit completed,
+  `POST /v1/slots/{name}/run-finished`. The workflow is matched by its file name or path first, and by its display
+  name only when no file matches and exactly one workflow carries that name.
+
+A repository the server does not list gets no status and no footprint, and `status` says so.
+
+Requests to GitHub go one at a time, `paceMs` apart, and only while the REST allowance is above `minRemaining` and
+the pass is younger than `maxPassMinutes` (4 by default, so a pass ends before the next tick is due, and at most 25,
+inside the half hour after which the tick lock is taken from a holder that looks dead). A burst refusal, an
+exhausted allowance or a credential GitHub will not take ends the pass and puts the queue to sleep, as any refusal
+does. GitHub not answering — a network failure, a timeout, a 5xx — three requests of one job in a row ends that
+repository's jobs for the pass, says so in `status`, and the pass goes on with the next repository. GitHub refusing
+one request (a 403, 404 or 422) is about that one pull request, branch or hold: it is counted and the job goes on.
+The coordination server not answering ends the pass; it refusing one report is counted, and the pass goes on. The
+lock is held for the whole pass, never released between repositories: a pass released half way would let the next
+tick start a second pass while the first still runs, two passes spending one allowance and writing one set of
+statuses. Statuses written more than thirty days ago on commits that are no open pull request's head, and pull
+requests that ended thirty days ago and were reported, are forgotten at the end of a pass, 500 of each at most. It
+files nothing in the queue. A project that lists no repository has one, `default`, which stands for the one
+repository in `repos` when there is one.
+
+`status` shows all three: the last run of each, the cursors, what an import cost to read, what the last forge
+pass did in each repository, and why any of them stopped.
 
 ## From a session
 
@@ -434,7 +508,7 @@ post and everything the API answered with.
 
 | file | what it is |
 |---|---|
-| `queue.db` | the queue itself (SQLite, WAL), the cursor of the mirror and the dependency answers the importer keeps |
+| `queue.db` | the queue itself (SQLite, WAL), the cursor of the mirror, the dependency answers the importer keeps, and what the forge jobs keep: each repository's listing cursor, the pull requests seen and what the server was told of them, the statuses written and the writes of the last hour, each claimed branch's last measure, and the commits holds name |
 | `queue.db.before-layout<N>.bak` | a whole copy taken once before the file was brought to layout `N`; delete it once the new version runs |
 
 The file records two numbers. `schema_version` is the oldest generation of this code that can read it, and is

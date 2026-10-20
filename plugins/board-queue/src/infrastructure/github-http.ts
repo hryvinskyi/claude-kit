@@ -1,10 +1,11 @@
 import { z } from 'zod';
-import type { ZodType } from 'zod';
+import type { ZodType, ZodTypeDef } from 'zod';
 import type { Logger, TokenProvider } from '../application/ports.ts';
 import {
   type BoardQueueError,
   CredentialRejected,
   IssueNotFound,
+  NoAnswer,
   PrimaryRateLimited,
   SecondaryRateLimited,
   TransientFailure,
@@ -47,6 +48,13 @@ export type RestResult = {
    * and the answer the tag was taken from still holds.
    */
   notModified: boolean;
+  /**
+   * True when a call was answered with one of the statuses it said mean "not
+   * there": there is no body, and the thing asked about is not there.
+   */
+  missing: boolean;
+  /** When the API says it answered, from its own clock; null when it did not say. */
+  servedAt: Date | null;
 };
 
 const GraphqlEnvelope = z
@@ -104,6 +112,12 @@ export type CallOptions = {
    * request carrying a credential is not counted against the hourly allowance.
    */
   readonly ifNoneMatch?: string;
+  /**
+   * Statuses that are an answer rather than a refusal: a branch deleted after a
+   * merge is not there (404), a commit another repository holds is no commit here
+   * (422), and saying so is all the caller needs to hear.
+   */
+  readonly absentOn?: readonly number[];
 };
 
 /**
@@ -193,7 +207,7 @@ const REFUSAL_RULES: readonly RefusalRule[] = [
   {
     name: 'server fault',
     matches: (refusal) => refusal.status >= 500,
-    toError: (refusal) => new TransientFailure(`${refusal.subject} answered ${String(refusal.status)}`),
+    toError: (refusal) => new NoAnswer(`${refusal.subject} answered ${String(refusal.status)}`),
   },
   {
     name: 'refused query',
@@ -390,8 +404,19 @@ export class GitHubHttp {
       remaining: outcome.budget?.remaining ?? null,
     });
     const etag = outcome.header('etag');
+    const servedAt = dateHeader(outcome.header('date'));
     if (outcome.status === NOT_MODIFIED && options.ifNoneMatch !== undefined) {
-      return { data: null, nextPageUrl: null, etag: etag ?? options.ifNoneMatch, notModified: true };
+      return {
+        data: null,
+        nextPageUrl: null,
+        etag: etag ?? options.ifNoneMatch,
+        notModified: true,
+        missing: false,
+        servedAt,
+      };
+    }
+    if (options.absentOn?.includes(outcome.status) === true) {
+      return { data: null, nextPageUrl: null, etag: null, notModified: false, missing: true, servedAt };
     }
     if (!outcome.ok) {
       throw classifyRefusal({
@@ -406,13 +431,13 @@ export class GitHubHttp {
     }
     const nextPageUrl = nextPageOf(outcome.header('link'));
     if (outcome.text.trim() === '') {
-      return { data: null, nextPageUrl, etag, notModified: false };
+      return { data: null, nextPageUrl, etag, notModified: false, missing: false, servedAt };
     }
     const parsed = tryParseJson(outcome.text);
     if (!parsed.parsed) {
       throw new TransientFailure(`${label} answered something that is not JSON`);
     }
-    return { data: parsed.value, nextPageUrl, etag, notModified: false };
+    return { data: parsed.value, nextPageUrl, etag, notModified: false, missing: false, servedAt };
   }
 
   /** Whether an address belongs to the API this transport was pointed at. */
@@ -452,7 +477,7 @@ export class GitHubHttp {
       try {
         response = await this.fetchImpl(spec.url, init);
       } catch (cause) {
-        throw new TransientFailure(`${spec.subject} could not be reached: ${describeCause(cause)}`);
+        throw new NoAnswer(`${spec.subject} could not be reached: ${describeCause(cause)}`);
       }
       const headerOf = headerReader(response);
       const budget = RateBudget.fromHeaders(headerOf);
@@ -463,7 +488,7 @@ export class GitHubHttp {
       try {
         text = await response.text();
       } catch (cause) {
-        throw new TransientFailure(`${spec.subject} answered a body that could not be read: ${describeCause(cause)}`);
+        throw new NoAnswer(`${spec.subject} answered a body that could not be read: ${describeCause(cause)}`);
       }
       if (response.status === 401) {
         this.logger.warn('credential rejected', { subject: spec.subject, retrying: !refreshed });
@@ -490,7 +515,7 @@ export class GitHubHttp {
  * failure naming the call — an answer this adapter cannot read is a fault of the
  * moment, never a reason to write half of something.
  */
-export function decodeWire<T>(schema: ZodType<T>, value: unknown, subject: string): T {
+export function decodeWire<T>(schema: ZodType<T, ZodTypeDef, unknown>, value: unknown, subject: string): T {
   const parsed = schema.safeParse(value);
   if (parsed.success) {
     return parsed.data;
@@ -530,6 +555,15 @@ function numericHeader(raw: string | null): number | null {
   }
   const value = Number(raw.trim());
   return Number.isFinite(value) ? value : null;
+}
+
+/** An HTTP date (`Mon, 02 Mar 2026 09:00:00 GMT`), or nothing for a header that is absent or not one. */
+function dateHeader(raw: string | null): Date | null {
+  if (raw === null || raw.trim() === '') {
+    return null;
+  }
+  const at = new Date(raw);
+  return Number.isNaN(at.getTime()) ? null : at;
 }
 
 const NEXT_PAGE = /<([^>]+)>\s*;\s*rel="next"/i;

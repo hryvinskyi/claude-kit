@@ -360,6 +360,28 @@ describe('AccountCredentials', () => {
     ]);
   });
 
+  it('offers the App\'s own credential with nothing to fall back to, and none where no App is named', async () => {
+    const fetcher = new FakeFetch([{ body: { id: 11 } }, { status: 500, body: { message: 'boom' } }]);
+    const fallback = new CountingProvider();
+    const credentials = new AccountCredentials({
+      env,
+      boards: [ORGANISATION],
+      logger: new RecordingLogger(),
+      clock: new FakeClock(),
+      fallback: () => fallback,
+      fetchImpl: fetcher.fetch,
+    });
+    const without = new AccountCredentials({ env: {}, boards: [ORGANISATION], logger: new RecordingLogger(), clock: new FakeClock() });
+
+    const app = credentials.appFor(ORGANISATION);
+
+    assert.ok(app !== null);
+    assert.equal(credentials.appFor(ORGANISATION), app, 'one per account');
+    await assert.rejects(() => app.token());
+    assert.equal(fallback.mints, 0, 'a person\'s credential was never asked for');
+    assert.equal(without.appFor(ORGANISATION), null);
+  });
+
   it('falls back per account when the deployment names no App, minting nothing until asked', async () => {
     const made: CountingProvider[] = [];
     const credentials = new AccountCredentials({

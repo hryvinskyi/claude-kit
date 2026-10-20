@@ -62,6 +62,52 @@ export const ImporterConfigSchema = z
   .strict();
 
 /**
+ * What the forge jobs read and write on GitHub on the coordination server's
+ * behalf: the pull requests of each repository kept in step and how they ended,
+ * the commit status the server wants on its members' pull requests, what each
+ * claimed branch changes, and the workflow runs a slot hold waits for. Off unless
+ * a deployment turns it on; it is meant for one service that runs under an
+ * identity of its own, not for a person's worker.
+ */
+export const ForgeConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** The smallest gap between two requests to GitHub. */
+    paceMs: z.number().int().min(1000).default(1000),
+    /**
+     * How far behind its cursor a listing of pull requests reads again. The listing
+     * has no "since" and GitHub's clock is not this machine's.
+     */
+    overlapMinutes: z.number().int().min(1).max(60).default(10),
+    /** A pass asks GitHub nothing more once the REST allowance it spends is below this. */
+    minRemaining: z.number().int().nonnegative().default(500),
+    /**
+     * Most commit statuses one pass writes. Every status counts against GitHub's
+     * content-creation limit, which the queue's own writes spend too; the rest are
+     * written by the next pass.
+     */
+    maxStatusWritesPerPass: z.number().int().positive().max(35).default(20),
+    /**
+     * Most commit statuses written in any hour, by every pass together, so the
+     * queue's own writes keep room under the same limit.
+     */
+    maxStatusWritesPerHour: z.number().int().positive().default(300),
+    /**
+     * A pass asks GitHub nothing more once it has run this long: by default before
+     * the next tick is due, and never past the time after which the single tick
+     * lock is taken from a holder that looks dead.
+     */
+    maxPassMinutes: z.number().int().min(1).max(25).default(4),
+    /**
+     * Whether the jobs may run under a person's credential. They write statuses every
+     * reader of a repository sees and spend the allowance of whoever they run as, so
+     * by default they start only where the calls go out as an App.
+     */
+    allowPersonalToken: z.boolean().default(false),
+  })
+  .strict();
+
+/**
  * What this worker keeps in step with a coordination server: claims there moving
  * rows here, and the board's open work and what blocks it reported there.
  *
@@ -90,12 +136,14 @@ export const SyncConfigSchema = z
     repos: z.array(z.string().trim().refine(isRepoFullName, 'a repository is written owner/name')).min(1),
     mirror: MirrorConfigSchema.optional(),
     importer: ImporterConfigSchema.default({}),
+    forge: ForgeConfigSchema.default({}),
   })
   .strict();
 
 export type SyncConfig = z.infer<typeof SyncConfigSchema>;
 export type MirrorConfig = z.infer<typeof MirrorConfigSchema>;
 export type ImporterConfig = z.infer<typeof ImporterConfigSchema>;
+export type ForgeConfig = z.infer<typeof ForgeConfigSchema>;
 export type ClaimStatuses = z.infer<typeof ClaimStatusesSchema>;
 
 function withoutCredentials(address: string): boolean {
@@ -107,7 +155,7 @@ function withoutCredentials(address: string): boolean {
   }
 }
 
-/** Whether either direction is switched on; with neither, nothing about the server is ever asked. */
+/** Whether any job is switched on; with none, nothing about the server is ever asked. */
 export function syncIsOn(sync: SyncConfig): boolean {
-  return sync.mirror?.enabled === true || sync.importer.enabled;
+  return sync.mirror?.enabled === true || sync.importer.enabled || sync.forge.enabled;
 }

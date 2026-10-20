@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { Action } from '../../src/domain/action.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { SqliteActionRepository } from '../../src/infrastructure/sqlite-action-repository.ts';
+import { SqliteForgeLedger } from '../../src/infrastructure/sqlite-forge-ledger.ts';
 
 /**
  * The last release whose queue wrote the first layout. Going back to it — or to
@@ -16,6 +17,9 @@ import { SqliteActionRepository } from '../../src/infrastructure/sqlite-action-r
  * version has opened and written to.
  */
 const FIRST_LAYOUT_RELEASE = 'f1d33eadd22bc93bfc158b0c3aad9669bc614ba6';
+
+/** The last release whose queue wrote the second layout, before the forge's tables. */
+const SECOND_LAYOUT_RELEASE = 'd2a0ebc78abff71fc13fa0d2ba0c01b793e51d1a';
 
 const PLUGIN = path.join(import.meta.dirname, '..', '..');
 const FIRST = 'example-org/first-repo';
@@ -69,8 +73,8 @@ type OlderRelease = {
   run(command: 'file' | 'read', file: string, id: string): z.infer<typeof OlderAnswer>;
 };
 
-/** The older release's queue code, taken from history into a directory of its own. */
-function olderRelease(t: TestContext): OlderRelease {
+/** An older release's queue code, taken from history into a directory of its own. */
+function olderRelease(t: TestContext, release: string): OlderRelease {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-older-'));
   t.after(() => {
     fs.rmSync(root, { recursive: true, force: true });
@@ -80,13 +84,15 @@ function olderRelease(t: TestContext): OlderRelease {
   const prefix = git('rev-parse', '--show-prefix');
   const archive = execFileSync(
     'git',
-    ['-C', top, 'archive', '--format=tar', FIRST_LAYOUT_RELEASE, `${prefix}src`],
+    ['-C', top, 'archive', '--format=tar', release, `${prefix}src`],
     { maxBuffer: 64 * 1024 * 1024 },
   );
   execFileSync('tar', ['-x', '-C', root, '--strip-components', String(prefix.split('/').filter(Boolean).length)], {
     input: archive,
   });
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+  // A later release reads its notes with the same libraries this one installs.
+  fs.symlinkSync(path.join(PLUGIN, 'node_modules'), path.join(root, 'node_modules'), 'dir');
   const script = path.join(root, 'older.ts');
   fs.writeFileSync(script, OLDER_RELEASE_SCRIPT);
   return {
@@ -100,7 +106,7 @@ function olderRelease(t: TestContext): OlderRelease {
 
 describe('going back to the release before this layout', () => {
   it('keeps the queue running on a file this version opened, wrote and skipped work in', async (t) => {
-    const older = olderRelease(t);
+    const older = olderRelease(t, FIRST_LAYOUT_RELEASE);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-roundtrip-'));
     t.after(() => {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -142,5 +148,49 @@ describe('going back to the release before this layout', () => {
     assert.equal((await reopened.get('skipped-here'))?.state, 'skipped');
     assert.equal((await reopened.get('filed-again-by-the-older-release'))?.state, 'queued');
     assert.equal((await reopened.counts()).skipped, 1);
+  });
+});
+
+describe('going back to the release before the forge\'s tables', () => {
+  it('keeps the queue running on a file this version opened and kept forge state in, and the state survives', async (t) => {
+    const older = olderRelease(t, SECOND_LAYOUT_RELEASE);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-roundtrip-'));
+    t.after(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    const file = path.join(dir, 'queue.db');
+
+    older.run('file', file, 'from-the-older-release');
+    const ledger = new SqliteForgeLedger(file);
+    await ledger.recordListing(FIRST, { cursor: BASE, etag: '"p1"' }, [{
+      repo: FIRST,
+      number: 2,
+      state: 'closed',
+      mergedAt: BASE,
+      updatedAt: BASE,
+      author: 'alice-gh',
+      headRef: 'alice/2-work',
+      headRepo: FIRST,
+      headSha: 'a'.repeat(40),
+      baseRef: 'main',
+      etag: null,
+      mergeableSent: null,
+      reported: 'merged',
+    }]);
+    ledger.close();
+
+    const back = older.run('file', file, 'filed-after-the-forge-tables');
+
+    assert.deepEqual(back.listed, [
+      { id: 'from-the-older-release', state: 'queued' },
+      { id: 'filed-after-the-forge-tables', state: 'queued' },
+    ]);
+    assert.equal(back.statusCounts['queued'], 2);
+    const reopened = new SqliteForgeLedger(file);
+    t.after(() => {
+      reopened.close();
+    });
+    assert.equal((await reopened.listing(FIRST))?.etag, '"p1"');
+    assert.equal((await reopened.pull(FIRST, 2))?.reported, 'merged');
   });
 });

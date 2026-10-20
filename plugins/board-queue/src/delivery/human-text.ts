@@ -4,6 +4,7 @@ import type { SyncTickReport, WorkerReport } from '../application/run-tick.ts';
 import type { EnqueueOutcome } from '../application/enqueue-action.ts';
 import type { ActionView } from '../application/list-actions.ts';
 import type { QueueStatusView, SyncView } from '../application/queue-status.ts';
+import type { ForgeRepositoryRun, ForgeRun } from '../application/sync-meta.ts';
 import type { BoardItemView } from '../application/show-board-item.ts';
 
 /**
@@ -95,7 +96,7 @@ export function syncStatusLines(sync: SyncView): string[] {
   const on = (enabled: boolean): string => (enabled ? 'on' : 'off');
   const lines = [
     `in step with ${sync.server} (${sync.project}): mirror ${on(sync.mirror.enabled)} · `
-    + `importer ${on(sync.importer.enabled)} · only in ${sync.owner}'s worker`,
+    + `importer ${on(sync.importer.enabled)} · forge ${on(sync.forge.enabled)} · only in ${sync.owner}'s worker`,
   ];
   if (sync.refused !== null) {
     lines.push(`declined ${sync.refused.at} — ${sync.refused.reason}`);
@@ -125,7 +126,49 @@ export function syncStatusLines(sync: SyncView): string[] {
       + `read cost ${imported.readCost === null ? 'unknown' : String(imported.readCost)}`
       + (imported.stoppedBecause === null ? '' : ` — stopped: ${imported.stoppedBecause}`));
   }
+  const forge = sync.forge.lastRun;
+  if (forge !== null) {
+    lines.push(...forgeRunLines(forge));
+  }
   return lines;
+}
+
+/** The last forge pass: what it asked GitHub, what it did per repository, and why it stopped. */
+function forgeRunLines(forge: ForgeRun): string[] {
+  if (forge.refused !== null) {
+    return [`forge ${forge.at} — declined: ${forge.refused}`];
+  }
+  const lines = [`forge ${forge.at} — ${String(forge.requests)} requests (${String(forge.notModified)} unchanged)`
+    + (forge.pruned.statuses + forge.pruned.pulls > 0
+      ? ` · forgot ${String(forge.pruned.statuses)} statuses and ${String(forge.pruned.pulls)} pull requests`
+      : '')
+    + (forge.stoppedBecause === null ? '' : ` — stopped: ${forge.stoppedBecause}`)];
+  for (const repo of forge.repos) {
+    lines.push(forgeRepositoryLine(repo));
+    if (!repo.listedByServer) {
+      lines.push(`forge ${repo.repo}: the coordination server does not list it, so it gets no status and no footprint`);
+    }
+  }
+  return lines;
+}
+
+function forgeRepositoryLine(repo: ForgeRepositoryRun): string {
+  const counted = (count: number, what: string): string => (count > 0 ? ` (${String(count)} ${what})` : '');
+  return `forge ${repo.repo}: `
+    + (repo.seeded ? `started with ${String(repo.listed)} open` : `${String(repo.listed)} listed`)
+    + ` · cursor ${repo.cursor ?? 'none'} · ${String(repo.merged)} merged`
+    + counted(repo.mergesWithoutFiles, 'without their files')
+    + ` · ${String(repo.closed)} closed`
+    + counted(repo.refusedReports, 'refused by the server')
+    + ` · ${String(repo.mergeability)} mergeability · ${String(repo.statuses)} statuses`
+    + counted(repo.statusesWithdrawn, 'taken back')
+    + counted(repo.statusesDeferred, 'left for a later pass')
+    + ` · ${String(repo.footprints)} footprints`
+    + counted(repo.branchesGone, 'branches gone')
+    + ` · ${String(repo.holdsReleased)} holds released`
+    + (repo.failures > 0 ? ` · ${String(repo.failures)} failed, see the log` : '')
+    + (repo.listingError === null ? '' : ` · listing not read: ${repo.listingError}`)
+    + (repo.stoppedBecause === null ? '' : ` · stopped: ${repo.stoppedBecause}`);
 }
 
 /**
@@ -184,6 +227,13 @@ function syncTickLines(sync: SyncTickReport): string[] {
       : `import: ${String(imported.run.items)} items · ${imported.run.complete ? 'complete' : 'not complete'}`
         + ` · ${String(imported.run.requests)} requests`
         + (imported.run.stoppedBecause === null ? '' : ` · stopped: ${imported.run.stoppedBecause}`));
+  }
+  const forge = sync.forge;
+  if (forge !== undefined) {
+    lines.push('skipped' in forge
+      ? `forge: skipped — ${forge.skipped}`
+      : `forge: ${String(forge.run.requests)} requests · ${String(forge.run.repos.length)} repositories`
+        + (forge.run.stoppedBecause === null ? '' : ` · stopped: ${forge.run.stoppedBecause}`));
   }
   return lines;
 }
