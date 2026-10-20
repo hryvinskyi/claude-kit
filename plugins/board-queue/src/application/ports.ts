@@ -23,12 +23,33 @@ export type ActionFilter = {
 
 export type ActionCounts = Record<ActionState, number>;
 
+/** One value of the queue's own notes, written together with the actions it belongs to. */
+export type MetaWrite = {
+  readonly key: string;
+  readonly value: string;
+};
+
 /**
  * The queue itself. Two processes write it, so every method that changes a row
  * says how it behaves when somebody else got there first.
  */
 export interface ActionRepository {
-  insert(action: Action): Promise<void>;
+  /**
+   * Writes a new action. An action whose dedupe key another action already
+   * carries is not written, and the answer is false; one without a key is always
+   * written.
+   */
+  insert(action: Action): Promise<boolean>;
+
+  /**
+   * Writes every action whose dedupe key is new, and the notes, in one
+   * transaction: either all of it lands or none of it does. Answers the ids of the
+   * actions that were written, in the order they were given.
+   */
+  insertAll(actions: readonly Action[], meta: readonly MetaWrite[]): Promise<string[]>;
+
+  /** The action carrying this dedupe key, or null. */
+  findByDedupeKey(key: string): Promise<Action | null>;
 
   /**
    * Writes the aggregate guarded by the version it was read at
@@ -110,6 +131,13 @@ export interface BoardGateway {
   /** Every row in one paginated walk; cached for a short while, `force` refetches. */
   snapshot(force?: boolean): Promise<BoardSnapshot>;
 
+  /**
+   * Every row with the facts of the issue it holds — title, state, dates, and the
+   * summaries of what blocks it — in a walk of its own, never cached: it is read
+   * once per import, and no other read depends on those facts being answered.
+   */
+  readWork(): Promise<BoardSnapshot>;
+
   /** The row for this issue, matched on repository *and* number, or null. */
   findItem(ref: IssueRef): Promise<ReadItemResult | null>;
 
@@ -140,6 +168,8 @@ export type IssueSummary = {
   state: IssueState;
   title: string;
   url: string;
+  /** The logins the issue is assigned to. */
+  assignees: string[];
 };
 
 export type IssueCommentView = {
@@ -155,6 +185,12 @@ export interface IssueGateway {
   comment(ref: IssueRef, body: string): Promise<string>;
 
   close(ref: IssueRef, reason: IssueCloseReason): Promise<void>;
+
+  /** Assigns these logins, keeping whoever is assigned already. */
+  addAssignees(ref: IssueRef, logins: readonly string[]): Promise<void>;
+
+  /** Takes these logins off the issue, leaving everybody else assigned. */
+  removeAssignees(ref: IssueRef, logins: readonly string[]): Promise<void>;
 
   get(ref: IssueRef): Promise<IssueSummary>;
 

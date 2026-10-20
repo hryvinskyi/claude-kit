@@ -14,7 +14,8 @@ const BACKOFF_CAP_SEC = 900;
 /** A rejected credential is a person's problem; the queue looks again in a quarter of an hour. */
 const CREDENTIAL_PAUSE_SEC = 15 * 60;
 
-const HOUR_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
 
 type PauseContext = {
   now: Date;
@@ -156,12 +157,47 @@ export class BudgetPolicy {
    * behind it.
    */
   shouldAudit(lastAuditAt: Date | null, now: Date, budget: RateBudget | null): boolean {
-    if (budget === null || budget.remaining < this.#config.auditMinRemaining) {
-      return false;
-    }
-    if (lastAuditAt === null) {
-      return true;
-    }
-    return now.getTime() - lastAuditAt.getTime() >= this.#config.auditEveryHours * HOUR_MS;
+    return readWhenDue(lastAuditAt, now, budget, {
+      everyMs: this.#config.auditEveryHours * HOUR_MS,
+      minRemaining: this.#config.auditMinRemaining,
+    });
   }
+
+  /**
+   * Whether an import of the board's work has waited long enough and there is
+   * allowance to spare for the read it starts. The same rule as the report's: the
+   * queue's own writes keep priority, so a read that would eat into the reserve
+   * waits for the next tick.
+   */
+  shouldImport(lastImportAt: Date | null, now: Date, budget: RateBudget | null, cadence: ImportCadence): boolean {
+    return readWhenDue(lastImportAt, now, budget, {
+      everyMs: cadence.everyMinutes * MINUTE_MS,
+      minRemaining: cadence.minRemaining,
+    });
+  }
+}
+
+/** How often an import may read the board, and how much allowance it leaves alone. */
+export type ImportCadence = {
+  readonly everyMinutes: number;
+  readonly minRemaining: number;
+};
+
+/**
+ * Whether a read nobody is waiting for may start: the allowance is known and above
+ * its reserve, and the gap since the last one has run out.
+ */
+function readWhenDue(
+  last: Date | null,
+  now: Date,
+  budget: RateBudget | null,
+  rule: { everyMs: number; minRemaining: number },
+): boolean {
+  if (budget === null || budget.remaining < rule.minRemaining) {
+    return false;
+  }
+  if (last === null) {
+    return true;
+  }
+  return now.getTime() - last.getTime() >= rule.everyMs;
 }

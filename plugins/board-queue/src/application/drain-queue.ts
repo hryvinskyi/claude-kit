@@ -26,6 +26,8 @@ export type TickReport = {
   done: number;
   blocked: number;
   failed: number;
+  /** Conditional work whose condition did not hold; it ended skipped, without writing anything. */
+  notApplied: number;
   /** Put back on the queue: a wait the action was not to blame for, or a failure worth another go. */
   requeued: number;
   /** Actions blocked by an earlier tick that the board can now answer for. */
@@ -44,6 +46,7 @@ type Tally = {
   done: number;
   blocked: number;
   failed: number;
+  notApplied: number;
   requeued: number;
   unblocked: number;
   recovered: number;
@@ -60,6 +63,7 @@ const TALLY_OF_STATE: Partial<Record<ActionState, keyof Tally>> = {
   done: 'done',
   blocked: 'blocked',
   failed: 'failed',
+  skipped: 'notApplied',
   queued: 'requeued',
 };
 
@@ -101,6 +105,19 @@ const NEEDS_A_PERSON: FailurePlan = {
   stopsTick: false,
 };
 
+/**
+ * Conditional work whose condition no longer held: nothing was written, and
+ * running it again would meet the same answer, so it ends here and asks nobody
+ * for anything.
+ */
+const NO_LONGER_APPLIES: FailurePlan = {
+  settle: (action, error, ctx) => {
+    action.skip(ctx.now, error.describe());
+  },
+  pausesQueue: false,
+  stopsTick: false,
+};
+
 /** A moment's fault: it waits out the policy's curve and comes back, a few times. */
 const WORTH_ANOTHER_GO: FailurePlan = {
   settle: (action, error, ctx) => {
@@ -129,6 +146,7 @@ const PLAN_BY_CATEGORY: ReadonlyMap<ErrorCategory, FailurePlan> = new Map<ErrorC
   ['invalid-issue-ref', NEEDS_A_PERSON],
   ['unknown-kind', NEEDS_A_PERSON],
   ['transient-failure', WORTH_ANOTHER_GO],
+  ['precondition-unmet', NO_LONGER_APPLIES],
 ]);
 
 /** The state of one action after the tick decided about it. */
@@ -494,7 +512,17 @@ export class DrainQueue {
 }
 
 function emptyTally(): Tally {
-  return { executed: 0, done: 0, blocked: 0, failed: 0, requeued: 0, unblocked: 0, recovered: 0, stale: 0 };
+  return {
+    executed: 0,
+    done: 0,
+    blocked: 0,
+    failed: 0,
+    notApplied: 0,
+    requeued: 0,
+    unblocked: 0,
+    recovered: 0,
+    stale: 0,
+  };
 }
 
 function count(tally: Tally, state: ActionState | null): void {

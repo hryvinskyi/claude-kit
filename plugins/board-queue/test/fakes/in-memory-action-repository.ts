@@ -1,5 +1,5 @@
 import { emptyActionCounts } from '../../src/application/action-states.ts';
-import type { ActionCounts, ActionFilter, ActionRepository } from '../../src/application/ports.ts';
+import type { ActionCounts, ActionFilter, ActionRepository, MetaWrite } from '../../src/application/ports.ts';
 import { Action } from '../../src/domain/action.ts';
 import type { ActionProps } from '../../src/domain/action.ts';
 import type { BoardKey } from '../../src/domain/board-directory.ts';
@@ -71,14 +71,67 @@ export class InMemoryActionRepository implements ActionRepository {
     return stored;
   }
 
-  insert(action: Action): Promise<void> {
+  /**
+   * Thrown by the next batch write after it has written part of its rows, the way
+   * a store that fails mid-transaction does; nothing of that batch stays.
+   */
+  failNextBatchWith: Error | null = null;
+
+  insert(action: Action): Promise<boolean> {
     if (this.#rows.has(action.id)) {
       throw new Error(`the queue already holds an action with the id "${action.id}"`);
+    }
+    if (this.#carriesTakenKey(action)) {
+      return Promise.resolve(false);
     }
     this.#seq += 1;
     this.#rows.set(action.id, { props: copy(action.props()), seq: this.#seq });
     action.markPersisted();
-    return Promise.resolve();
+    return Promise.resolve(true);
+  }
+
+  async insertAll(actions: readonly Action[], meta: readonly MetaWrite[]): Promise<string[]> {
+    const rowsBefore = new Map(this.#rows);
+    const metaBefore = new Map(this.#meta);
+    const seqBefore = this.#seq;
+    try {
+      const written: string[] = [];
+      for (const action of actions) {
+        if (await this.insert(action)) {
+          written.push(action.id);
+        }
+      }
+      const breaks = this.failNextBatchWith;
+      if (breaks !== null) {
+        this.failNextBatchWith = null;
+        throw breaks;
+      }
+      for (const entry of meta) {
+        this.#meta.set(entry.key, entry.value);
+      }
+      return written;
+    } catch (error) {
+      this.#rows.clear();
+      for (const [id, row] of rowsBefore) {
+        this.#rows.set(id, row);
+      }
+      this.#meta.clear();
+      for (const [key, value] of metaBefore) {
+        this.#meta.set(key, value);
+      }
+      this.#seq = seqBefore;
+      throw error;
+    }
+  }
+
+  findByDedupeKey(key: string): Promise<Action | null> {
+    const found = [...this.#rows.values()].find((stored) => stored.props.dedupeKey === key);
+    return Promise.resolve(found === undefined ? null : rebuild(found));
+  }
+
+  #carriesTakenKey(action: Action): boolean {
+    const key = action.dedupeKey;
+    return key !== null && [...this.#rows.values()].some((stored) => stored.props.dedupeKey === key);
   }
 
   update(action: Action): Promise<void> {

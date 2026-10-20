@@ -20,7 +20,9 @@ export type ErrorCategory =
   | 'invalid-issue-ref'
   | 'illegal-transition'
   | 'unknown-kind'
-  | 'stale-action';
+  | 'stale-action'
+  | 'precondition-unmet'
+  | 'cursor-expired';
 
 export class BoardQueueError extends Error {
   readonly category: ErrorCategory;
@@ -247,5 +249,40 @@ export class StaleAction extends BoardQueueError {
   override describe(): string {
     return `action ${this.actionId} was changed by another writer since version ${this.expectedVersion} was read; `
       + 'read it again before deciding anything';
+  }
+}
+
+/**
+ * The work was conditional, and the condition did not hold when it ran. Nothing
+ * was written; the action ends without anybody having to look at it.
+ */
+export class PreconditionUnmet extends BoardQueueError {
+  /** Which condition did not hold, as a word a later pass can gather by. */
+  readonly reason: PreconditionReason;
+  readonly text: string;
+
+  constructor(reason: PreconditionReason, text: string) {
+    super('precondition-unmet', `${reason}: ${text}`);
+    this.reason = reason;
+    this.text = text;
+  }
+}
+
+/** The row is not on the board, or carries a status the write does not move a row out of. */
+export type PreconditionReason = 'not_on_board' | 'status_not_owned';
+
+/**
+ * A log reader asked for events after a position the log no longer keeps. The
+ * newest event that was removed is named, so the reader can go on after it.
+ */
+export class CursorExpired extends BoardQueueError {
+  readonly prunedThrough: number;
+
+  constructor(prunedThrough: number) {
+    super(
+      'cursor-expired',
+      `the event log no longer keeps what came after the cursor; it was pruned through ${String(prunedThrough)}`,
+    );
+    this.prunedThrough = prunedThrough;
   }
 }

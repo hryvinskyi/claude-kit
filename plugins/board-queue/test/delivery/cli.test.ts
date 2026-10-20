@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, st
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
+import { z } from 'zod';
 import { buildContainer } from '../../src/delivery/container.ts';
 import type { Container } from '../../src/delivery/container.ts';
 import { Action } from '../../src/domain/action.ts';
@@ -169,6 +170,24 @@ describe('the queue on a command line', () => {
       assert.match(piped.out, /^queued [0-9a-f-]{36}$/m);
       assert.equal(typed.code, 0, typed.err);
       assert.match(typed.out, /^queued [0-9a-f-]{36}$/m);
+    });
+  });
+
+  it('files a piped request carrying a key once, and names the action already filed the second time', async () => {
+    await workspace(async (space) => {
+      const request = JSON.stringify({
+        kind: 'issue.comment',
+        payload: { repo: FIRST, issue: 12, body: 'mirrored once' },
+        origin: 'a script',
+        dedupeKey: 'script:12:once',
+      });
+      const first = await space.run(['enqueue', '--json'], { stdin: request });
+      const second = await space.run(['enqueue'], { stdin: request });
+
+      assert.equal(first.code, 0, first.err);
+      const filed = z.object({ id: z.string() }).parse(JSON.parse(first.out));
+      assert.equal(second.code, 0, second.err);
+      assert.match(second.out, new RegExp(`already filed as ${filed.id}; nothing new was filed`));
     });
   });
 

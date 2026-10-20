@@ -156,8 +156,11 @@ describe('issue.comment and issue.close', () => {
 describe('KindRegistry', () => {
   it('resolves the kinds this system ships with', () => {
     const registry = defaultKindRegistry(testConfig);
-    assert.deepEqual(registry.names(), ['board.set-fields', 'board.verify', 'issue.comment', 'issue.close']);
-    assert.equal(registry.all().length, 4);
+    assert.deepEqual(
+      registry.names(),
+      ['board.set-fields', 'board.verify', 'issue.comment', 'issue.close', 'issue.assignees'],
+    );
+    assert.equal(registry.all().length, 5);
     assert.equal(registry.get('issue.close').name, 'issue.close');
     assert.ok(registry.has('board.verify'));
     assert.ok(!registry.has('board.magic'));

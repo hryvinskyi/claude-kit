@@ -25,5 +25,18 @@
     "catalogTtlSec": 3600,
     "auditEveryHours": 6,
     "auditMinRemaining": 1000
+  },
+  "dibs": {
+    "server": "https://dibs.example.com",
+    "project": "example-project",
+    "tokenEnv": "DIBS_TOKEN",
+    "mirrorOwner": "example-user",
+    "repos": ["example-org/example-repo"],
+    "mirror": {
+      "enabled": false,
+      "status": { "claimed": "In progress", "released": "Todo", "review": "In review" },
+      "assignees": true
+    },
+    "importer": { "enabled": false, "modules": { "Checkout": ["checkout"] } }
   }
 }

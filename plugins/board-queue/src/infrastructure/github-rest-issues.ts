@@ -22,6 +22,7 @@ const IssuePayload = z.object({
   state: z.enum(['open', 'closed']),
   title: z.string(),
   html_url: z.string(),
+  assignees: z.array(z.object({ login: z.string() })).nullable().optional(),
 });
 
 const CommentPayload = z.object({
@@ -51,6 +52,16 @@ export class GitHubRestIssues implements IssueGateway {
     const subject = `closing ${ref.toString()}`;
     const body = { state: 'closed', state_reason: reason };
     await this.http.rest('PATCH', issuePath(ref), body, subject, ABOUT_AN_ISSUE);
+  }
+
+  async addAssignees(ref: IssueRef, logins: readonly string[]): Promise<void> {
+    const subject = `assigning ${ref.toString()}`;
+    await this.http.rest('POST', `${issuePath(ref)}/assignees`, { assignees: [...logins] }, subject, ABOUT_AN_ISSUE);
+  }
+
+  async removeAssignees(ref: IssueRef, logins: readonly string[]): Promise<void> {
+    const subject = `unassigning ${ref.toString()}`;
+    await this.http.rest('DELETE', `${issuePath(ref)}/assignees`, { assignees: [...logins] }, subject, ABOUT_AN_ISSUE);
   }
 
   async get(ref: IssueRef): Promise<IssueSummary> {
@@ -135,5 +146,6 @@ function toSummary(payload: z.infer<typeof IssuePayload>): IssueSummary {
     state: payload.state,
     title: payload.title,
     url: payload.html_url,
+    assignees: (payload.assignees ?? []).map((assignee) => assignee.login),
   };
 }

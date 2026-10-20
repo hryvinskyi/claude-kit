@@ -16,6 +16,8 @@ import { redactSecrets } from './redaction.ts';
 const DEFAULT_BASE_URL = 'https://api.github.com';
 const DEFAULT_USER_AGENT = 'board-queue';
 const REST_API_VERSION = '2022-11-28';
+/** The answer to a conditional request whose tag still holds. */
+const NOT_MODIFIED = 304;
 
 /** The one call this package makes to the network, narrow enough to stand in for. */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -38,6 +40,13 @@ export type RestResult = {
   data: unknown;
   /** The address of the next page, as the `Link` header gave it, or null. */
   nextPageUrl: string | null;
+  /** The answer's version tag, which a later conditional request hands back. */
+  etag: string | null;
+  /**
+   * True when a conditional request was answered "unchanged": there is no body,
+   * and the answer the tag was taken from still holds.
+   */
+  notModified: boolean;
 };
 
 const GraphqlEnvelope = z
@@ -89,6 +98,12 @@ export type CallOptions = {
    * tolerates nothing is refused by any error at all, which is the default.
    */
   readonly tolerates?: (error: GraphqlError) => boolean;
+  /**
+   * The version tag of an answer the caller already holds. The API answers
+   * "unchanged" without a body when it still holds, and such an answer to a
+   * request carrying a credential is not counted against the hourly allowance.
+   */
+  readonly ifNoneMatch?: string;
 };
 
 /**
@@ -355,6 +370,10 @@ export class GitHubHttp {
       // suggested it.
       throw new TransientFailure(`${label} pointed at another host, which this credential is never sent to`);
     }
+    const extraHeaders: Record<string, string> = { 'x-github-api-version': REST_API_VERSION };
+    if (options.ifNoneMatch !== undefined) {
+      extraHeaders['if-none-match'] = options.ifNoneMatch;
+    }
     const outcome = await this.send({
       url,
       method,
@@ -362,7 +381,7 @@ export class GitHubHttp {
       subject: label,
       accept: 'application/vnd.github+json',
       body: body === undefined ? undefined : JSON.stringify(body),
-      extraHeaders: { 'x-github-api-version': REST_API_VERSION },
+      extraHeaders,
     });
     this.logger.info('rest call', {
       method,
@@ -370,6 +389,10 @@ export class GitHubHttp {
       status: outcome.status,
       remaining: outcome.budget?.remaining ?? null,
     });
+    const etag = outcome.header('etag');
+    if (outcome.status === NOT_MODIFIED && options.ifNoneMatch !== undefined) {
+      return { data: null, nextPageUrl: null, etag: etag ?? options.ifNoneMatch, notModified: true };
+    }
     if (!outcome.ok) {
       throw classifyRefusal({
         subject: label,
@@ -383,13 +406,13 @@ export class GitHubHttp {
     }
     const nextPageUrl = nextPageOf(outcome.header('link'));
     if (outcome.text.trim() === '') {
-      return { data: null, nextPageUrl };
+      return { data: null, nextPageUrl, etag, notModified: false };
     }
     const parsed = tryParseJson(outcome.text);
     if (!parsed.parsed) {
       throw new TransientFailure(`${label} answered something that is not JSON`);
     }
-    return { data: parsed.value, nextPageUrl };
+    return { data: parsed.value, nextPageUrl, etag, notModified: false };
   }
 
   /** Whether an address belongs to the API this transport was pointed at. */

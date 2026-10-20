@@ -19,12 +19,21 @@ export type EnqueueRequest = {
   hold?: boolean;
   /** The work waits until this moment. */
   notBefore?: Date | null;
+  /**
+   * Makes this request the one copy of a piece of work: when an action already
+   * carries the same key, nothing new is filed and that action is the answer. A
+   * request with a key is never folded into another one, because the merged row
+   * would carry only one of the two keys.
+   */
+  dedupeKey?: string | null;
 };
 
 export type EnqueueOutcome = {
   id: string;
   /** Set when the request was folded into an action that was already waiting. */
   coalescedInto?: string;
+  /** Set when an action already carried the request's dedupe key, which is then the answer. */
+  duplicateOf?: string;
   /**
    * Where the request ended up: waiting for the next tick, or held until somebody
    * releases it. It is answered here rather than worked out by the caller, so a
@@ -86,34 +95,35 @@ export class EnqueueAction {
   async execute(request: EnqueueRequest): Promise<EnqueueOutcome> {
     const now = this.#clock.now();
     const notBefore = this.#checkedDelay(request.notBefore ?? null, now);
-    const kind = this.#kinds.get(request.kind);
-    const validated = validate(kind, request.payload);
-    const named = kind.issueRefOf(validated);
-    const ref = named === null ? null : this.#directory.canonical(named);
-    const payload = ref === null ? validated : withRepo(validated, ref.repoFullName());
-    const warnings = ref === null ? [] : await this.#warnings(payload, ref);
+    const draft = draftAction(this.#kinds, this.#directory, { ...request, notBefore }, now);
+    const { action, kind, ref } = draft;
+    const warnings = ref === null ? [] : await this.#warnings(action.payload, ref);
+
+    const key = action.dedupeKey;
+    if (key !== null) {
+      const existing = await this.#repository.findByDedupeKey(key);
+      if (existing !== null) {
+        return { id: existing.id, duplicateOf: existing.id, state: existing.state, warnings };
+      }
+    }
 
     const waits = request.hold === true || notBefore !== null;
-    if (!waits && ref !== null) {
+    if (!waits && ref !== null && key === null) {
       // A request that waits on something is never folded into one that does not:
       // the merged values would run at the next tick, and nothing would say so.
-      const folded = await this.#foldIntoWaiting(kind, ref, payload, now);
+      const folded = await this.#foldIntoWaiting(kind, ref, action.payload, now);
       if (folded !== null) {
         return { id: folded.id, coalescedInto: folded.id, state: folded.state, warnings };
       }
     }
 
-    const action = Action.enqueue({
-      id: globalThis.crypto.randomUUID(),
-      kind: kind.name,
-      payload,
-      issueRef: ref,
-      origin: request.origin,
-      now,
-      hold: request.hold === true,
-      notBefore,
-    });
-    await this.#repository.insert(action);
+    if (!(await this.#repository.insert(action)) && key !== null) {
+      // Another filer wrote the same key between the look and the write.
+      const winner = await this.#repository.findByDedupeKey(key);
+      if (winner !== null) {
+        return { id: winner.id, duplicateOf: winner.id, state: winner.state, warnings };
+      }
+    }
     return { id: action.id, state: action.state, warnings };
   }
 
@@ -174,6 +184,45 @@ export class EnqueueAction {
     const cached = await this.#repository.getCatalog(this.#directory.placementOf(ref).key);
     return cached === null ? [] : catalogWarnings(payload, cached.catalog);
   }
+}
+
+/** A request turned into the action it would become, before anything is written. */
+export type DraftedAction = {
+  action: Action;
+  kind: ActionKind;
+  /** The issue it is about, spelled the way the configuration spells its repository. */
+  ref: IssueRef | null;
+};
+
+/**
+ * The action a request becomes: its payload checked against the kind's rules, and
+ * its repository refused unless a board carries it and otherwise given the
+ * configuration's spelling. Every way into the queue goes through here, so work
+ * that arrives in a batch obeys exactly the rules a single request does.
+ */
+export function draftAction(
+  kinds: KindRegistry,
+  directory: BoardDirectory,
+  request: EnqueueRequest,
+  now: Date,
+): DraftedAction {
+  const kind = kinds.get(request.kind);
+  const validated = validate(kind, request.payload);
+  const named = kind.issueRefOf(validated);
+  const ref = named === null ? null : directory.canonical(named);
+  const payload = ref === null ? validated : withRepo(validated, ref.repoFullName());
+  const action = Action.enqueue({
+    id: globalThis.crypto.randomUUID(),
+    kind: kind.name,
+    payload,
+    issueRef: ref,
+    origin: request.origin,
+    now,
+    hold: request.hold === true,
+    notBefore: request.notBefore ?? null,
+    dedupeKey: request.dedupeKey ?? null,
+  });
+  return { action, kind, ref };
 }
 
 /**

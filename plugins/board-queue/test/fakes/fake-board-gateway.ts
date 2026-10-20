@@ -4,6 +4,7 @@ import type {
   CatalogField,
   CatalogOption,
   FieldCatalog,
+  IssueFacts,
   ReadItemResult,
 } from '../../src/domain/catalog.ts';
 import type { BoardQueueError } from '../../src/domain/errors.ts';
@@ -15,6 +16,7 @@ import { RateBudget } from '../../src/domain/rate-budget.ts';
 export type BoardCall =
   | 'catalog'
   | 'snapshot'
+  | 'readWork'
   | 'ensureItem'
   | 'readItemById'
   | 'setSingleSelect'
@@ -24,6 +26,7 @@ export type SeededItem = {
   ref: IssueRef;
   itemId: string;
   values: Record<string, string>;
+  issue?: IssueFacts;
 };
 
 export type FakeBoardOptions = {
@@ -68,6 +71,10 @@ export class FakeBoardGateway implements BoardGateway {
   /** Runs after every call that reached the board, for a test that moves the allowance. */
   onCall: ((call: BoardCall) => void) | null = null;
   budget: RateBudget;
+  /** Rows the next walks report as unreadable, the way a row the credential cannot reach reads. */
+  unreadable = 0;
+  /** What each walk reports it cost. */
+  snapshotCost: number | null = 1;
 
   readonly #scripted = new Map<BoardCall, BoardQueueError[]>();
   readonly #items = new Map<string, SeededItem>();
@@ -135,12 +142,25 @@ export class FakeBoardGateway implements BoardGateway {
     return this.#catalog;
   }
 
+  /** The rows as a listing answers them: what writing and reading back need, and no issue facts. */
   snapshot(_force = false): Promise<BoardSnapshot> {
     this.#answer('snapshot');
     this.snapshotFetches += 1;
     return Promise.resolve({
       fetchedAt: this.#now(),
+      items: [...this.#items.values()].map((item) => ({ itemId: item.itemId, ref: item.ref, values: { ...item.values } })),
+      unreadable: this.unreadable,
+      cost: this.snapshotCost,
+    });
+  }
+
+  readWork(): Promise<BoardSnapshot> {
+    this.#answer('readWork');
+    return Promise.resolve({
+      fetchedAt: this.#now(),
       items: [...this.#items.values()].map(toReadItem),
+      unreadable: this.unreadable,
+      cost: this.snapshotCost,
     });
   }
 
@@ -221,7 +241,11 @@ export class FakeBoardGateway implements BoardGateway {
 }
 
 function toReadItem(item: SeededItem): ReadItemResult {
-  return { itemId: item.itemId, ref: item.ref, values: { ...item.values } };
+  const row: ReadItemResult = { itemId: item.itemId, ref: item.ref, values: { ...item.values } };
+  if (item.issue !== undefined) {
+    row.issue = { ...item.issue };
+  }
+  return row;
 }
 
 function emptyCatalog(): FieldCatalog {

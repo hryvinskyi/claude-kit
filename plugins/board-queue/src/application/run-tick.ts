@@ -1,6 +1,9 @@
 import type { BudgetPolicy } from './budget-policy.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { DrainQueue, TickReport } from './drain-queue.ts';
+import type { ImportReport } from './import-ready-work.ts';
+import type { MirrorReport } from './mirror-claims.ts';
+import type { SyncOwner } from './sync-owner.ts';
 import {
   readLastAudit,
   readLastAuditAttemptAt,
@@ -8,6 +11,29 @@ import {
   writeLastAuditAttemptAt,
 } from './queue-meta.ts';
 import type { ActionRepository, Clock, Logger } from './ports.ts';
+
+/**
+ * Keeping the boards in step with a coordination server, when this deployment
+ * does: the check that this is the one worker that may, and the directions that
+ * are switched on.
+ */
+export type SyncJobs = {
+  owner: SyncOwner;
+  /** Carries claims onto the boards as filed work; runs before the queue is drained. */
+  mirror?: () => Promise<MirrorReport>;
+  /** Reports the board's work to the server; runs after the queue and the report, when there is room. */
+  importer?: () => Promise<ImportReport>;
+};
+
+/** What the tick did about keeping in step, beside what it did to the queue. */
+export type SyncTickReport = {
+  /** Why this worker declined to keep in step, when it did. */
+  refused?: string;
+  mirror?: MirrorReport | { skipped: string };
+  import?: ImportReport;
+};
+
+export type WorkerReport = TickReport & { sync?: SyncTickReport };
 
 export type RunTickDeps = {
   drain: DrainQueue;
@@ -21,6 +47,7 @@ export type RunTickDeps = {
    * and neither has to know about the other.
    */
   audit?: () => Promise<void>;
+  sync?: SyncJobs;
 };
 
 /**
@@ -46,6 +73,7 @@ export class RunTick {
   readonly #clock: Clock;
   readonly #logger: Logger;
   readonly #audit: (() => Promise<void>) | null;
+  readonly #sync: SyncJobs | null;
 
   constructor(deps: RunTickDeps) {
     this.#drain = deps.drain;
@@ -54,13 +82,71 @@ export class RunTick {
     this.#clock = deps.clock;
     this.#logger = deps.logger;
     this.#audit = deps.audit ?? null;
+    this.#sync = deps.sync ?? null;
   }
 
-  async run(): Promise<TickReport> {
+  /**
+   * The mirror runs first, so the moves it files are drained in the same tick; the
+   * import runs last, because it reads, and reading waits for the work somebody
+   * asked for. Either one failing is recorded and the rest of the tick goes on.
+   */
+  async run(): Promise<WorkerReport> {
+    const sync = this.#sync;
+    const allowed = sync === null ? null : await sync.owner.verdict();
+    const syncReport: SyncTickReport = {};
+    if (allowed !== null && !allowed.ok) {
+      syncReport.refused = allowed.reason;
+    }
+    const mayKeepInStep = sync !== null && allowed !== null && allowed.ok;
+    if (mayKeepInStep && sync.mirror !== undefined) {
+      syncReport.mirror = await this.#locked('the claim mirror', sync.mirror);
+    }
+
     const report = await this.#drain.run();
+    await this.#maybeAudit(report);
+
+    if (mayKeepInStep && sync.importer !== undefined) {
+      syncReport.import = await this.#queueIsFree(report)
+        ? await this.#locked('the import', sync.importer)
+        : { skipped: 'the tick did not get to drain the queue, so nothing is read' };
+    }
+    return sync === null ? report : { ...report, sync: syncReport };
+  }
+
+  /**
+   * Runs one job under the single tick lock. A job that throws is logged and
+   * answered as skipped: keeping in step is never worth losing the tick's own
+   * account of what it did to the queue.
+   */
+  async #locked<T>(name: string, job: () => Promise<T>): Promise<T | { skipped: string }> {
+    const outcome = await this.#repository.withTickLock(async (): Promise<{ done: T } | { failed: string }> => {
+      try {
+        return { done: await job() };
+      } catch (error) {
+        const reason = describeUnknown(error);
+        this.#logger.error(`${name} failed`, { reason });
+        return { failed: reason };
+      }
+    });
+    if (outcome === null) {
+      return { skipped: 'another tick holds the lock' };
+    }
+    return 'done' in outcome ? outcome.done : { skipped: `${name} failed: ${outcome.failed}` };
+  }
+
+  /** Whether the queue ran and is not waiting out a refusal, which is when anything may read. */
+  async #queueIsFree(report: TickReport): Promise<boolean> {
+    if (report.skipped !== undefined || report.pausedUntil !== undefined) {
+      return false;
+    }
+    const pause = await this.#repository.getPause();
+    return pause === null || !pause.isActive(this.#clock.now());
+  }
+
+  async #maybeAudit(report: TickReport): Promise<void> {
     const audit = this.#audit;
     if (audit === null || !(await this.#worthReading(report))) {
-      return report;
+      return;
     }
     // Stamped before the pass rather than after it, so that a pass which fails —
     // or which the machine interrupts — still holds the cadence. A report that
@@ -82,7 +168,6 @@ export class RunTick {
     if (read === null) {
       this.#logger.info('the board was not read: another tick holds the lock');
     }
-    return report;
   }
 
   /**
@@ -96,11 +181,7 @@ export class RunTick {
    * the report and the writing spend one allowance between them.
    */
   async #worthReading(report: TickReport): Promise<boolean> {
-    if (report.skipped !== undefined || report.pausedUntil !== undefined) {
-      return false;
-    }
-    const pause = await this.#repository.getPause();
-    if (pause !== null && pause.isActive(this.#clock.now())) {
+    if (!(await this.#queueIsFree(report))) {
       return false;
     }
     const lastAudit = await readLastAudit(this.#repository);

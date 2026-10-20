@@ -12,12 +12,26 @@ import type { ActionRepository, Clock, Logger, Sleeper, TokenProvider } from '..
 import { QueueStatus } from '../application/queue-status.ts';
 import { ReleaseAction } from '../application/release-action.ts';
 import { RetryAction } from '../application/retry-action.ts';
+import { ImportReadyWork } from '../application/import-ready-work.ts';
+import { LimiterWait } from '../application/limiter-wait.ts';
+import { MirrorClaims } from '../application/mirror-claims.ts';
 import { RunTick } from '../application/run-tick.ts';
+import type { SyncJobs } from '../application/run-tick.ts';
+import { SyncOwner } from '../application/sync-owner.ts';
+import type { ClaimFeed, DependencyReader, LocalIdentity, WorkImport } from '../application/sync-ports.ts';
 import { ShowBoardItem } from '../application/show-board-item.ts';
 import { BoardDirectory } from '../domain/board-directory.ts';
+import type { BoardKey, BoardPlacement } from '../domain/board-directory.ts';
+import type { IssueRef } from '../domain/issue-ref.ts';
 import type { Config } from '../domain/config.ts';
 import { defaultKindRegistry } from '../domain/kinds/default-kinds.ts';
 import type { KindRegistry } from '../domain/kinds/registry.ts';
+import type { SyncConfig } from '../domain/sync-config.ts';
+import { syncIsOn } from '../domain/sync-config.ts';
+import { DibsHttpClient, tokenFromEnvironment } from '../infrastructure/dibs-http.ts';
+import { GhCliIdentity } from '../infrastructure/gh-cli-identity.ts';
+import { GitHubRestDependencies } from '../infrastructure/github-rest-dependencies.ts';
+import { SqliteDependencyCache } from '../infrastructure/sqlite-dependency-cache.ts';
 import { FileAuditReport } from '../infrastructure/file-audit-report.ts';
 import { FileLogger } from '../infrastructure/file-logger.ts';
 import { GitHubGraphqlBoard } from '../infrastructure/github-graphql-board.ts';
@@ -42,6 +56,12 @@ export type ContainerOverrides = {
   tokens?: TokenProvider;
   /** Somewhere other than the state directory to leave the board report. */
   reports?: AuditReportSink;
+  /** Stands in for the coordination server, for both directions of keeping in step. */
+  coordination?: ClaimFeed & WorkImport;
+  /** Stands in for the REST lists of what blocks an issue. */
+  dependencies?: DependencyReader;
+  /** Stands in for the login this machine's GitHub command line tool is signed in as. */
+  identity?: LocalIdentity;
 };
 
 export type BuildContainerOptions = {
@@ -116,8 +136,10 @@ export function buildContainer(options: BuildContainerOptions): Container {
   });
   // One account's allowance, whichever board's call reported it last.
   const ledger = new BudgetLedger();
+  const httpFor = (placement: BoardPlacement): GitHubHttp =>
+    new GitHubHttp({ tokens: overrides.tokens ?? credentials.for(placement.board), logger, ledger });
   const networkLanes: LaneFactory = (placement) => {
-    const http = new GitHubHttp({ tokens: overrides.tokens ?? credentials.for(placement.board), logger, ledger });
+    const http = httpFor(placement);
     return {
       board: new GitHubGraphqlBoard({
         http,
@@ -144,6 +166,24 @@ export function buildContainer(options: BuildContainerOptions): Container {
     reports: overrides.reports ?? new FileAuditReport(auditPath(stateDir)),
   });
 
+  const sync = config.dibs ?? null;
+  const closers: (() => void)[] = [];
+  const syncJobs = sync === null || !syncIsOn(sync) ? undefined : buildSyncJobs({
+    sync,
+    repository,
+    kinds,
+    directory,
+    boards,
+    policy,
+    clock,
+    sleeper,
+    logger,
+    overrides,
+    stateDir,
+    closers,
+    dependencyHttp: memoised((ref) => directory.placementOf(ref), httpFor),
+  });
+
   return {
     config,
     stateDir,
@@ -159,7 +199,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
     release: new ReleaseAction(repository, clock),
     cancel: new CancelAction(repository, clock),
     retry: new RetryAction(repository, clock),
-    status: new QueueStatus(repository, clock),
+    status: new QueueStatus(repository, clock, sync),
     list: new ListActions(repository),
     show: new ShowBoardItem({ boards, repository, clock }),
     audit,
@@ -176,9 +216,104 @@ export function buildContainer(options: BuildContainerOptions): Container {
       audit: async () => {
         await audit.execute();
       },
+      ...(syncJobs === undefined ? {} : { sync: syncJobs }),
     }),
     close: () => {
+      for (const close of closers) {
+        close();
+      }
       repository.close();
     },
+  };
+}
+
+type SyncWiring = {
+  sync: SyncConfig;
+  repository: ActionRepository;
+  kinds: KindRegistry;
+  directory: BoardDirectory;
+  boards: BoardRouter;
+  policy: BudgetPolicy;
+  clock: Clock;
+  sleeper: Sleeper;
+  logger: Logger;
+  overrides: ContainerOverrides;
+  stateDir: string;
+  /** Where every handle opened here is registered to be closed with the container. */
+  closers: (() => void)[];
+  /** The REST transport an issue's dependency lists are read through: that of the board that carries it. */
+  dependencyHttp: (ref: IssueRef) => GitHubHttp;
+};
+
+/**
+ * The two directions of keeping in step, built only when the configuration
+ * switches one on: nothing about the coordination server is opened, read or asked
+ * for otherwise. Both run behind the check that this worker is the one that may.
+ */
+function buildSyncJobs(wiring: SyncWiring): SyncJobs {
+  const { sync, repository, clock, logger, overrides } = wiring;
+  const coordination = overrides.coordination ?? new DibsHttpClient({
+    server: sync.server,
+    token: tokenFromEnvironment(process.env, sync.tokenEnv),
+    logger,
+  });
+  const jobs: SyncJobs = {
+    owner: new SyncOwner({
+      identity: overrides.identity ?? new GhCliIdentity(),
+      sync,
+      repository,
+      clock,
+      logger,
+    }),
+  };
+  const mirror = sync.mirror;
+  if (mirror?.enabled === true) {
+    const claims = new MirrorClaims({
+      feed: coordination,
+      repository,
+      kinds: wiring.kinds,
+      directory: wiring.directory,
+      sync,
+      mirror,
+      clock,
+      logger,
+    });
+    jobs.mirror = () => claims.execute();
+  }
+  if (sync.importer.enabled) {
+    const cache = new SqliteDependencyCache(dbPath(wiring.stateDir));
+    wiring.closers.push(() => {
+      cache.close();
+    });
+    const importer = new ImportReadyWork({
+      boards: wiring.boards,
+      dependencies: overrides.dependencies ?? new GitHubRestDependencies(wiring.dependencyHttp),
+      cache,
+      target: coordination,
+      repository,
+      wait: new LimiterWait({ repository, policy: wiring.policy, logger }),
+      policy: wiring.policy,
+      sync,
+      importer: sync.importer,
+      clock,
+      sleeper: wiring.sleeper,
+      logger,
+    });
+    jobs.importer = () => importer.execute();
+  }
+  return jobs;
+}
+
+/** One transport per board, built the first time an issue of that board is asked about. */
+function memoised(
+  placementOf: (ref: IssueRef) => BoardPlacement,
+  build: (placement: BoardPlacement) => GitHubHttp,
+): (ref: IssueRef) => GitHubHttp {
+  const built = new Map<BoardKey, GitHubHttp>();
+  return (ref) => {
+    const placement = placementOf(ref);
+    const held = built.get(placement.key) ?? build(placement);
+    built.set(placement.key, held);
+    return held;
   };
 }

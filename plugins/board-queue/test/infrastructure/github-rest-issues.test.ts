@@ -60,7 +60,32 @@ describe('GitHubRestIssues writes', () => {
       state: 'open',
       title: 'issue 12',
       url: 'https://github.com/example-org/first-repo/issues/12',
+      assignees: [],
     });
+  });
+
+  it('reads who an issue is assigned to', async () => {
+    const { gateway } = issues([{
+      headers: HEADERS,
+      body: issuePayload(12, 'open', { assignees: [{ login: 'alice' }, { login: 'bob' }] }),
+    }]);
+    assert.deepEqual((await gateway.get(REF)).assignees, ['alice', 'bob']);
+  });
+
+  it('assigns and unassigns through the issue\'s own assignees address', async () => {
+    const { gateway, fetcher } = issues([
+      { status: 201, headers: HEADERS, body: issuePayload(12, 'open', { assignees: [{ login: 'alice' }] }) },
+      { headers: HEADERS, body: issuePayload(12, 'open', { assignees: [] }) },
+    ]);
+    await gateway.addAssignees(REF, ['alice']);
+    await gateway.removeAssignees(REF, ['alice']);
+    const [added, removed] = fetcher.calls;
+    assert.equal(added?.method, 'POST');
+    assert.equal(added?.url, 'https://api.github.com/repos/example-org/first-repo/issues/12/assignees');
+    assert.deepEqual(added?.body, { assignees: ['alice'] });
+    assert.equal(removed?.method, 'DELETE');
+    assert.equal(removed?.url, 'https://api.github.com/repos/example-org/first-repo/issues/12/assignees');
+    assert.deepEqual(removed?.body, { assignees: ['alice'] });
   });
 
   it('reports the allowance the last answer named', async () => {

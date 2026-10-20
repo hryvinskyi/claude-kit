@@ -146,6 +146,7 @@ describe('filing an action', () => {
       done: 0,
       failed: 0,
       blocked: 0,
+      skipped: 0,
       cancelled: 0,
     });
   });
@@ -512,5 +513,59 @@ describe('filing an action', () => {
     });
 
     assert.deepEqual(outcome.warnings, []);
+  });
+
+  it('files a request carrying a key once, and answers the action already filed under it', async () => {
+    const { repository, enqueue } = harness();
+    const request = {
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S2' }),
+      origin: 'a mirror',
+      dedupeKey: 'mirror:one',
+    };
+
+    const first = await enqueue.execute(request);
+    const second = await enqueue.execute(request);
+
+    assert.equal(first.duplicateOf, undefined);
+    assert.equal(second.duplicateOf, first.id);
+    assert.equal(second.id, first.id);
+    assert.equal((await repository.list({})).length, 1);
+    assert.equal((await repository.get(first.id))?.dedupeKey, 'mirror:one');
+  });
+
+  it('never folds a request carrying a key into a waiting one, nor one into it', async () => {
+    const { repository, enqueue } = harness();
+    await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ severity: 'S2' }), origin: 'a session' });
+
+    const keyed = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ module: 'Checkout' }),
+      origin: 'a mirror',
+      dedupeKey: 'mirror:two',
+    });
+
+    assert.equal(keyed.coalescedInto, undefined);
+    assert.equal((await repository.list({})).length, 2);
+  });
+
+  it('answers the action another filer wrote under the same key a moment earlier', async () => {
+    const { repository, enqueue } = harness();
+    const request = { kind: 'issue.comment', payload: { repo: FIRST, issue: 12, body: 'once' }, origin: 'a mirror' };
+    const racing = await enqueue.execute({ ...request, dedupeKey: 'race' });
+    const realFind = repository.findByDedupeKey.bind(repository);
+    let looked = false;
+    repository.findByDedupeKey = async (key: string) => {
+      if (!looked) {
+        looked = true;
+        return null;
+      }
+      return realFind(key);
+    };
+
+    const late = await enqueue.execute({ ...request, dedupeKey: 'race' });
+
+    assert.equal(late.duplicateOf, racing.id);
+    assert.equal((await repository.list({})).length, 1);
   });
 });

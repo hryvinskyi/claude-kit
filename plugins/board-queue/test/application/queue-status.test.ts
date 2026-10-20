@@ -22,6 +22,7 @@ describe('what the queue is doing', () => {
       done: 1,
       failed: 0,
       blocked: 0,
+      skipped: 0,
       cancelled: 0,
     });
     assert.equal(status.pause, null);

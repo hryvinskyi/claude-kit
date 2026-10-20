@@ -1,5 +1,8 @@
 import type { Action } from '../domain/action.ts';
+import type { SyncConfig } from '../domain/sync-config.ts';
 import { readLastAudit, readLastBudget, readLastTickAt } from './queue-meta.ts';
+import { readImportRun, readMirrorRun, readSyncRefusal } from './sync-meta.ts';
+import type { ImportRun, MirrorRun, SyncRefusal } from './sync-meta.ts';
 import type { ActionCounts, ActionRepository, Clock } from './ports.ts';
 
 export type PauseView = {
@@ -61,6 +64,21 @@ export type HeldActionView = {
   ageDays: number;
 };
 
+/**
+ * Keeping the boards in step with a coordination server, as this worker does it:
+ * which directions are on, what each did last, and why this worker declined when
+ * it is not the one that runs them.
+ */
+export type SyncView = {
+  server: string;
+  project: string;
+  /** The one worker's login that runs either direction. */
+  owner: string;
+  mirror: { enabled: boolean; lastRun: MirrorRun | null };
+  importer: { enabled: boolean; lastRun: ImportRun | null };
+  refused: SyncRefusal | null;
+};
+
 export type QueueStatusView = {
   counts: ActionCounts;
   pause: PauseView | null;
@@ -71,6 +89,8 @@ export type QueueStatusView = {
   failed: StuckActionView[];
   held: HeldActionView[];
   delayed: DelayedActionView[];
+  /** Null when this deployment keeps nothing in step. */
+  sync: SyncView | null;
 };
 
 /**
@@ -84,10 +104,12 @@ export type QueueStatusView = {
 export class QueueStatus {
   readonly #repository: ActionRepository;
   readonly #clock: Clock;
+  readonly #sync: SyncConfig | null;
 
-  constructor(repository: ActionRepository, clock: Clock) {
+  constructor(repository: ActionRepository, clock: Clock, sync: SyncConfig | null = null) {
     this.#repository = repository;
     this.#clock = clock;
+    this.#sync = sync;
   }
 
   async execute(): Promise<QueueStatusView> {
@@ -151,6 +173,27 @@ export class QueueStatus {
           };
         })
         .sort((one, other) => one.runnableAt.localeCompare(other.runnableAt)),
+      sync: await this.#syncView(),
+    };
+  }
+
+  async #syncView(): Promise<SyncView | null> {
+    const sync = this.#sync;
+    if (sync === null) {
+      return null;
+    }
+    const [mirrorRun, importRun, refused] = await Promise.all([
+      readMirrorRun(this.#repository),
+      readImportRun(this.#repository),
+      readSyncRefusal(this.#repository),
+    ]);
+    return {
+      server: sync.server,
+      project: sync.project,
+      owner: sync.mirrorOwner,
+      mirror: { enabled: sync.mirror?.enabled === true, lastRun: mirrorRun },
+      importer: { enabled: sync.importer.enabled, lastRun: importRun },
+      refused,
     };
   }
 }

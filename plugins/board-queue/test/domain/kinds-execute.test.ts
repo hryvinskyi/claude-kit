@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { ExecutionContext } from '../../src/domain/kinds/action-kind.ts';
+import { AssigneesKind } from '../../src/domain/kinds/assignees.ts';
 import { CloseKind } from '../../src/domain/kinds/close.ts';
 import { CommentKind } from '../../src/domain/kinds/comment.ts';
-import { ReadbackMismatch, RefusedByRule } from '../../src/domain/errors.ts';
+import { OptionNotFound, PreconditionUnmet, ReadbackMismatch, RefusedByRule } from '../../src/domain/errors.ts';
 import { FieldRequest } from '../../src/domain/field-request.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { applyFields } from '../../src/domain/kinds/fields.ts';
 import { marker } from '../../src/domain/kinds/posts.ts';
+import { SetFieldsKind } from '../../src/domain/kinds/set-fields.ts';
 import { VerifyKind } from '../../src/domain/kinds/verify.ts';
 import { FakeBoardGateway, seedItem } from '../fakes/fake-board-gateway.ts';
 import type { SeededItem } from '../fakes/fake-board-gateway.ts';
@@ -257,5 +259,155 @@ describe('the last guard before a board write', () => {
     const readback = await applyFields(twelve, FieldRequest.forRead({ Status: 'In Rev' }, testConfig), it_.ctx);
 
     assert.deepEqual(readback, { Status: 'In Review' });
+  });
+});
+
+describe('a write that is conditional on the row\'s status', () => {
+  const kind = new SetFieldsKind(testConfig);
+  const move = (onlyIfStatusIn: string[]) => ({
+    repo: FIRST,
+    issue: 12,
+    fields: { status: 'In Progress' },
+    onlyIfStatusIn,
+  });
+
+  it('goes ahead while the row carries one of the statuses it names', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })] });
+
+    const result = await kind.execute(move(['Todo', 'In Progress', '']), it_.ctx);
+
+    assert.deepEqual(result.readback, { Status: 'In Progress' });
+    assert.deepEqual(it_.board.valuesOf(twelve), { Status: 'In Progress' });
+  });
+
+  it('goes ahead on a row with no status when an empty text is among them', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', {})] });
+
+    await kind.execute(move(['Todo', '']), it_.ctx);
+
+    assert.deepEqual(it_.board.valuesOf(twelve), { Status: 'In Progress' });
+  });
+
+  it('writes nothing over a status it does not name, and says what the row reads', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'In Review' })] });
+
+    await assert.rejects(
+      () => kind.execute(move(['Todo', 'In Progress', '']), it_.ctx),
+      (error: unknown) => error instanceof PreconditionUnmet && /"In Review"/.test(error.describe()),
+    );
+    assert.equal(it_.board.written.length, 0);
+    assert.deepEqual(it_.board.valuesOf(twelve), { Status: 'In Review' });
+  });
+
+  it('refuses an empty row when no empty text was named', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', {})] });
+
+    await assert.rejects(
+      () => kind.execute(move(['Todo']), it_.ctx),
+      (error: unknown) => error instanceof PreconditionUnmet && /reads nothing/.test(error.describe()),
+    );
+    assert.equal(it_.board.written.length, 0);
+  });
+
+  it('matches the statuses it names against the board\'s options, the way a wanted value is', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'In Review' })] });
+
+    await kind.execute(move(['in rev']), it_.ctx);
+
+    assert.deepEqual(it_.board.valuesOf(twelve), { Status: 'In Progress' });
+  });
+
+  it('passes over a listed status the board does not offer, which no row can carry', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })] });
+
+    const result = await kind.execute(move(['Parked', 'Todo']), it_.ctx);
+
+    assert.deepEqual(result.readback, { Status: 'In Progress' });
+  });
+
+  it('blocks only the move whose own status the board does not offer', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })] });
+    const toReview = { repo: FIRST, issue: 12, fields: { status: 'Code Review' }, onlyIfStatusIn: ['Code Review', 'Todo'] };
+
+    await assert.rejects(() => kind.execute(toReview, it_.ctx), (error: unknown) => error instanceof OptionNotFound);
+    await kind.execute(move(['Code Review', 'Todo', '']), it_.ctx);
+
+    assert.deepEqual(it_.board.valuesOf(twelve), { Status: 'In Progress' });
+  });
+
+  it('ends without a write, and adds no row, for an issue that is not on the board', async () => {
+    const it_ = stage({ items: [] });
+
+    await assert.rejects(
+      () => kind.execute(move(['Todo', '']), it_.ctx),
+      (error: unknown) => error instanceof PreconditionUnmet && error.reason === 'not_on_board',
+    );
+    assert.deepEqual(it_.board.ensured, []);
+    assert.equal(it_.board.written.length, 0);
+  });
+
+  it('decides on the row as it reads now, not as the walk last saw it', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })] });
+    await it_.board.snapshot();
+    await it_.board.setSingleSelect('item-7', 'field-status', 'option-status-in-review');
+
+    await assert.rejects(
+      () => kind.execute(move(['Todo', '']), it_.ctx),
+      (error: unknown) => error instanceof PreconditionUnmet && error.reason === 'status_not_owned',
+    );
+  });
+
+  it('never merges with another request on the same issue', () => {
+    const plain = { repo: FIRST, issue: 12, fields: { severity: 'S2' } };
+    assert.equal(kind.coalesce(plain, move(['Todo'])), null);
+    assert.equal(kind.coalesce(move(['Todo']), plain), null);
+    assert.notEqual(kind.coalesce(plain, plain), null);
+  });
+});
+
+describe('the assignees kind', () => {
+  const kind = new AssigneesKind();
+
+  it('adds and removes, then reads the issue back', async () => {
+    const it_ = stage({ issues: [{ ref: twelve, assignees: ['carol'] }] });
+
+    const result = await kind.execute({ repo: FIRST, issue: 12, add: ['alice'], remove: ['carol'] }, it_.ctx);
+
+    assert.deepEqual(it_.issues.assigneesOf(twelve), ['alice']);
+    assert.deepEqual(it_.issues.calls, ['addAssignees', 'removeAssignees', 'get']);
+    assert.deepEqual(it_.sleeper.slept, [1500], 'the two writes are paced');
+    assert.match(result.summary, /assigned to alice/);
+  });
+
+  it('sends only the half that names somebody', async () => {
+    const it_ = stage({ issues: [{ ref: twelve, assignees: ['carol'] }] });
+
+    await kind.execute({ repo: FIRST, issue: 12, remove: ['carol'] }, it_.ctx);
+
+    assert.deepEqual(it_.issues.calls, ['removeAssignees', 'get']);
+  });
+
+  it('reports a login GitHub would not assign instead of reading as done', async () => {
+    const it_ = stage({ issues: [{ ref: twelve }] });
+    it_.issues.unassignable.add('mallory');
+
+    await assert.rejects(
+      () => kind.execute({ repo: FIRST, issue: 12, add: ['mallory'] }, it_.ctx),
+      (error: unknown) => error instanceof ReadbackMismatch && /mallory assigned/.test(error.describe()),
+    );
+  });
+
+  it('refuses a request that names nobody, or one login both ways', () => {
+    assert.equal(kind.payloadSchema.safeParse({ repo: FIRST, issue: 12 }).success, false);
+    assert.equal(kind.payloadSchema.safeParse({ repo: FIRST, issue: 12, add: ['a'], remove: ['A'] }).success, false);
+    assert.equal(kind.payloadSchema.safeParse({ repo: FIRST, issue: 12, add: ['not a login'] }).success, false);
+  });
+
+  it('merges a later request login by login, the later one winning', () => {
+    const merged = kind.coalesce(
+      { repo: FIRST, issue: 12, add: ['alice'], remove: ['bob'] },
+      { repo: FIRST, issue: 12, add: ['bob'], remove: ['alice'] },
+    );
+    assert.deepEqual(merged, { repo: FIRST, issue: 12, add: ['bob'], remove: ['alice'] });
   });
 });

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { BoardGateway, CatalogStore, Clock } from '../application/ports.ts';
 import { boardNameOf, type BoardIdentity, type BoardOwnerType } from '../domain/board-directory.ts';
-import type { BoardSnapshot, CatalogField, FieldCatalog, ReadItemResult } from '../domain/catalog.ts';
+import type { BoardSnapshot, CatalogField, FieldCatalog, IssueFacts, ReadItemResult } from '../domain/catalog.ts';
 import { IssueNotFound, TransientFailure } from '../domain/errors.ts';
 import { IssueRef } from '../domain/issue-ref.ts';
 import { RateBudget } from '../domain/rate-budget.ts';
@@ -16,10 +16,7 @@ const OWNER_ROOT: Record<BoardOwnerType, string> = {
 const DEFAULT_SNAPSHOT_TTL_SEC = 60;
 const ITEM_PAGE_SIZE = 100;
 
-/** Everything a row of the board carries that this system reads. */
-const ITEM_SELECTION = `
-  id
-  content { ... on Issue { number repository { nameWithOwner } } }
+const FIELD_VALUES = `
   fieldValues(first: 20) {
     nodes {
       ... on ProjectV2ItemFieldSingleSelectValue {
@@ -29,6 +26,35 @@ const ITEM_SELECTION = `
     }
   }
 `;
+
+/** Everything a row of the board carries that writing to it and reading it back need. */
+const ITEM_SELECTION = `
+  id
+  content { ... on Issue { number repository { nameWithOwner } } }
+${FIELD_VALUES}`;
+
+/**
+ * A row as the board's work is read: the issue's own facts and the summaries of
+ * what blocks it as well. The summaries are objects rather than connections, so
+ * asking for them adds nothing to what a page costs; they are asked for only by
+ * the walk that needs them, so nothing else depends on them being answered.
+ */
+const WORK_SELECTION = `
+  id
+  content {
+    __typename
+    ... on Issue {
+      number
+      title
+      state
+      createdAt
+      updatedAt
+      repository { nameWithOwner }
+      issueDependenciesSummary { totalBlockedBy }
+      subIssuesSummary { total }
+    }
+  }
+${FIELD_VALUES}`;
 
 const catalogQuery = (root: string): string => `
 query BoardCatalog($owner: String!, $number: Int!) {
@@ -46,13 +72,14 @@ query BoardCatalog($owner: String!, $number: Int!) {
   }
 }`;
 
-const snapshotQuery = (root: string): string => `
-query BoardSnapshot($owner: String!, $number: Int!, $cursor: String) {
+const snapshotQuery = (root: string, operation: string, selection: string): string => `
+query ${operation}($owner: String!, $number: Int!, $cursor: String) {
+  rateLimit { cost }
   owner: ${root}(login: $owner) {
     projectV2(number: $number) {
       items(first: ${String(ITEM_PAGE_SIZE)}, after: $cursor) {
         pageInfo { hasNextPage endCursor }
-        nodes {${ITEM_SELECTION}}
+        nodes {${selection}}
       }
     }
   }
@@ -136,7 +163,18 @@ const ItemNode = z.object({
 const IssueContent = z.object({
   number: z.number().int().positive(),
   repository: z.object({ nameWithOwner: z.string() }),
+  title: z.string().optional(),
+  state: z.enum(['OPEN', 'CLOSED']).optional(),
+  createdAt: z.string().datetime({ offset: true }).optional(),
+  updatedAt: z.string().datetime({ offset: true }).optional(),
+  issueDependenciesSummary: z.object({ totalBlockedBy: z.number().int().nonnegative() }).nullable().optional(),
+  subIssuesSummary: z.object({ total: z.number().int().nonnegative() }).nullable().optional(),
 });
+
+const ISSUE_STATE = { OPEN: 'open', CLOSED: 'closed' } as const satisfies Record<
+  'OPEN' | 'CLOSED',
+  IssueFacts['state']
+>;
 
 const SingleSelectValue = z.object({
   name: z.string(),
@@ -144,6 +182,7 @@ const SingleSelectValue = z.object({
 });
 
 const SnapshotPayload = z.object({
+  rateLimit: z.object({ cost: z.number() }).nullable().optional(),
   owner: z
     .object({
       projectV2: z
@@ -270,9 +309,21 @@ export class GitHubGraphqlBoard implements BoardGateway {
     if (!force && this.held !== null && this.age(this.held.fetchedAt) < this.snapshotTtlMs) {
       return this.held;
     }
-    const subject = 'the board listing';
-    const query = snapshotQuery(OWNER_ROOT[this.board.ownerType]);
+    const snapshot = await this.walk('BoardSnapshot', ITEM_SELECTION, 'the board listing');
+    this.held = snapshot;
+    return snapshot;
+  }
+
+  /** Every row with its issue's facts, walked afresh each time: it is read once per import. */
+  async readWork(): Promise<BoardSnapshot> {
+    return this.walk('BoardWork', WORK_SELECTION, 'the board\'s work');
+  }
+
+  private async walk(operation: string, selection: string, subject: string): Promise<BoardSnapshot> {
+    const query = snapshotQuery(OWNER_ROOT[this.board.ownerType], operation, selection);
     const items: ReadItemResult[] = [];
+    let unreadable = 0;
+    let cost: number | null = null;
     let cursor: string | null = null;
     for (;;) {
       const payload: z.infer<typeof SnapshotPayload> = decodeWire(
@@ -289,8 +340,16 @@ export class GitHubGraphqlBoard implements BoardGateway {
       if (project === null) {
         throw new TransientFailure(`${subject} answered no project for ${this.boardName()}`);
       }
+      const pageCost = payload.rateLimit?.cost ?? null;
+      if (pageCost !== null) {
+        cost = (cost ?? 0) + pageCost;
+      }
       for (const node of project.items.nodes ?? []) {
-        const item = node === null ? null : toReadItem(node);
+        if (node === null || node.content === null || node.content === undefined) {
+          unreadable += 1;
+          continue;
+        }
+        const item = toReadItem(node);
         if (item !== null) {
           items.push(item);
         }
@@ -305,9 +364,7 @@ export class GitHubGraphqlBoard implements BoardGateway {
       }
       cursor = next;
     }
-    const snapshot: BoardSnapshot = { fetchedAt: this.clock.now(), items };
-    this.held = snapshot;
-    return snapshot;
+    return { fetchedAt: this.clock.now(), items, unreadable, cost };
   }
 
   /**
@@ -405,7 +462,33 @@ export class GitHubGraphqlBoard implements BoardGateway {
     if ((payload.updateProjectV2ItemFieldValue?.projectV2Item?.id ?? null) === null) {
       throw new TransientFailure(`${subject} answered no row`);
     }
-    this.forgetListing();
+    await this.noteWritten(itemId, fieldId, optionId);
+  }
+
+  /**
+   * Keeps the listing true after a value was written, rather than dropping it: a
+   * value written changes no row's membership, and a listing walked again after
+   * every write would cost a whole walk per write. A field or option the catalog
+   * cannot name drops the listing instead, so nothing is read from it that is not
+   * so.
+   */
+  private async noteWritten(itemId: string, fieldId: string, optionId: string): Promise<void> {
+    const held = this.held;
+    if (held === null) {
+      return;
+    }
+    const field = (await this.catalog()).fields.find((one) => one.id === fieldId);
+    const option = field?.options.find((one) => one.id === optionId);
+    if (field === undefined || option === undefined) {
+      this.forgetListing();
+      return;
+    }
+    this.held = {
+      ...held,
+      items: held.items.map((item) => (item.itemId === itemId
+        ? { ...item, values: { ...item.values, [field.name]: option.name } }
+        : item)),
+    };
   }
 
   async probeBudget(): Promise<RateBudget> {
@@ -480,9 +563,30 @@ function toReadItem(node: z.infer<typeof ItemNode>): ReadItemResult | null {
       values[value.data.field.name] = value.data.name;
     }
   }
-  return {
+  const item: ReadItemResult = {
     itemId: node.id,
     ref: IssueRef.of(content.data.repository.nameWithOwner, content.data.number),
     values,
+  };
+  const facts = factsOf(content.data);
+  if (facts !== null) {
+    item.issue = facts;
+  }
+  return item;
+}
+
+/** The issue's own facts, when the row answered every one of them. */
+function factsOf(content: z.infer<typeof IssueContent>): IssueFacts | null {
+  const { title, state, createdAt, updatedAt } = content;
+  if (title === undefined || state === undefined || createdAt === undefined || updatedAt === undefined) {
+    return null;
+  }
+  return {
+    title,
+    state: ISSUE_STATE[state],
+    createdAt: new Date(createdAt),
+    updatedAt: new Date(updatedAt),
+    blockedByTotal: content.issueDependenciesSummary?.totalBlockedBy ?? null,
+    subIssuesTotal: content.subIssuesSummary?.total ?? null,
   };
 }

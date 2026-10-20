@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { describeDuplicate, duplicateBoards, duplicateRepositories } from './board-directory.ts';
 import { isRepoFullName } from './issue-ref.ts';
+import { SyncConfigSchema } from './sync-config.ts';
 
 /**
  * Everything this system is allowed to touch, and the numbers the worker paces
@@ -53,9 +54,21 @@ export const ConfigSchema = z
     fields: z.array(z.string().min(1)).min(1),
     refusedStatus: z.array(z.string().min(1)).default([]),
     worker: WorkerConfigSchema.default({}),
+    /** Keeping the boards in step with a coordination server; absent, nothing of it runs. */
+    dibs: SyncConfigSchema.optional(),
   })
   .strict()
   .superRefine((config, ctx) => {
+    const carried = new Set(config.boards.flatMap((board) => board.repos.map((repo) => repo.toLowerCase())));
+    for (const repo of config.dibs?.repos ?? []) {
+      if (!carried.has(repo.toLowerCase())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['dibs', 'repos'],
+          message: `${repo} is kept in step but no board carries it; name it under the board it belongs to`,
+        });
+      }
+    }
     for (const board of duplicateBoards(config.boards)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

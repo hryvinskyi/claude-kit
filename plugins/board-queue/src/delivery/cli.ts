@@ -130,6 +130,7 @@ const PipedRequest = z
     origin: z.string().min(1).optional(),
     hold: z.boolean().optional(),
     notBefore: z.string().min(1).optional(),
+    dedupeKey: z.string().trim().min(1).max(500).optional(),
   })
   .strict();
 
@@ -593,7 +594,8 @@ function pipedRequest(context: CommandContext, text: string): EnqueueRequest {
   const request = PipedRequest.safeParse(parsed);
   if (!request.success) {
     throw new RefusedByRule(
-      'a piped request is {"kind": …, "payload": {…}} and may add "origin", "hold" and "notBefore" — '
+      'a piped request is {"kind": …, "payload": {…}} and may add "origin", "hold", "notBefore" and '
+      + '"dedupeKey" — '
       + request.error.issues.map((issue) => `${issue.path.join('.')} ${issue.message}`).join('; '),
     );
   }
@@ -604,6 +606,7 @@ function pipedRequest(context: CommandContext, text: string): EnqueueRequest {
     origin: given.origin ?? context.cwd,
     hold: given.hold,
     notBefore: given.notBefore === undefined ? null : momentOf(given.notBefore),
+    dedupeKey: given.dedupeKey ?? null,
   };
 }
 

@@ -1,20 +1,17 @@
-import { chmodSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 import type { SQLInputValue, SQLOutputValue, StatementSync } from 'node:sqlite';
-import { emptyActionCounts, isActionState } from '../application/action-states.ts';
-import type { ActionCounts, ActionFilter, ActionRepository, Clock } from '../application/ports.ts';
+import { ACTION_STATES, emptyActionCounts } from '../application/action-states.ts';
+import type { ActionCounts, ActionFilter, ActionRepository, Clock, MetaWrite } from '../application/ports.ts';
 import { Action } from '../domain/action.ts';
+import type { ActionState } from '../domain/action.ts';
 import type { BoardKey } from '../domain/board-directory.ts';
 import type { CachedCatalog, CatalogField, CatalogOption, FieldCatalog } from '../domain/catalog.ts';
 import { StaleAction } from '../domain/errors.ts';
 import { IssueRef } from '../domain/issue-ref.ts';
 import { QueuePause } from '../domain/queue-pause.ts';
+import { openQueueDatabase } from './queue-database.ts';
 import { redactSecrets } from './redaction.ts';
 
-/** The shape this version writes; a file written by a later one is not opened. */
-const SCHEMA_VERSION = 1;
-
-const SCHEMA_VERSION_KEY = 'schema_version';
 const PAUSE_KEY = 'pause';
 const TICK_LOCK_KEY = 'tick_lock';
 /** Meta lives beside the queue's own rows, so it is kept in its own namespace. */
@@ -23,49 +20,22 @@ const META_PREFIX = 'meta:';
 /** A tick that has held the lock this long is treated as gone, pid or no pid. */
 const LOCK_STALE_AFTER_MS = 30 * 60 * 1000;
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS actions (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  repo TEXT,
-  issue INTEGER,
-  state TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  not_before INTEGER,
-  origin TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  last_error TEXT,
-  result TEXT,
-  blocked_reason TEXT,
-  version INTEGER NOT NULL DEFAULT 1
-);
-CREATE INDEX IF NOT EXISTS actions_by_runnability ON actions (state, not_before);
-CREATE INDEX IF NOT EXISTS actions_by_ref ON actions (repo, issue, created_at);
-CREATE TABLE IF NOT EXISTS queue_state (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS board_catalog_cache (
-  board TEXT PRIMARY KEY,
-  fetched_at INTEGER NOT NULL,
-  json TEXT NOT NULL
-);
-`;
-
 const COLUMNS = 'id, kind, payload, repo, issue, state, attempts, not_before, origin, '
-  + 'created_at, updated_at, last_error, result, blocked_reason, version';
+  + 'created_at, updated_at, last_error, result, blocked_reason, version, dedupe_key, ended_as';
 
+/**
+ * An action whose key another action already carries is not written: the filer
+ * said this is one piece of work, and it is already in the queue.
+ */
 const INSERT_SQL = `INSERT INTO actions (${COLUMNS}) `
-  + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+  + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (dedupe_key) DO NOTHING';
 
 /**
  * Guarded by the version the aggregate was read at: when another writer has
  * touched the row in the meantime no column changes and the caller is told, so a
  * decision taken on stale facts never lands.
  */
-const UPDATE_SQL = 'UPDATE actions SET kind = ?, payload = ?, repo = ?, issue = ?, state = ?, '
+const UPDATE_SQL = 'UPDATE actions SET kind = ?, payload = ?, repo = ?, issue = ?, state = ?, ended_as = ?, '
   + 'attempts = ?, not_before = ?, origin = ?, updated_at = ?, last_error = ?, result = ?, '
   + 'blocked_reason = ?, version = ? WHERE id = ? AND version = ?';
 
@@ -145,6 +115,7 @@ export class SqliteActionRepository implements ActionRepository {
   readonly #insertStatement: StatementSync;
   readonly #updateStatement: StatementSync;
   readonly #getStatement: StatementSync;
+  readonly #byDedupeKeyStatement: StatementSync;
   readonly #claimStatement: StatementSync;
   readonly #coalescibleStatement: StatementSync;
   readonly #coalesceStatement: StatementSync;
@@ -161,22 +132,18 @@ export class SqliteActionRepository implements ActionRepository {
     this.#isProcessAlive = options.isProcessAlive ?? processIsAlive;
     this.#lockStaleAfterMs = options.lockStaleAfterMs ?? LOCK_STALE_AFTER_MS;
 
-    this.#db = new DatabaseSync(file);
-    narrowTo(file);
-    // Several processes read and write this file; the log lets them do so at once,
-    // and the timeout makes a writer wait for the current one instead of failing.
-    this.#db.exec('PRAGMA journal_mode = WAL');
-    this.#db.exec('PRAGMA busy_timeout = 5000');
-    this.#db.exec('PRAGMA foreign_keys = ON');
-    this.#db.exec(SCHEMA);
+    this.#db = openQueueDatabase(file);
 
     this.#insertStatement = this.#db.prepare(INSERT_SQL);
     this.#updateStatement = this.#db.prepare(UPDATE_SQL);
     this.#getStatement = this.#db.prepare(`SELECT ${COLUMNS} FROM actions WHERE id = ?`);
+    this.#byDedupeKeyStatement = this.#db.prepare(`SELECT ${COLUMNS} FROM actions WHERE dedupe_key = ?`);
     this.#claimStatement = this.#db.prepare(CLAIM_SQL);
     this.#coalescibleStatement = this.#db.prepare(COALESCIBLE_SQL);
     this.#coalesceStatement = this.#db.prepare(COALESCE_SQL);
-    this.#countsStatement = this.#db.prepare('SELECT state, COUNT(*) AS total FROM actions GROUP BY state');
+    this.#countsStatement = this.#db.prepare(
+      'SELECT state, ended_as, COUNT(*) AS total FROM actions GROUP BY state, ended_as',
+    );
     this.#readStateStatement = this.#db.prepare('SELECT value FROM queue_state WHERE key = ?');
     this.#writeStateStatement = this.#db.prepare(
       'INSERT INTO queue_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
@@ -188,39 +155,42 @@ export class SqliteActionRepository implements ActionRepository {
       'INSERT INTO board_catalog_cache (board, fetched_at, json) VALUES (?, ?, ?) '
       + 'ON CONFLICT(board) DO UPDATE SET fetched_at = excluded.fetched_at, json = excluded.json',
     );
-
-    this.#checkSchemaVersion();
-    // The log and the shared-memory file appear the moment the log is switched on
-    // above, and they hold the same rows the database does.
-    narrowTo(`${file}-wal`);
-    narrowTo(`${file}-shm`);
   }
 
   close(): void {
     this.#db.close();
   }
 
-  async insert(action: Action): Promise<void> {
-    const row = toRow(action);
-    this.#insertStatement.run(
-      row.id,
-      row.kind,
-      row.payload,
-      row.repo,
-      row.issue,
-      row.state,
-      row.attempts,
-      row.not_before,
-      row.origin,
-      row.created_at,
-      row.updated_at,
-      row.last_error,
-      row.result,
-      row.blocked_reason,
-      row.version,
-    );
-    action.markPersisted();
-    return Promise.resolve();
+  async insert(action: Action): Promise<boolean> {
+    const inserted = this.#write(action);
+    if (inserted) {
+      action.markPersisted();
+    }
+    return Promise.resolve(inserted);
+  }
+
+  async insertAll(actions: readonly Action[], meta: readonly MetaWrite[]): Promise<string[]> {
+    const inserted = this.#transact(() => {
+      const written: Action[] = [];
+      for (const action of actions) {
+        if (this.#write(action)) {
+          written.push(action);
+        }
+      }
+      for (const entry of meta) {
+        this.#writeState(META_PREFIX + entry.key, entry.value);
+      }
+      return written;
+    });
+    for (const action of inserted) {
+      action.markPersisted();
+    }
+    return Promise.resolve(inserted.map((action) => action.id));
+  }
+
+  async findByDedupeKey(key: string): Promise<Action | null> {
+    const row = this.#byDedupeKeyStatement.get(key);
+    return Promise.resolve(row === undefined ? null : fromRow(row));
   }
 
   async update(action: Action): Promise<void> {
@@ -286,8 +256,10 @@ export class SqliteActionRepository implements ActionRepository {
     const params: SQLInputValue[] = [];
     // An empty list of states is no preference, the same as naming none at all.
     if (filter.states !== undefined && filter.states.length > 0) {
-      conditions.push(`state IN (${filter.states.map(() => '?').join(', ')})`);
-      params.push(...filter.states);
+      conditions.push(`(${filter.states.map(() => '(state = ? AND ended_as IS ?)').join(' OR ')})`);
+      for (const state of filter.states) {
+        params.push(STORED_AS[state].state, STORED_AS[state].endedAs);
+      }
     }
     if (filter.repo !== undefined) {
       conditions.push('repo = ?');
@@ -315,9 +287,9 @@ export class SqliteActionRepository implements ActionRepository {
   async counts(): Promise<ActionCounts> {
     const counts = emptyActionCounts();
     for (const row of this.#countsStatement.all()) {
-      const state = readText(row, 'state');
-      if (isActionState(state)) {
-        counts[state] = readInteger(row, 'total');
+      const state = stateOf(readText(row, 'state'), readOptionalText(row, 'ended_as'));
+      if (state !== null) {
+        counts[state] += readInteger(row, 'total');
       }
     }
     return Promise.resolve(counts);
@@ -430,6 +402,30 @@ export class SqliteActionRepository implements ActionRepository {
     return this.#isProcessAlive(pid);
   }
 
+  /** Writes a new row and answers whether it was written, rather than found under its key. */
+  #write(action: Action): boolean {
+    const row = toRow(action);
+    return changeCount(this.#insertStatement.run(
+      row.id,
+      row.kind,
+      row.payload,
+      row.repo,
+      row.issue,
+      row.state,
+      row.attempts,
+      row.not_before,
+      row.origin,
+      row.created_at,
+      row.updated_at,
+      row.last_error,
+      row.result,
+      row.blocked_reason,
+      row.version,
+      row.dedupe_key,
+      row.ended_as,
+    )) > 0;
+  }
+
   #writeGuarded(action: Action): number {
     const row = toRow(action);
     return changeCount(this.#updateStatement.run(
@@ -438,6 +434,7 @@ export class SqliteActionRepository implements ActionRepository {
       row.repo,
       row.issue,
       row.state,
+      row.ended_as,
       row.attempts,
       row.not_before,
       row.origin,
@@ -460,20 +457,6 @@ export class SqliteActionRepository implements ActionRepository {
     this.#writeStateStatement.run(key, value);
   }
 
-  #checkSchemaVersion(): void {
-    const stored = this.#readState(SCHEMA_VERSION_KEY);
-    if (stored === null) {
-      this.#writeState(SCHEMA_VERSION_KEY, String(SCHEMA_VERSION));
-      return;
-    }
-    const version = Number(stored);
-    if (!Number.isFinite(version) || version > SCHEMA_VERSION) {
-      throw new Error(
-        `this queue file was written by a newer version (schema ${stored}); this one reads ${String(SCHEMA_VERSION)}`,
-      );
-    }
-  }
-
   /** Everything that must not lose a race runs inside one write transaction. */
   #transact<T>(fn: () => T): T {
     this.#db.exec('BEGIN IMMEDIATE');
@@ -486,6 +469,40 @@ export class SqliteActionRepository implements ActionRepository {
       throw error;
     }
   }
+}
+
+/** A state as a row holds it: a state every reader of the file knows, and how it ended where that says less. */
+type StoredState = {
+  readonly state: string;
+  readonly endedAs: string | null;
+};
+
+/**
+ * How each state is stored. Every state an older reader of this file knows is
+ * stored as itself; a skipped action is stored as cancelled — an ending every
+ * reader knows, which nothing retries — and marked, so an older reader lists it
+ * as finished and this one reads it back as skipped.
+ */
+const STORED_AS: { readonly [S in ActionState]: StoredState } = {
+  queued: { state: 'queued', endedAs: null },
+  held: { state: 'held', endedAs: null },
+  running: { state: 'running', endedAs: null },
+  done: { state: 'done', endedAs: null },
+  failed: { state: 'failed', endedAs: null },
+  blocked: { state: 'blocked', endedAs: null },
+  skipped: { state: 'cancelled', endedAs: 'skipped' },
+  cancelled: { state: 'cancelled', endedAs: null },
+};
+
+/** The state a stored row stands for, or null when it stands for none this version knows. */
+function stateOf(state: string, endedAs: string | null): ActionState | null {
+  for (const candidate of ACTION_STATES) {
+    const stored = STORED_AS[candidate];
+    if (stored.state === state && stored.endedAs === endedAs) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 type ActionRow = {
@@ -504,6 +521,8 @@ type ActionRow = {
   result: string | null;
   blocked_reason: string | null;
   version: number;
+  dedupe_key: string | null;
+  ended_as: string | null;
 };
 
 /**
@@ -515,13 +534,15 @@ type ActionRow = {
  */
 function toRow(action: Action): ActionRow {
   const props = action.props();
+  const stored = STORED_AS[props.state];
   return {
     id: props.id,
     kind: props.kind,
     payload: encodePayload(props.payload),
     repo: props.issueRef === null ? null : props.issueRef.repoFullName().toLowerCase(),
     issue: props.issueRef === null ? null : props.issueRef.number,
-    state: props.state,
+    state: stored.state,
+    ended_as: stored.endedAs,
     attempts: props.attempts,
     not_before: props.notBefore === null ? null : props.notBefore.getTime(),
     origin: props.origin,
@@ -534,6 +555,7 @@ function toRow(action: Action): ActionRow {
     result: props.result === null ? null : redactSecrets(props.result),
     blocked_reason: props.blockedReason,
     version: props.version,
+    dedupe_key: props.dedupeKey,
   };
 }
 
@@ -541,9 +563,10 @@ function fromRow(row: Record<string, SQLOutputValue>): Action {
   const payload = parseJson(readText(row, 'payload'));
   const repo = readOptionalText(row, 'repo');
   const issue = readOptionalInteger(row, 'issue');
-  const state = readText(row, 'state');
-  if (!isActionState(state)) {
-    throw new Error(`the queue holds an action in the unknown state "${state}"`);
+  const storedState = readText(row, 'state');
+  const state = stateOf(storedState, readOptionalText(row, 'ended_as'));
+  if (state === null) {
+    throw new Error(`the queue holds an action in the unknown state "${storedState}"`);
   }
   return new Action({
     id: readText(row, 'id'),
@@ -560,6 +583,7 @@ function fromRow(row: Record<string, SQLOutputValue>): Action {
     result: readOptionalText(row, 'result'),
     version: readInteger(row, 'version'),
     blockedReason: readOptionalText(row, 'blocked_reason'),
+    dedupeKey: readOptionalText(row, 'dedupe_key'),
   });
 }
 
@@ -701,19 +725,6 @@ function asCatalogField(value: unknown): CatalogField | null {
     options.push({ id: optionId, name: optionName });
   }
   return { id, name, dataType, options };
-}
-
-/**
- * Keeps a queue file to its owner. Best effort: a file that is not there yet, or
- * one somebody else owns, is not this process's to change, and refusing to open
- * the queue over its permissions would stop the work without protecting anything.
- */
-function narrowTo(file: string): void {
-  try {
-    chmodSync(file, 0o600);
-  } catch {
-    // Left as it is; the directory around it is the owner's alone.
-  }
 }
 
 /**

@@ -57,7 +57,7 @@ make this system add a second row or refuse to write.
 
 ## The kinds
 
-Four sorts of work, each a class with its own payload, its own merging rule and its own way of confirming
+Five sorts of work, each a class with its own payload, its own merging rule and its own way of confirming
 what it did. The repository is always written `owner/name` and must be one the configuration names; the
 board written to is the one that carries it.
 
@@ -73,6 +73,14 @@ Wanted texts are matched against the board's live options: exactly, then ignorin
 that fits one option only — so `S2` reaches `S2 · broken · no workaround`. A text that fits nothing, or
 several, blocks the action and reports what the field accepts. Two of these waiting on the same issue merge
 into one, the later values winning.
+
+`"onlyIfStatusIn": ["In Progress", "Todo", ""]` makes the write conditional: the row is found on the board's
+walk and read fresh before anything is written, and the write goes ahead only while its Status is one of the
+listed texts (`""` is a row with no status; a listed text the board offers no option for is passed over).
+Otherwise the action ends **skipped** — `status_not_owned`, or `not_on_board` for an issue with no row, which a
+conditional write never adds — writing nothing and asking nobody for anything. It is the form for work that
+copies another system's state onto the board, which arrives late as often as not and must never pull a row back
+out of a column somebody else moved it to. A conditional request merges with nothing.
 
 `board.verify` — read a row back and compare it with what you expect; writes nothing.
 
@@ -111,6 +119,20 @@ queue never writes the status `Done` itself** — the same automation would clos
 it would do so before the evidence comment exists. Enqueue refuses it, and execution refuses it again after
 the prefix has been resolved.
 
+`issue.assignees` — assign and unassign people, everybody else staying assigned.
+
+```json
+{ "kind": "issue.assignees",
+  "payload": { "repo": "example-org/example-repo", "issue": 412, "add": ["alice"], "remove": ["bob"] } }
+```
+
+The issue is read back afterwards: a login GitHub would not assign — somebody without access to the
+repository — blocks the action instead of reading as done. Two of these waiting on one issue merge, the later
+request winning for a login both name.
+
+A request piped in whole may carry `"dedupeKey"`: an action already filed under the same key is the answer,
+and nothing new is filed. A request with a key never merges with another.
+
 ## The life of an action
 
 ```
@@ -120,7 +142,8 @@ the prefix has been resolved.
                              ↑  ↑               │
              backoff ────────┘  └── requeue ────┤   (a refusal that was not this action's fault)
                                                 ├──→ blocked ──retry──→ queued
-                                                └──→ failed  ──retry──→ queued
+                                                ├──→ failed  ──retry──→ queued
+                                                └──→ skipped   (a condition it carried did not hold)
    queued | held | blocked | failed ──cancel──→ cancelled
 ```
 
@@ -190,6 +213,76 @@ them. The last report is kept as `audit.json` in the state directory, one file, 
 what it found, says so in the report, and leaves that summary alone so the next tick looks again. A pass
 that fails outright stamps the attempt, so a report that cannot be written waits out the same six hours
 rather than being asked for again every five minutes.
+
+## Keeping the boards in step with a coordination server
+
+A [dibs](https://github.com/hryvinskyi/dibs) server knows who is working on what: people claim work items there,
+and its event log records every claim. The `dibs` section of the configuration keeps a set of repositories in
+step with one of its projects, in both directions:
+
+```json
+"dibs": {
+  "server": "https://dibs.example.com",
+  "project": "widgets",
+  "tokenEnv": "DIBS_TOKEN",
+  "mirrorOwner": "alice",
+  "repos": ["example-org/example-repo"],
+  "mirror": {
+    "enabled": true,
+    "status": { "claimed": "In Progress", "released": "Todo", "review": "In Review" },
+    "assignees": true
+  },
+  "importer": { "enabled": true, "modules": { "Checkout": ["checkout"] } }
+}
+```
+
+**Exactly one worker runs it.** Every person runs a worker, and a mirror in each would keep its own cursor
+and file every move once per person. Both directions are off unless the configuration turns them on, and
+each tick first asks whether this machine's GitHub command line tool is signed in as `mirrorOwner`; on any
+other worker the tick declines, says why in `status`, and drains its own queue as usual. `tokenEnv` names the
+variable holding the token of the project's `importer` member, never the token; the variable is read only when
+a call needs it.
+
+**The mirror** (server → board) follows the event log from its cursor at the start of each tick, up to five
+pages of 500, for as long as the cursor moves: the server leaves out of a page what this reader may not see while
+its cursor moves past it, so a page that shows nothing is not the end of the log, and the cursor is saved after
+every page. Per issue, the events of a page collapse to the state the last of them left, and two actions are
+filed: a `board.set-fields` of the status the claim stands for (`claimed`, `released` — a release by an admin
+too —, `takenOver` and `reviewEnded`, which default to `claimed`, and `review`), conditional on the row still
+carrying one of the statuses the mirror writes or none; and an `issue.assignees` for the holder, mapped to a
+GitHub login through the project's members (a login is kept once read, so a removed member is still unassigned).
+A completed claim files nothing: the board's final columns are not the mirror's.
+
+**It never replays the log.** On its first run, and when the log no longer keeps what came after the cursor, it
+reads to the head of the log filing nothing, then files the state each live claim (`GET /v1/claims`) stands for
+now; `status` says it started from the head, at which event, and why. A cursor note that is not a cursor is an
+error in `status`, never read as the start of the log. The cursor and the last event filed for each item are
+written in the same transaction as the actions, so a crash leaves all or none; a move no later than one already
+filed for its item is not filed again however the pages fell, and the key each action carries
+(`dibs:<server>:<project>:<event>:status|assignees`, or `head<event>:<item>` after a fresh start) is the store's
+backstop against filing one state twice. Each item's reference is asked once and kept; an item whose reference
+cannot be read is passed over, counted in `status`, and the page goes on. A server that cannot be reached is
+recorded in `status` and the queue is drained regardless.
+
+**The importer** (board → server) runs after the queue is drained, at most every `everyMinutes` (15) and only
+while the GraphQL allowance is above `minRemaining` (1000). It walks each board that carries a repository kept
+in step — a walk of its own, which also asks for each issue's title, state, dates and the summaries of what blocks
+it at no extra cost per page, so that no write or read-back depends on those fields — and then, for an open issue whose summary says it
+has blockers or sub-issues, the REST lists `GET /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` and
+`…/sub_issues`. Those are asked conditionally with the tag of the answer kept from the last run (an unchanged
+list is answered 304, which the hourly allowance does not count), one a second, at most `maxRequestsPerTick`
+(100) per run, oldest answer first; a burst refusal ends the asking and puts the queue to sleep. A parent is
+blocked by its open sub-issues. Then `PUT /v1/items` in batches of 500: each issue with its title, its Status,
+the areas its Module stands for (`modules`; a Module with no entry hints at nothing), the priority its Severity
+stands for (`priorities`, `S1` → 0 … `S4` → 3 by default) and what blocks it; a blocker that is not on the
+board is carried under its own reference as a blocker only, so it is never closed by the import. Only the last
+batch, holding every open item, says it is complete — and only when every row of every board was read in that
+run, and only when the open items did not fall to none or by more than half since the last complete import —
+so an item that left the board is closed on the server, while a board that suddenly reads nearly empty closes
+nothing and says why in `status`. It writes nothing to GitHub and files nothing in
+the queue, and what it sends changes no claim, so it never sets off a move of the mirror.
+
+`status` shows both: the last run of each, the cursor, what an import cost to read, and why either stopped.
 
 ## From a session
 
@@ -341,7 +434,13 @@ post and everything the API answered with.
 
 | file | what it is |
 |---|---|
-| `queue.db` | the queue itself (SQLite, WAL) |
+| `queue.db` | the queue itself (SQLite, WAL), the cursor of the mirror and the dependency answers the importer keeps |
+| `queue.db.before-layout<N>.bak` | a whole copy taken once before the file was brought to layout `N`; delete it once the new version runs |
+
+The file records two numbers. `schema_version` is the oldest generation of this code that can read it, and is
+what every release checks; a change of layout that older releases still read leaves it alone, so going back to
+an older release never stops the queue. `layout_revision` is the layout written, and only grows. A skipped action
+is stored as cancelled, marked in a column older releases never read, so they list it as finished.
 | `worker.log` | structured lines from the worker and the tools, credentials redacted |
 | `audit.json` | the last report-only pass over every board |
 | `launchd.log` | whatever the scheduled job printed |

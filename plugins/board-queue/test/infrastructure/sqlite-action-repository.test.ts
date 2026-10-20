@@ -413,6 +413,7 @@ describe('the queue on disk', () => {
       done: 0,
       failed: 0,
       blocked: 0,
+      skipped: 0,
       cancelled: 0,
     });
   });

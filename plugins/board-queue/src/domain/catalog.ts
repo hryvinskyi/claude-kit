@@ -19,17 +19,39 @@ export type FieldCatalog = {
   fields: CatalogField[];
 };
 
+/** What a board row says about the issue it holds, beyond which issue it is. */
+export type IssueFacts = {
+  title: string;
+  state: 'open' | 'closed';
+  createdAt: Date;
+  updatedAt: Date;
+  /** How many issues block it, open or closed; null when the board did not say. */
+  blockedByTotal: number | null;
+  /** How many sub-issues it has, open or closed; null when the board did not say. */
+  subIssuesTotal: number | null;
+};
+
 /** One row of the board: the item, the issue it holds, and its single-select values. */
 export type ReadItemResult = {
   itemId: string;
   ref: IssueRef;
   values: Record<string, string>;
+  /** Present when the read asked for them and the board answered every one. */
+  issue?: IssueFacts;
 };
 
 /** Every row, read in one paginated walk and reusable for a short while. */
 export type BoardSnapshot = {
   fetchedAt: Date;
   items: ReadItemResult[];
+  /**
+   * Rows the board would not answer for — their content could not be read —
+   * which are left out of `items`. A walk that has any did not see the whole
+   * board, even though every page arrived.
+   */
+  unreadable: number;
+  /** What the walk cost, summed over its pages as the API priced each; null when no page said. */
+  cost: number | null;
 };
 
 /** The catalog as it was last fetched, with the moment it was fetched. */

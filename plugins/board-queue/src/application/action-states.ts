@@ -15,6 +15,7 @@ export const ACTION_STATES: readonly ActionState[] = [
   'done',
   'failed',
   'blocked',
+  'skipped',
   'cancelled',
 ];
 
@@ -31,6 +32,7 @@ export function emptyActionCounts(): ActionCounts {
     done: 0,
     failed: 0,
     blocked: 0,
+    skipped: 0,
     cancelled: 0,
   };
 }

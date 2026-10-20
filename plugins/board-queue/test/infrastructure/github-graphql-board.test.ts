@@ -241,6 +241,83 @@ describe('GitHubGraphqlBoard listing', () => {
     const snapshot = await gateway.snapshot();
 
     assert.deepEqual(snapshot.items.map((item) => item.ref.toString()), ['example-org/first-repo#12']);
+    assert.equal(snapshot.unreadable, 1, 'the row it passed over is counted, so nobody reads the walk as whole');
+  });
+
+  it('asks a listing for nothing beyond what writing and reading back need', async () => {
+    const { gateway, fetcher } = board([{ headers: HEADERS, body: snapshotPage([], false, null) }]);
+
+    await gateway.snapshot();
+
+    assert.doesNotMatch(fetcher.calls[0]?.query ?? '', /issueDependenciesSummary|subIssuesSummary|createdAt/);
+  });
+
+  it('counts a draft and a pull request as rows that are not ours, and not as unreadable', async () => {
+    const { gateway } = board([{
+      headers: HEADERS,
+      body: snapshotPage([
+        { id: 'PVTI_draft', content: { __typename: 'DraftIssue' } },
+        { id: 'PVTI_pull', content: { __typename: 'PullRequest' } },
+      ], false, null),
+    }]);
+
+    const snapshot = await gateway.snapshot();
+
+    assert.deepEqual(snapshot.items, []);
+    assert.equal(snapshot.unreadable, 0);
+  });
+
+  it('reads the issue\'s own facts and the summaries of what blocks it', async () => {
+    const { gateway, fetcher } = board([{
+      headers: HEADERS,
+      body: {
+        data: {
+          rateLimit: { cost: 2 },
+          owner: { projectV2: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
+            id: 'PVTI_one',
+            content: {
+              __typename: 'Issue',
+              number: 12,
+              title: 'Refund rounding',
+              state: 'CLOSED',
+              createdAt: '2026-01-02T09:00:00Z',
+              updatedAt: '2026-01-05T10:30:00Z',
+              repository: { nameWithOwner: 'example-org/first-repo' },
+              issueDependenciesSummary: { totalBlockedBy: 2 },
+              subIssuesSummary: { total: 0 },
+            },
+            fieldValues: { nodes: [] },
+          }] } } },
+        },
+      },
+    }]);
+
+    const snapshot = await gateway.readWork();
+
+    assert.match(fetcher.calls[0]?.query ?? '', /issueDependenciesSummary \{ totalBlockedBy \}/);
+    assert.match(fetcher.calls[0]?.query ?? '', /rateLimit \{ cost \}/);
+    assert.deepEqual(snapshot.items[0]?.issue, {
+      title: 'Refund rounding',
+      state: 'closed',
+      createdAt: new Date('2026-01-02T09:00:00Z'),
+      updatedAt: new Date('2026-01-05T10:30:00Z'),
+      blockedByTotal: 2,
+      subIssuesTotal: 0,
+    });
+    assert.equal(snapshot.cost, 2);
+  });
+
+  it('adds up what every page of a walk cost', async () => {
+    const priced = (page: { data: unknown }, cost: number): { data: unknown } => {
+      const data = page.data;
+      return { data: typeof data === 'object' && data !== null ? { ...data, rateLimit: { cost } } : data };
+    };
+    const { gateway } = board([
+      { headers: HEADERS, body: priced(FIRST_PAGE, 2) },
+      { headers: HEADERS, body: priced(SECOND_PAGE, 1) },
+    ]);
+
+    assert.equal((await gateway.snapshot()).cost, 3);
   });
 
   it('still refuses a listing that failed for a reason of its own', async () => {
@@ -299,22 +376,37 @@ describe('GitHubGraphqlBoard writes', () => {
     );
   });
 
-  it('forgets the walk it is holding as soon as it writes to the board', async () => {
+  it('keeps the walk it is holding true after a value is written, without walking again', async () => {
     const clock = new FakeClock();
     const store = new MemoryCatalogStore({ catalog: CATALOG, fetchedAt: clock.now() });
     const { gateway, fetcher } = board([
-      { headers: HEADERS, body: FIRST_PAGE },
-      { headers: HEADERS, body: SECOND_PAGE },
-      { headers: HEADERS, body: { data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: 'PVTI_one' } } } } },
       { headers: HEADERS, body: snapshotPage([itemNode('PVTI_one', 'example-org/first-repo', 12, 'Done')], false, null) },
+      { headers: HEADERS, body: { data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: 'PVTI_one' } } } } },
     ], store);
     await gateway.findItem(IssueRef.of('example-org/first-repo', 12));
 
     await gateway.setSingleSelect('PVTI_one', 'F_status', 'o_todo');
     const after = await gateway.findItem(IssueRef.of('example-org/first-repo', 12));
 
-    assert.equal(after?.values['Status'], 'Done', 'a read after a write must not answer out of the walk before it');
-    assert.equal(fetcher.calls.length, 4);
+    assert.equal(after?.values['Status'], 'Todo', 'a read after a write answers the value written');
+    assert.equal(fetcher.calls.length, 2);
+  });
+
+  it('forgets the walk after writing a value its catalog cannot name', async () => {
+    const clock = new FakeClock();
+    const store = new MemoryCatalogStore({ catalog: CATALOG, fetchedAt: clock.now() });
+    const { gateway, fetcher } = board([
+      { headers: HEADERS, body: snapshotPage([itemNode('PVTI_one', 'example-org/first-repo', 12, 'Done')], false, null) },
+      { headers: HEADERS, body: { data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: 'PVTI_one' } } } } },
+      { headers: HEADERS, body: snapshotPage([itemNode('PVTI_one', 'example-org/first-repo', 12, 'Parked')], false, null) },
+    ], store);
+    await gateway.findItem(IssueRef.of('example-org/first-repo', 12));
+
+    await gateway.setSingleSelect('PVTI_one', 'F_status', 'o_unknown');
+    const after = await gateway.findItem(IssueRef.of('example-org/first-repo', 12));
+
+    assert.equal(after?.values['Status'], 'Parked');
+    assert.equal(fetcher.calls.length, 3);
   });
 
   it('forgets it when it adds a row too', async () => {

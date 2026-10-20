@@ -398,4 +398,28 @@ describe('GitHubHttp requests', () => {
     assert.equal(result.data, null);
     assert.equal(result.nextPageUrl, null);
   });
+
+  it('hands back the version tag an answer carries', async () => {
+    const { http } = wire([{ headers: { ...budgetHeaders(100, RESET_SECONDS, 'core'), etag: '"v1"' }, body: [] }]);
+    const result = await http.rest('GET', '/repos/example-org/first-repo/issues/1/sub_issues');
+    assert.equal(result.etag, '"v1"');
+    assert.equal(result.notModified, false);
+  });
+
+  it('asks conditionally and reads "unchanged" as an answer, not a refusal', async () => {
+    const { http, fetcher } = wire([{ status: 304, headers: { ...budgetHeaders(100, RESET_SECONDS, 'core'), etag: '"v1"' } }]);
+    const result = await http.rest('GET', '/repos/example-org/first-repo/issues/1/sub_issues', undefined, undefined, {
+      ifNoneMatch: '"v1"',
+    });
+    assert.equal(fetcher.calls[0]?.headers['if-none-match'], '"v1"');
+    assert.equal(result.notModified, true);
+    assert.equal(result.data, null);
+    assert.equal(result.etag, '"v1"');
+  });
+
+  it('sends no condition unless one is asked for', async () => {
+    const { http, fetcher } = wire([{ headers: budgetHeaders(100, RESET_SECONDS, 'core'), body: [] }]);
+    await http.rest('GET', '/repos/example-org/first-repo/issues/1/sub_issues');
+    assert.equal(fetcher.calls[0]?.headers['if-none-match'], undefined);
+  });
 });

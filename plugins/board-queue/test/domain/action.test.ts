@@ -46,6 +46,10 @@ function inState(state: ActionState): Action {
       action.start(now);
       action.block(now, new OptionNotFound('Module', 'Checkout', ['Cart']));
     },
+    skipped: () => {
+      action.start(now);
+      action.skip(now, 'Status is "Ready for QA", which this request does not move');
+    },
     cancelled: () => action.cancel(now),
   };
   reach[state]();

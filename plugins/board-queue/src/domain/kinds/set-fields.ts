@@ -6,6 +6,7 @@ import {
   FieldShapeSchema,
   IssueNumberSchema,
   RepoSchema,
+  StatusPreconditionSchema,
   applyFields,
   checkFields,
   describeValues,
@@ -17,6 +18,7 @@ const shape = z
     repo: RepoSchema,
     issue: IssueNumberSchema,
     fields: FieldShapeSchema,
+    onlyIfStatusIn: StatusPreconditionSchema.optional(),
   })
   .strict();
 
@@ -31,7 +33,10 @@ const DESCRIBE = [
   'options the field accepts rather than guessing. Status "Done" is refused: the board\'s auto-close workflow',
   'reacts to it by closing the issue, which would happen before the evidence comment exists — close the issue',
   'itself and let the board follow. Two of these waiting on the same issue merge into one, the later values',
-  'winning; a request that waits on a deploy is held instead and never merges.',
+  'winning; a request that waits on a deploy is held instead and never merges. onlyIfStatusIn makes the write',
+  'conditional: it goes ahead only while the row\'s status is one of the listed texts ("" for no status at all),',
+  'and otherwise the action ends skipped, writing nothing — the form for work that mirrors another system and',
+  'must never move a row out of a column it does not own. A conditional request never merges with another.',
 ].join(' ');
 
 /** Writes single-select values on an issue's board row and reads them back. */
@@ -53,10 +58,17 @@ export class SetFieldsKind implements ActionKind {
     return IssueRef.of(parsed.repo, parsed.issue);
   }
 
-  /** Field by field, the later request wins; everything else stays as it was filed. */
+  /**
+   * Field by field, the later request wins; everything else stays as it was filed.
+   * A conditional request merges with nothing: its condition would then guard the
+   * other request's values too, or be lost.
+   */
   coalesce(existing: unknown, incoming: unknown): unknown {
     const before = this.payloadSchema.parse(existing);
     const after = this.payloadSchema.parse(incoming);
+    if (before.onlyIfStatusIn !== undefined || after.onlyIfStatusIn !== undefined) {
+      return null;
+    }
     return {
       ...before,
       ...after,
@@ -67,7 +79,12 @@ export class SetFieldsKind implements ActionKind {
   async execute(payload: unknown, ctx: ExecutionContext): Promise<ActionResult> {
     const parsed = this.payloadSchema.parse(payload);
     const ref = IssueRef.of(parsed.repo, parsed.issue);
-    const readback = await applyFields(ref, fieldRequestFrom(parsed.fields, this.#config, 'write'), ctx);
+    const readback = await applyFields(
+      ref,
+      fieldRequestFrom(parsed.fields, this.#config, 'write'),
+      ctx,
+      parsed.onlyIfStatusIn ?? null,
+    );
     return { summary: `${ref.toString()}: ${describeValues(readback)}`, readback };
   }
 }

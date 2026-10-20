@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { CatalogField, CatalogOption, FieldCatalog } from '../catalog.ts';
 import { findCatalogField, resolveOption } from '../catalog.ts';
 import type { Config } from '../config.ts';
-import { BoardQueueError, ReadbackMismatch, RefusedByRule } from '../errors.ts';
+import { BoardQueueError, PreconditionUnmet, ReadbackMismatch, RefusedByRule } from '../errors.ts';
 import { FieldRequest, STATUS_FIELD, namesRefusedStatus } from '../field-request.ts';
 import type { FieldRequestMode } from '../field-request.ts';
 import type { IssueRef } from '../issue-ref.ts';
@@ -52,6 +52,12 @@ export const IssueNumberSchema = z.number().int().positive();
 export const MAX_BODY_LENGTH = 65_536;
 
 export const BodyTextSchema = z.string().min(1).max(MAX_BODY_LENGTH);
+
+/**
+ * The statuses a row may carry for a write to go ahead; an empty text stands for
+ * a row whose status is not set at all.
+ */
+export const StatusPreconditionSchema = z.array(z.string().trim().max(200)).min(1);
 
 const BUILD: Record<FieldRequestMode, (wanted: Record<string, string>, config: Config) => FieldRequest> = {
   write: FieldRequest.forWrite,
@@ -191,10 +197,13 @@ export async function applyFields(
   ref: IssueRef,
   request: FieldRequest,
   ctx: ExecutionContext,
+  onlyIfStatusIn: readonly string[] | null = null,
 ): Promise<Record<string, string>> {
   const resolved = await resolveWanted(request, ctx);
   refuseForbiddenStatus(resolved, ctx);
-  const itemId = await ctx.board.ensureItem(ref);
+  const itemId = onlyIfStatusIn === null
+    ? await ctx.board.ensureItem(ref)
+    : await requireStatusIn(ref, onlyIfStatusIn, ctx);
   for (const { field, option } of resolved) {
     await ctx.sleeper.sleep(ctx.paceMs);
     await ctx.board.setSingleSelect(itemId, field.id, option.id);
@@ -209,6 +218,65 @@ export async function applyFields(
     readback[field.name] = actual;
   }
   return readback;
+}
+
+/**
+ * Lets a write go ahead only while the row's status is one the writer owns, and
+ * answers the row to write to.
+ *
+ * A writer that copies another system's state onto the board can arrive late —
+ * its machine slept, its source was slow — and by then somebody else may have
+ * moved the row on. Writing over that would move the row backwards, out of a
+ * column nobody gave this writer. So the row is found on the board's walk before
+ * anything is written — an issue with no row ends the action, and is never added
+ * — and read once more, fresh, for its status. A status outside the list ends the
+ * action without a write too.
+ *
+ * Each listed text is matched against the board's options the way a wanted value
+ * is, so the beginning of a long label is enough, and an empty text is a row with
+ * no status. A listed text the board offers no option for cannot be the status a
+ * row carries, so it is passed over rather than stopping a write that never
+ * needed it.
+ */
+async function requireStatusIn(ref: IssueRef, allowed: readonly string[], ctx: ExecutionContext): Promise<string> {
+  const field = findCatalogField(await ctx.board.catalog(), STATUS_FIELD);
+  if (field === null) {
+    throw new RefusedByRule(`the board has no field called "${STATUS_FIELD}", so no status can be required of a row`);
+  }
+  const listed = await ctx.board.findItem(ref);
+  if (listed === null) {
+    throw new PreconditionUnmet(
+      'not_on_board',
+      `${ref.toString()} has no row on the board, and this write adds none`,
+    );
+  }
+  const names = allowed.flatMap((text) => optionNamed(field, text));
+  const row = await ctx.board.readItemById(listed.itemId);
+  const current = row.values[field.name] ?? '';
+  if (!names.includes(current)) {
+    const from = names.map((name) => (name === '' ? 'an empty status' : `"${name}"`)).join(', ');
+    throw new PreconditionUnmet(
+      'status_not_owned',
+      `${field.name} reads ${current === '' ? 'nothing' : `"${current}"`}; this write moves a row only from `
+      + `${from}, so the row was left as it is`,
+    );
+  }
+  return listed.itemId;
+}
+
+/** The option a listed text stands for, an empty text for no status, or nothing when it fits no option. */
+function optionNamed(field: CatalogField, text: string): string[] {
+  if (text.trim() === '') {
+    return [''];
+  }
+  try {
+    return [resolveOption(field, text).name];
+  } catch (error) {
+    if (!(error instanceof BoardQueueError)) {
+      throw error;
+    }
+    return [];
+  }
 }
 
 /** `Status → In Progress, Severity → S2 · broken`, for a person reading the queue. */

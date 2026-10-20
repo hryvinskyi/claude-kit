@@ -9,6 +9,7 @@ export type ActionState =
   | 'done'
   | 'failed'
   | 'blocked'
+  | 'skipped'
   | 'cancelled';
 
 export type ActionProps = {
@@ -26,6 +27,11 @@ export type ActionProps = {
   result: string | null;
   version: number;
   blockedReason: string | null;
+  /**
+   * What makes this action the one copy of a piece of work, when its filer says
+   * so: a second action carrying the same key is never written.
+   */
+  dedupeKey: string | null;
 };
 
 export type EnqueueInput = {
@@ -37,6 +43,7 @@ export type EnqueueInput = {
   now: Date;
   hold?: boolean;
   notBefore?: Date | null;
+  dedupeKey?: string | null;
 };
 
 /**
@@ -57,6 +64,7 @@ export class Action {
   readonly issueRef: IssueRef | null;
   readonly origin: string;
   readonly createdAt: Date;
+  readonly dedupeKey: string | null;
 
   #payload: unknown;
   #state: ActionState;
@@ -75,6 +83,7 @@ export class Action {
     this.issueRef = props.issueRef;
     this.origin = props.origin;
     this.createdAt = props.createdAt;
+    this.dedupeKey = props.dedupeKey;
     this.#payload = props.payload;
     this.#state = props.state;
     this.#attempts = props.attempts;
@@ -108,6 +117,7 @@ export class Action {
       result: null,
       version: 1,
       blockedReason: null,
+      dedupeKey: input.dedupeKey ?? null,
     });
   }
 
@@ -177,6 +187,7 @@ export class Action {
       result: this.#result,
       version: this.#version,
       blockedReason: this.#blockedReason,
+      dedupeKey: this.dedupeKey,
     };
   }
 
@@ -236,6 +247,19 @@ export class Action {
     this.#state = 'blocked';
     this.#lastError = error.describe();
     this.#blockedReason = error.category;
+    this.#touch(now);
+  }
+
+  /**
+   * The work no longer applies: what it was conditional on did not hold when it
+   * ran. It is an ending, not a failure, so nothing retries it and nobody is asked
+   * to fix anything; the reason is kept as its result.
+   */
+  skip(now: Date, reason: string): void {
+    this.#require(['running'], 'be skipped');
+    this.#state = 'skipped';
+    this.#result = append(this.#result, reason);
+    this.#blockedReason = null;
     this.#touch(now);
   }
 

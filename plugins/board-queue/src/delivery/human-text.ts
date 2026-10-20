@@ -1,8 +1,9 @@
 import { ACTION_STATES } from '../application/action-states.ts';
 import type { TickReport } from '../application/drain-queue.ts';
+import type { SyncTickReport, WorkerReport } from '../application/run-tick.ts';
 import type { EnqueueOutcome } from '../application/enqueue-action.ts';
 import type { ActionView } from '../application/list-actions.ts';
-import type { QueueStatusView } from '../application/queue-status.ts';
+import type { QueueStatusView, SyncView } from '../application/queue-status.ts';
 import type { BoardItemView } from '../application/show-board-item.ts';
 
 /**
@@ -25,6 +26,9 @@ export function enqueueLines(outcome: EnqueueOutcome): string[] {
   const lines = [`${outcome.state} ${outcome.id}`];
   if (outcome.coalescedInto !== undefined) {
     lines.push(`coalesced into ${outcome.coalescedInto}`);
+  }
+  if (outcome.duplicateOf !== undefined) {
+    lines.push(`already filed as ${outcome.duplicateOf}; nothing new was filed`);
   }
   for (const warning of outcome.warnings) {
     lines.push(`warning: ${warning}`);
@@ -80,6 +84,47 @@ export function statusLines(status: QueueStatusView): string[] {
   for (const action of status.failed) {
     lines.push(`failed ${action.id} ${action.kind} ${action.ref ?? NO_ISSUE} — ${oneLine(action.lastError)}`);
   }
+  if (status.sync !== null) {
+    lines.push(...syncStatusLines(status.sync));
+  }
+  return lines;
+}
+
+/** What keeping in step with the coordination server looks like from this worker. */
+export function syncStatusLines(sync: SyncView): string[] {
+  const on = (enabled: boolean): string => (enabled ? 'on' : 'off');
+  const lines = [
+    `in step with ${sync.server} (${sync.project}): mirror ${on(sync.mirror.enabled)} · `
+    + `importer ${on(sync.importer.enabled)} · only in ${sync.owner}'s worker`,
+  ];
+  if (sync.refused !== null) {
+    lines.push(`declined ${sync.refused.at} — ${sync.refused.reason}`);
+  }
+  const mirror = sync.mirror.lastRun;
+  if (mirror !== null) {
+    lines.push(`mirror ${mirror.at} — ${String(mirror.events)} events read, ${String(mirror.filed)} filed, `
+      + `${String(mirror.duplicates)} already filed, cursor ${String(mirror.cursor)}`
+      + (mirror.error === null ? '' : ` — stopped: ${mirror.error}`));
+    if (mirror.cursorExpired !== null) {
+      lines.push(`mirror lost events: the log was pruned through ${String(mirror.cursorExpired.prunedThrough)} `
+        + `before they were read (${mirror.cursorExpired.at}); the live claims are filed in their place next`);
+    }
+    if (mirror.startedFromHead !== null) {
+      lines.push(`mirror started from the head at event ${String(mirror.startedFromHead.event)} `
+        + `(${mirror.startedFromHead.at}) because ${mirror.startedFromHead.because}`);
+    }
+    if (mirror.unresolved > 0) {
+      lines.push(`mirror passed over ${String(mirror.unresolved)} moves whose item could not be read; see the log`);
+    }
+  }
+  const imported = sync.importer.lastRun;
+  if (imported !== null) {
+    lines.push(`import ${imported.at} — ${String(imported.items)} items in ${String(imported.batches)} batches, `
+      + `${imported.complete ? 'complete' : `not complete: ${imported.incompleteBecause ?? 'no reason recorded'}`}, `
+      + `${String(imported.requests)} dependency requests (${String(imported.notModified)} unchanged), `
+      + `read cost ${imported.readCost === null ? 'unknown' : String(imported.readCost)}`
+      + (imported.stoppedBecause === null ? '' : ` — stopped: ${imported.stoppedBecause}`));
+  }
   return lines;
 }
 
@@ -88,7 +133,11 @@ export function statusLines(status: QueueStatusView): string[] {
  * else: the tallies of a tick that never started are zeros nobody should read as
  * an empty queue.
  */
-export function tickLines(report: TickReport): string[] {
+export function tickLines(report: WorkerReport): string[] {
+  return [...queueTickLines(report), ...(report.sync === undefined ? [] : syncTickLines(report.sync))];
+}
+
+function queueTickLines(report: TickReport): string[] {
   if (report.skipped !== undefined) {
     const lines = [`skipped: ${report.skipped}`];
     if (report.pausedUntil !== undefined) {
@@ -98,7 +147,8 @@ export function tickLines(report: TickReport): string[] {
   }
   const lines = [
     `executed ${String(report.executed)} · done ${String(report.done)} · blocked ${String(report.blocked)}`
-    + ` · failed ${String(report.failed)} · requeued ${String(report.requeued)}`
+    + ` · failed ${String(report.failed)} · not applied ${String(report.notApplied)}`
+    + ` · requeued ${String(report.requeued)}`
     + ` · unblocked ${String(report.unblocked)} · recovered ${String(report.recovered)}`
     + ` · stale ${String(report.stale)}`,
   ];
@@ -110,6 +160,30 @@ export function tickLines(report: TickReport): string[] {
   }
   if (report.budget !== undefined) {
     lines.push(`allowance ${report.budget}`);
+  }
+  return lines;
+}
+
+/** What a tick did about keeping in step, a line per direction. */
+function syncTickLines(sync: SyncTickReport): string[] {
+  const lines: string[] = [];
+  if (sync.refused !== undefined) {
+    lines.push(`in step: declined — ${sync.refused}`);
+  }
+  const mirror = sync.mirror;
+  if (mirror !== undefined) {
+    lines.push('skipped' in mirror
+      ? `mirror: skipped — ${mirror.skipped}`
+      : `mirror: ${String(mirror.events)} events · ${String(mirror.filed)} filed`
+        + (mirror.error === null ? '' : ` · stopped: ${mirror.error}`));
+  }
+  const imported = sync.import;
+  if (imported !== undefined) {
+    lines.push('skipped' in imported
+      ? `import: skipped — ${imported.skipped}`
+      : `import: ${String(imported.run.items)} items · ${imported.run.complete ? 'complete' : 'not complete'}`
+        + ` · ${String(imported.run.requests)} requests`
+        + (imported.run.stoppedBecause === null ? '' : ` · stopped: ${imported.run.stoppedBecause}`));
   }
   return lines;
 }

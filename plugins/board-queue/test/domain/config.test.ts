@@ -72,3 +72,54 @@ describe('ConfigSchema', () => {
     assert.deepEqual(refusals, ['example-org/1 is configured more than once; list each board once']);
   });
 });
+
+describe('keeping in step with a coordination server', () => {
+  const dibs = {
+    server: 'https://dibs.example.com/',
+    project: 'widgets',
+    tokenEnv: 'DIBS_TOKEN',
+    mirrorOwner: 'alice',
+    repos: ['example-org/first-repo'],
+  };
+
+  it('keeps both directions off unless the configuration turns one on', () => {
+    const parsed = ConfigSchema.parse({ boards: [ORG], fields: ['Status'], dibs });
+    assert.equal(parsed.dibs?.mirror, undefined);
+    assert.equal(parsed.dibs?.importer.enabled, false);
+    assert.equal(parsed.dibs?.server, 'https://dibs.example.com', 'the address is kept without its trailing slash');
+  });
+
+  it('fills in the importer\'s pacing and its Severity table', () => {
+    const parsed = ConfigSchema.parse({ boards: [ORG], fields: ['Status'], dibs });
+    assert.equal(parsed.dibs?.importer.everyMinutes, 15);
+    assert.equal(parsed.dibs?.importer.maxRequestsPerTick, 100);
+    assert.equal(parsed.dibs?.importer.paceMs, 1000);
+    assert.deepEqual(parsed.dibs?.importer.priorities, { S1: 0, S2: 1, S3: 2, S4: 3 });
+  });
+
+  it('refuses a server address that carries a user or a password', () => {
+    assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, server: 'https://bot:secret@dibs.example.com' } })
+      .some((message) => message.includes('without a user or password')));
+  });
+
+  it('refuses a repository no board carries', () => {
+    assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, repos: ['example-user/third-repo'] } })
+      .some((message) => message.includes('no board carries it')));
+  });
+
+  it('refuses a configuration that names no owner, and a token written in place of its variable', () => {
+    const { mirrorOwner: _owner, ...ownerless } = dibs;
+    assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: ownerless }).length > 0);
+    assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, tokenEnv: 'dibs_abcdef' } }).length > 0);
+  });
+
+  it('refuses a mirror that names no claimed or released status', () => {
+    const mirror = { enabled: true, status: { claimed: 'In Progress' } };
+    assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, mirror } }).length > 0);
+  });
+
+  it('refuses an import cadence that would read the board more often than every quarter of an hour', () => {
+    assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, importer: { everyMinutes: 5 } } })
+      .length > 0);
+  });
+});

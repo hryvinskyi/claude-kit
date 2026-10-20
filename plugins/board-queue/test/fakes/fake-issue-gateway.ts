@@ -10,13 +10,22 @@ import { IssueNotFound } from '../../src/domain/errors.ts';
 import type { IssueRef } from '../../src/domain/issue-ref.ts';
 import { RateBudget } from '../../src/domain/rate-budget.ts';
 
-export type IssueCall = 'comment' | 'close' | 'get' | 'listComments' | 'listOpen' | 'listClosedSince';
+export type IssueCall =
+  | 'comment'
+  | 'close'
+  | 'addAssignees'
+  | 'removeAssignees'
+  | 'get'
+  | 'listComments'
+  | 'listOpen'
+  | 'listClosedSince';
 
 export type SeededIssue = {
   ref: IssueRef;
   state?: IssueState;
   title?: string;
   comments?: readonly SeededComment[];
+  assignees?: readonly string[];
 };
 
 export type SeededComment = {
@@ -29,6 +38,7 @@ type HeldIssue = {
   state: IssueState;
   title: string;
   comments: IssueCommentView[];
+  assignees: string[];
 };
 
 /**
@@ -45,6 +55,11 @@ export class FakeIssueGateway implements IssueGateway {
   budget: RateBudget | null = null;
   /** False when a close is accepted and the issue stays open, the way a lost write reads. */
   closesStick = true;
+  /**
+   * Logins an assignment is accepted for and quietly not applied to, the way the
+   * API answers for somebody who may not be assigned in that repository.
+   */
+  readonly unassignable = new Set<string>();
 
   readonly #scripted = new Map<IssueCall, BoardQueueError[]>();
   readonly #issues = new Map<string, HeldIssue>();
@@ -62,6 +77,7 @@ export class FakeIssueGateway implements IssueGateway {
       state: issue.state ?? 'open',
       title: issue.title ?? `issue ${String(issue.ref.number)}`,
       comments: (issue.comments ?? []).map((comment) => this.#toView(issue.ref, comment.body, comment.createdAt)),
+      assignees: [...(issue.assignees ?? [])],
     });
     return this;
   }
@@ -100,6 +116,28 @@ export class FakeIssueGateway implements IssueGateway {
     return Promise.resolve();
   }
 
+  assigneesOf(ref: IssueRef): string[] {
+    return [...(this.#issues.get(ref.key())?.assignees ?? [])];
+  }
+
+  addAssignees(ref: IssueRef, logins: readonly string[]): Promise<void> {
+    this.#answer('addAssignees');
+    const issue = this.#require(ref);
+    for (const login of logins) {
+      if (!this.unassignable.has(login) && !issue.assignees.includes(login)) {
+        issue.assignees.push(login);
+      }
+    }
+    return Promise.resolve();
+  }
+
+  removeAssignees(ref: IssueRef, logins: readonly string[]): Promise<void> {
+    this.#answer('removeAssignees');
+    const issue = this.#require(ref);
+    issue.assignees = issue.assignees.filter((login) => !logins.includes(login));
+    return Promise.resolve();
+  }
+
   get(ref: IssueRef): Promise<IssueSummary> {
     this.#answer('get');
     const issue = this.#require(ref);
@@ -108,6 +146,7 @@ export class FakeIssueGateway implements IssueGateway {
       state: issue.state,
       title: issue.title,
       url: issue.ref.url(),
+      assignees: [...issue.assignees],
     });
   }
 
@@ -141,6 +180,7 @@ export class FakeIssueGateway implements IssueGateway {
         state: issue.state,
         title: issue.title,
         url: issue.ref.url(),
+        assignees: [...issue.assignees],
       }));
   }
 
