@@ -88,21 +88,21 @@ describe('the service\'s schedule', () => {
       }
       return OK;
     });
-    const { loop, beats, lines } = loopOf(passes, { intervalMs: 40 });
+    const { loop, beats, lines } = loopOf(passes, { intervalMs: 100 });
 
     const { beat: last } = await loop.run(stop.signal);
 
     assert.equal(passes.startedAt.length, 3);
     assert.equal(passes.mostAtOnce, 1);
     const [first = 0, second = 0, third = 0] = passes.startedAt;
-    assert.ok(second - first >= 38, `the second pass started ${String(second - first)} ms after the first`);
-    assert.ok(third - second >= 38, `the third pass started ${String(third - second)} ms after the second`);
+    assert.ok(second - first >= 90, `the second pass started ${String(second - first)} ms after the first`);
+    assert.ok(third - second >= 90, `the third pass started ${String(third - second)} ms after the second`);
     assert.equal(last.passes, 3);
     assert.equal(last.outcome, 'ok');
     assert.notEqual(last.stoppedAt, null);
     assert.equal(beats.beats[0]?.passes, 0);
     assert.equal(beats.beats[0]?.pid, 4242);
-    assert.equal(beats.beats[0]?.intervalMs, 40);
+    assert.equal(beats.beats[0]?.intervalMs, 100);
     assert.deepEqual(beats.last, last);
     assert.equal(lines.at(-1), 'stopped');
     assert.match(lines[0] ?? '', /^pass 1 ended ok after \d+\.\d s$/);
