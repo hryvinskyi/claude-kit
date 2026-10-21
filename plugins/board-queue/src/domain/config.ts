@@ -38,6 +38,19 @@ export const WorkerConfigSchema = z
   })
   .strict();
 
+/**
+ * The report-only pass over every board, run by the schedule every
+ * `worker.auditEveryHours`. On by default; a worker whose allowance is meant for
+ * something else — a service that keeps the boards in step for a team whose
+ * people run the report themselves — turns it off. `board-queue audit` still runs
+ * it by hand.
+ */
+export const AuditConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+
 /** One board, and the repositories whose issues are written to it and to no other board. */
 export const BoardConfigSchema = z
   .object({
@@ -54,6 +67,7 @@ export const ConfigSchema = z
     fields: z.array(z.string().min(1)).min(1),
     refusedStatus: z.array(z.string().min(1)).default([]),
     worker: WorkerConfigSchema.default({}),
+    audit: AuditConfigSchema.default({}),
     /** Keeping the boards in step with a coordination server; absent, nothing of it runs. */
     dibs: SyncConfigSchema.optional(),
   })

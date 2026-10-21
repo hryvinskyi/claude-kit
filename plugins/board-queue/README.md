@@ -171,6 +171,16 @@ and nothing new is filed. A request with a key never merges with another.
 - Every write is guarded by the row's version: two writers, and the second one to arrive is told the row
   changed rather than overwriting a decision it never saw.
 
+## One pass at a time
+
+Everything a pass does — draining the queue, the mirror, the import, the forge jobs, the audit — runs under one
+tick lock, a row in `queue.db`. Its holder writes down its process id, when that process started, the place the
+id counts in (the machine and, on Linux, its pid namespace), a random lease, and the time; while it works it renews
+that time every minute. Another pass takes the lock only when the lease has gone unrenewed for five minutes, or
+when the holder counts its id in the same place and that id is gone or now belongs to a process that started at
+another time — which is what a restarted container does with its first ids. A holder in another place, such as
+inside a container seen from the machine around it, cannot be looked up, so its lease alone decides.
+
 ## The rate-limit policy
 
 Every answer carries what is left of the allowance, and that is the only source trusted — the dedicated
@@ -212,7 +222,8 @@ them. The last report is kept as `audit.json` in the state directory, one file, 
 `board-queue status` shows the counts and when it was taken. A pass a rate limit cuts short still writes
 what it found, says so in the report, and leaves that summary alone so the next tick looks again. A pass
 that fails outright stamps the attempt, so a report that cannot be written waits out the same six hours
-rather than being asked for again every five minutes.
+rather than being asked for again every five minutes. `"audit": { "enabled": false }` in the configuration
+switches the scheduled pass off (it is on by default); `board-queue audit` still runs it by hand.
 
 ## Keeping the boards in step with a coordination server
 
@@ -238,8 +249,10 @@ step with one of its projects, in both directions:
 
 **Exactly one worker runs it.** Every person runs a worker, and a mirror in each would keep its own cursor
 and file every move once per person. Both directions are off unless the configuration turns them on, and
-each tick first asks whether this machine's GitHub command line tool is signed in as `mirrorOwner`; on any
-other worker the tick declines, says why in `status`, and drains its own queue as usual. `tokenEnv` names the
+each tick first asks whether this worker's login is `mirrorOwner` — on a person's machine the login its GitHub
+command line tool is signed in as, in the service (*As a service*, below) the login of its GitHub App, `<slug>[bot]`,
+read from GitHub with the App's key; on any other worker the tick declines, says why in `status`, and drains its
+own queue as usual. `tokenEnv` names the
 variable holding the token of the project's `importer` member, never the token; the variable is read only when
 a call needs it.
 
@@ -341,8 +354,8 @@ Each tick, after the queue is drained and under the same single lock, one pass r
 A repository the server does not list gets no status and no footprint, and `status` says so.
 
 Requests to GitHub go one at a time, `paceMs` apart, and only while the REST allowance is above `minRemaining` and
-the pass is younger than `maxPassMinutes` (4 by default, so a pass ends before the next tick is due, and at most 25,
-inside the half hour after which the tick lock is taken from a holder that looks dead). A burst refusal, an
+the pass is younger than `maxPassMinutes` (4 by default, so a pass ends before the next tick is due, and at most
+25). A burst refusal, an
 exhausted allowance or a credential GitHub will not take ends the pass and puts the queue to sleep, as any refusal
 does. GitHub not answering — a network failure, a timeout, a 5xx — three requests of one job in a row ends that
 repository's jobs for the pass, says so in `status`, and the pass goes on with the next repository. GitHub refusing
@@ -386,6 +399,8 @@ board-queue status [--json]
 board-queue release <id> | cancel <id> | retry <id> | retry --blocked
 board-queue show example-org/example-repo 412
 board-queue tick            # refused unless BOARD_QUEUE_SCHEDULED=1 — the launcher sets it
+board-queue service         # the worker as a long-running service (see As a service)
+board-queue health [--json] # whether that service is doing its job; exits 1 when it is not
 board-queue audit [--json]
 board-queue brief --repo example-org/example-repo
 board-queue install-launchd   # macOS
@@ -500,6 +515,63 @@ as a credential that will never get in — it pauses the queue, and the log line
 answer asked for. The token is cached with a lifetime, fetched only when a gateway first needs one, dropped
 and re-minted once on a 401, and never reaches a log line, an error message or the database.
 
+## As a service
+
+The worker that keeps the boards in step on everybody's behalf is better not a person's laptop, which sleeps
+and leaves the board hours behind. `board-queue service` runs it as a long-running process — in a container,
+from the `Dockerfile` beside this file — under a GitHub App of its own:
+
+```sh
+docker build -t board-queue:<version> plugins/board-queue
+```
+
+- **The schedule is its own.** A pass runs at start and then every five minutes, timed from the start of the
+  last; a pass that runs past its slot delays the next rather than overlapping it. Each pass is
+  `board-queue tick` as a process of its own, the way a person's scheduler runs it, with
+  `BOARD_QUEUE_SCHEDULED=1` set by the service — the service is the schedule — and the tick lock, the pacing and
+  the allowance rules unchanged. A pass gets twenty minutes, inside the half hour after which the lock is taken
+  from a holder that looks dead, and is then stopped.
+- **Stopping.** SIGTERM or SIGINT ends the wait at once. A running pass gets 25 seconds to finish; then it is
+  sent SIGTERM, which ends it where it stands — `tick` has no handler for it, so this is a kill, not a request —
+  and SIGKILL ten seconds later if it is somehow still there. Nothing it leaves half done is lost, because every
+  action, cursor and report is written in the transaction that records it and the next pass puts back what a
+  killed one held. Give the container a stop grace longer than 35 seconds. A pass that is still not reaped five
+  seconds after SIGKILL stops the service with exit code 1, so whatever runs it starts it afresh.
+- **Its identity is the App's.** Each pass is started with `BOARD_QUEUE_IDENTITY=app`, so it is judged by the
+  App's login (`<slug>[bot]`, from `GET /app` signed with the App's key) rather than by a `gh` login, and
+  `mirrorOwner` names that login. A person's worker leaves the variable unset and keeps the `gh` check, which
+  never stands for an owner whose login ends in `[bot]`; a copied configuration, or the variable set on a machine
+  without the App's key, starts nothing there.
+- **A pass that declines the job fails.** On a person's machine a worker that is not the owner simply answers.
+  In the service each such pass exits with a code of its own — 3 the App's login could not be read, 4 the App
+  is not `mirrorOwner`, 5 the forge jobs would not run under the App's credential, 6 the App's key or the token
+  was refused — and the heartbeat records which, without anything secret.
+- **It refuses to start** without `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` naming a file of the
+  service's own account, mode 0400 or 0600 exactly, that holds a private key, and the coordination server's
+  token, or when the configuration keeps nothing in step. `GITHUB_APP_INSTALLATION_ID` may be set to skip the
+  installation lookup. Every pass checks the key and the token again before it uses them; each file is opened
+  once and checked on what was opened. No message repeats the key, its path or a token.
+- **Secrets in files.** The token may be given as a file: when `<tokenEnv>_FILE` is set — `DIBS_TOKEN_FILE` for
+  `DIBS_TOKEN` — the token is read from the file it names, which must be the account's own and readable by nobody
+  else, and setting both is refused. Mount the key and the token as files in one directory rather than one by one:
+  a file replaced in the directory by a rename is the one the next pass reads, so a rotated key or token takes
+  effect without a restart, while a file mounted on its own stays the old file until the container is recreated.
+- **Health.** After every pass it writes `service.json` in the state directory: when it started, the schedule
+  it runs to, when the last pass started and ended, how it ended, and how many have failed in a row.
+  `board-queue health` reads that file and nothing else, and exits 1 when nothing has happened for longer than a
+  pass and the gap after it, when the last pass declined the job, when three passes in a row failed, or when the
+  service stopped — which is what the image's `HEALTHCHECK` runs.
+- **The report.** The six-hourly report over every board (*The audit*) is the people's to run; set
+  `"audit": { "enabled": false }` in the service's configuration so its allowance goes to keeping in step.
+- **The container.** The image runs as uid 10001 (a deployment may run it as another unprivileged user), keeps
+  everything it writes under `/data` (`BOARD_QUEUE_STATE_DIR`, which the deployment mounts), reads its configuration from
+  `/config/config.json` (`BOARD_QUEUE_CONFIG`), and so runs with a read-only root filesystem. Mount the key read-
+  only, give the container no published port, and reach the coordination server over the network the two share.
+- **The App** is installed on the account that owns the board, for the repositories kept in step only, with
+  Issues and Organization projects read/write (the mirror's moves and assignees), Pull requests, Contents and
+  Actions read and Commit statuses read/write (the forge jobs), and Metadata read. Its allowance is the App's,
+  not a person's.
+
 ## Where things live
 
 `~/.claude/state/board-queue/` — never tracked, created on demand, and the owner's alone (the directory is
@@ -517,6 +589,7 @@ an older release never stops the queue. `layout_revision` is the layout written,
 is stored as cancelled, marked in a column older releases never read, so they list it as finished.
 | `worker.log` | structured lines from the worker and the tools, credentials redacted |
 | `audit.json` | the last report-only pass over every board |
+| `service.json` | the heartbeat `board-queue service` writes after every pass, which `board-queue health` reads |
 | `launchd.log` | whatever the scheduled job printed |
 
 | `board-queue-tick.sh` | the launcher a scheduled job runs |

@@ -12,6 +12,11 @@ import { OptionNotFound, StaleAction } from '../../src/domain/errors.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { QueuePause } from '../../src/domain/queue-pause.ts';
 import { ORG_BOARD, TEST_BOARD, USER_BOARD } from '../fixtures/config.ts';
+import { LocalProcessTable } from '../../src/infrastructure/process-table.ts';
+import type { ProcessTable } from '../../src/infrastructure/process-table.ts';
+import { FakeClock } from '../fakes/in-memory-time.ts';
+import { setTimeout as delay } from 'node:timers/promises';
+import { DatabaseSync } from 'node:sqlite';
 
 const FIRST = 'Example-Org/First-Repo';
 const SECOND = 'Example-User/Second-Repo';
@@ -507,7 +512,7 @@ describe('the queue on disk', () => {
         return Promise.resolve(null);
       });
 
-      const afterACrash = open({ isProcessAlive: () => false });
+      const afterACrash = open({ processes: { here: () => new LocalProcessTable().here(), startOf: () => null } });
       await afterACrash.withTickLock(() => {
         ran.push('after the holder died');
         return Promise.resolve(null);
@@ -519,5 +524,84 @@ describe('the queue on disk', () => {
     assert.equal(outcome, 'the tick ran');
     assert.deepEqual(ran, ['after the holder fell silent', 'after the holder died']);
     assert.equal(await holder.withTickLock(() => Promise.resolve('again')), 'again', 'the lock is given back');
+  });
+
+  /** A process table that counts ids in one named place and says each id started when the test says. */
+  function table(here: string, startOf: (pid: number) => string | null): ProcessTable {
+    return { here: () => here, startOf };
+  }
+
+  it('takes the lock from a dead holder whose id a restarted container handed to another process', async (t) => {
+    const open = databaseIn(t);
+    const container = 'tools-board-queue:pid:[4026532200]';
+    // The holder that took the lock started at one moment; the process that carries the same id now started at another.
+    const beforeTheRestart = open({ processes: table(container, () => '1000') });
+    const afterTheRestart = open({ processes: table(container, () => '2000') });
+
+    const ran: string[] = [];
+    await beforeTheRestart.withTickLock(async () => {
+      await afterTheRestart.withTickLock(() => {
+        ran.push('the restarted process got the lock');
+        return Promise.resolve(null);
+      });
+      return null;
+    });
+
+    assert.deepEqual(ran, ['the restarted process got the lock']);
+  });
+
+  it('leaves a holder counted in another place alone while its lease is fresh, and takes the lock once it lapses', async (t) => {
+    const open = databaseIn(t);
+    const clock = new FakeClock('2026-03-02T09:00:00.000Z');
+    const inTheContainer = open({ clock, processes: table('host:pid:[4026532200]', () => '1000') });
+    // From the machine around it, the container's processes cannot be seen at all.
+    const onTheHost = open({ clock, processes: table('host:pid:[4026531836]', () => null) });
+
+    const outcomes: (string | null)[] = [];
+    await inTheContainer.withTickLock(async () => {
+      outcomes.push(await onTheHost.withTickLock(() => Promise.resolve('while the lease is fresh')));
+      clock.advanceMinutes(6);
+      outcomes.push(await onTheHost.withTickLock(() => Promise.resolve('once the lease lapsed')));
+      return null;
+    });
+
+    assert.deepEqual(outcomes, [null, 'once the lease lapsed']);
+  });
+
+  it('keeps the lock for a live holder that works longer than a lease, because it renews it', async (t) => {
+    const open = databaseIn(t);
+    const clock = new FakeClock('2026-03-02T09:00:00.000Z');
+    const holder = open({ clock, lockRenewEveryMs: 10, processes: table('host:pid:[1]', () => '1000') });
+    const elsewhere = open({ clock, processes: table('host:pid:[2]', () => null) });
+
+    const outcome = await holder.withTickLock(async () => {
+      clock.advanceMinutes(4);
+      await delay(60);
+      clock.advanceMinutes(4);
+      return elsewhere.withTickLock(() => Promise.resolve('taken from a live holder'));
+    });
+
+    assert.equal(outcome, null);
+    assert.equal(await elsewhere.withTickLock(() => Promise.resolve('given back')), 'given back');
+  });
+
+  it('still reads a lock written before holders said where and when they started', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-test-'));
+    const file = path.join(dir, 'queue.db');
+    const clock = new FakeClock('2026-03-02T09:00:00.000Z');
+    const alive = new SqliteActionRepository(file, { clock, processes: table('anywhere', () => '1000') });
+    const gone = new SqliteActionRepository(file, { clock, processes: table('anywhere', () => null) });
+    const db = new DatabaseSync(file);
+    t.after(() => {
+      db.close();
+      alive.close();
+      gone.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    db.prepare('INSERT INTO queue_state (key, value) VALUES (?, ?)')
+      .run('tick_lock', JSON.stringify({ pid: 4242, at: clock.now().toISOString() }));
+
+    assert.equal(await alive.withTickLock(() => Promise.resolve('taken')), null);
+    assert.equal(await gone.withTickLock(() => Promise.resolve('taken')), 'taken');
   });
 });

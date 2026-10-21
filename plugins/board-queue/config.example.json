@@ -26,6 +26,7 @@
     "auditEveryHours": 6,
     "auditMinRemaining": 1000
   },
+  "audit": { "enabled": true },
   "dibs": {
     "server": "https://dibs.example.com",
     "project": "example-project",

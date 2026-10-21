@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { ConfigSchema } from '../../src/domain/config.ts';
 import { buildContainer } from '../../src/delivery/container.ts';
 import type { TokenProvider } from '../../src/application/ports.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
@@ -103,6 +104,32 @@ describe('what the composition root hands out', () => {
       const written: unknown = JSON.parse(readFileSync(join(directory, 'audit.json'), 'utf8'));
       assert.match(JSON.stringify(written), /nobody filed this one/);
       assert.equal((await container.status.execute()).lastAudit?.notOnBoard, 1);
+    } finally {
+      container.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the board unread on its schedule where the configuration turns the report off', async () => {
+    const directory = temporaryDirectory();
+    const clock = new FakeClock();
+    const board = new FakeBoardGateway({ clock });
+    const container = buildContainer({
+      config: ConfigSchema.parse({ ...testConfig, audit: { enabled: false } }),
+      stateDir: directory,
+      overrides: {
+        lanes: () => ({ board, issues: new FakeIssueGateway([{ ref: IssueRef.of(FIRST, 12), title: 'nobody filed this one' }]) }),
+        clock,
+        sleeper: new FakeSleeper(),
+      },
+    });
+    try {
+      await container.tick.run();
+
+      assert.equal(existsSync(join(directory, 'audit.json')), false);
+      assert.equal((await container.status.execute()).lastAudit, null);
+      await container.audit.execute();
+      assert.ok(existsSync(join(directory, 'audit.json')), 'it still runs when asked for by hand');
     } finally {
       container.close();
       rmSync(directory, { recursive: true, force: true });

@@ -9,6 +9,9 @@ import type { CachedCatalog, CatalogField, CatalogOption, FieldCatalog } from '.
 import { StaleAction } from '../domain/errors.ts';
 import { IssueRef } from '../domain/issue-ref.ts';
 import { QueuePause } from '../domain/queue-pause.ts';
+import { randomUUID } from 'node:crypto';
+import { LocalProcessTable, UNKNOWN_START } from './process-table.ts';
+import type { ProcessTable } from './process-table.ts';
 import { openQueueDatabase } from './queue-database.ts';
 import { redactSecrets } from './redaction.ts';
 
@@ -17,8 +20,12 @@ const TICK_LOCK_KEY = 'tick_lock';
 /** Meta lives beside the queue's own rows, so it is kept in its own namespace. */
 const META_PREFIX = 'meta:';
 
-/** A tick that has held the lock this long is treated as gone, pid or no pid. */
-const LOCK_STALE_AFTER_MS = 30 * 60 * 1000;
+/**
+ * A holder renews its lease this often while it holds the lock, and one whose
+ * lease has gone unrenewed this long is treated as gone, wherever it runs.
+ */
+const LOCK_RENEW_EVERY_MS = 60 * 1000;
+const LOCK_STALE_AFTER_MS = 5 * 60 * 1000;
 
 const COLUMNS = 'id, kind, payload, repo, issue, state, attempts, not_before, origin, '
   + 'created_at, updated_at, last_error, result, blocked_reason, version, dedupe_key, ended_as';
@@ -92,10 +99,12 @@ const COALESCE_SQL = 'UPDATE actions SET payload = ?, updated_at = ?, version = 
 export type SqliteActionRepositoryOptions = {
   /** Where the tick lock's timestamps come from. */
   clock?: Clock;
-  /** Whether the process holding the tick lock still exists. */
-  isProcessAlive?: (pid: number) => boolean;
-  /** How long a holder may be silent before the lock is taken from it. */
+  /** Which processes are there, and when each started; this machine's own by default. */
+  processes?: ProcessTable;
+  /** How long a holder's lease may go unrenewed before the lock is taken from it. */
   lockStaleAfterMs?: number;
+  /** How often a holder renews its lease while it holds the lock. */
+  lockRenewEveryMs?: number;
 };
 
 /**
@@ -109,8 +118,10 @@ export type SqliteActionRepositoryOptions = {
 export class SqliteActionRepository implements ActionRepository {
   readonly #db: DatabaseSync;
   readonly #clock: Clock;
-  readonly #isProcessAlive: (pid: number) => boolean;
+  readonly #processes: ProcessTable;
   readonly #lockStaleAfterMs: number;
+  readonly #lockRenewEveryMs: number;
+  #ownStart: string | null = null;
 
   readonly #insertStatement: StatementSync;
   readonly #updateStatement: StatementSync;
@@ -129,8 +140,9 @@ export class SqliteActionRepository implements ActionRepository {
 
   constructor(file: string, options: SqliteActionRepositoryOptions = {}) {
     this.#clock = options.clock ?? { now: () => new Date() };
-    this.#isProcessAlive = options.isProcessAlive ?? processIsAlive;
+    this.#processes = options.processes ?? new LocalProcessTable();
     this.#lockStaleAfterMs = options.lockStaleAfterMs ?? LOCK_STALE_AFTER_MS;
+    this.#lockRenewEveryMs = options.lockRenewEveryMs ?? LOCK_RENEW_EVERY_MS;
 
     this.#db = openQueueDatabase(file);
 
@@ -353,38 +365,76 @@ export class SqliteActionRepository implements ActionRepository {
   }
 
   async withTickLock<T>(fn: () => Promise<T>): Promise<T | null> {
-    const held = this.#takeTickLock();
-    if (held === null) {
+    const taken = this.#takeTickLock();
+    if (taken === null) {
       return null;
     }
+    const holding = { value: taken.value };
+    // The lease is renewed for as long as the work runs, so a holder that is
+    // alive is never taken for one that has gone silent, however long it works.
+    const renewal = setInterval(() => {
+      holding.value = this.#renewTickLock(holding.value, taken.lease);
+    }, this.#lockRenewEveryMs);
+    renewal.unref();
     try {
       return await fn();
     } finally {
+      clearInterval(renewal);
       // Only our own holding is released: a tick that took the lock from us
       // because we looked dead keeps it.
-      this.#releaseLockStatement.run(TICK_LOCK_KEY, held);
+      this.#releaseLockStatement.run(TICK_LOCK_KEY, holding.value);
     }
   }
 
-  #takeTickLock(): string | null {
+  #takeTickLock(): { value: string; lease: string } | null {
     return this.#transact(() => {
       const current = this.#readState(TICK_LOCK_KEY);
       if (current !== null && this.#lockIsHeld(current)) {
         return null;
       }
-      const held = JSON.stringify({
-        pid: process.pid,
-        at: this.#clock.now().toISOString(),
-      });
-      this.#writeState(TICK_LOCK_KEY, held);
-      return held;
+      const lease = randomUUID();
+      const value = this.#lockRecord(lease);
+      this.#writeState(TICK_LOCK_KEY, value);
+      return { value, lease };
+    });
+  }
+
+  /** The holding written again with a fresh time, while it is still ours; what is held afterwards. */
+  #renewTickLock(value: string, lease: string): string {
+    return this.#transact(() => {
+      if (this.#readState(TICK_LOCK_KEY) !== value) {
+        return value;
+      }
+      const renewed = this.#lockRecord(lease);
+      this.#writeState(TICK_LOCK_KEY, renewed);
+      return renewed;
     });
   }
 
   /**
-   * A holder counts only while its process is still there and it has not been
-   * silent for too long: a tick that was killed mid-run must not keep the queue
-   * frozen until somebody notices.
+   * Who holds the lock: the process, when it started and where its id counts,
+   * the lease it holds it under, and when it last said it was still there.
+   */
+  #lockRecord(lease: string): string {
+    this.#ownStart ??= this.#processes.startOf(process.pid);
+    return JSON.stringify({
+      pid: process.pid,
+      started: this.#ownStart,
+      where: this.#processes.here(),
+      lease,
+      at: this.#clock.now().toISOString(),
+    });
+  }
+
+  /**
+   * A holder counts while its lease is fresh and it is still the process that
+   * took the lock. Where its id counts in the same place as ours, that is
+   * checked: a process that is gone, or an id now carried by a process that
+   * started at another time — a restarted container hands out the same ids
+   * again — is no holder. A holder counted somewhere else cannot be looked up
+   * from here, so its lease alone decides. A tick that was killed mid-run must
+   * not keep the queue frozen, and one that is alive must not lose the lock to a
+   * second.
    */
   #lockIsHeld(raw: string): boolean {
     const parsed = parseJson(raw);
@@ -399,7 +449,16 @@ export class SqliteActionRepository implements ActionRepository {
     if (this.#clock.now().getTime() - at.getTime() >= this.#lockStaleAfterMs) {
       return false;
     }
-    return this.#isProcessAlive(pid);
+    const where = asString(parsed['where']);
+    if (where !== null && where !== this.#processes.here()) {
+      return true;
+    }
+    const seen = this.#processes.startOf(pid);
+    if (seen === null) {
+      return false;
+    }
+    const started = asString(parsed['started']);
+    return started === null || started === UNKNOWN_START || seen === UNKNOWN_START || seen === started;
   }
 
   /** Writes a new row and answers whether it was written, rather than found under its key. */
@@ -725,22 +784,4 @@ function asCatalogField(value: unknown): CatalogField | null {
     options.push({ id: optionId, name: optionName });
   }
   return { id, name, dataType, options };
-}
-
-/**
- * Whether a process is still there. Signal zero sends nothing and only asks; a
- * process owned by somebody else answers "not permitted", which is still an
- * answer that it exists.
- */
-function processIsAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
-  }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // "not permitted" is still an answer that the process is there.
-    return error instanceof Error && 'code' in error && error.code === 'EPERM';
-  }
 }

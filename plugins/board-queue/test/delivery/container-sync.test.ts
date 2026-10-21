@@ -17,6 +17,8 @@ import { FakeForge, pullRequest } from '../fakes/fake-forge.ts';
 import { FakeForgeCoordination } from '../fakes/fake-forge-coordination.ts';
 import { FakeIssueGateway } from '../fakes/fake-issue-gateway.ts';
 import { FakeClock, FakeSleeper } from '../fakes/in-memory-time.ts';
+import { FakeFetch } from '../fakes/fake-fetch.ts';
+import { writeAppKey } from '../fixtures/app-key.ts';
 import { testConfig } from '../fixtures/config.ts';
 import { syncConfig } from '../fixtures/sync.ts';
 
@@ -66,9 +68,14 @@ function world(login: string): World {
   };
 }
 
-function containerFor(t: TestContext, config: Config, overrides: ContainerOverrides) {
+function containerFor(
+  t: TestContext,
+  config: Config,
+  overrides: ContainerOverrides,
+  env?: Record<string, string | undefined>,
+) {
   const stateDir = mkdtempSync(join(tmpdir(), 'board-queue-sync-'));
-  const container = buildContainer({ config, stateDir, overrides });
+  const container = buildContainer({ config, stateDir, overrides, ...(env === undefined ? {} : { env }) });
   t.after(() => {
     container.close();
     rmSync(stateDir, { recursive: true, force: true });
@@ -222,5 +229,45 @@ describe('a worker that keeps the board in step, on a real queue file', () => {
     const forged = report.sync?.forge;
     assert.ok(forged !== undefined && 'run' in forged);
     assert.ok(dibs.calls.includes('repositories'));
+  });
+
+  it('runs as the service when the GitHub App it holds the key of is the configured owner', async (t) => {
+    const it_ = world('unused');
+    const keyDir = mkdtempSync(join(tmpdir(), 'board-queue-sync-key-'));
+    t.after(() => {
+      rmSync(keyDir, { recursive: true, force: true });
+    });
+    const app = new FakeFetch([{ body: { slug: 'example-sync' } }]);
+    const config = ConfigSchema.parse({ ...syncConfig, dibs: { ...syncConfig.dibs, mirrorOwner: 'example-sync[bot]' } });
+    const { identity: _personal, ...withoutIdentity } = it_.overrides;
+    const container = containerFor(t, config, { ...withoutIdentity, appFetch: app.fetch }, {
+      BOARD_QUEUE_IDENTITY: 'app',
+      GITHUB_APP_ID: '123456',
+      GITHUB_APP_PRIVATE_KEY_PATH: writeAppKey(keyDir).path,
+    });
+
+    const report = await container.tick.run();
+
+    assert.equal(report.sync?.refused, undefined);
+    assert.equal(report.done, 2);
+    assert.deepEqual(it_.board.valuesOf(TWELVE), { Status: 'In Progress' });
+    assert.deepEqual(app.calls.map((call) => call.url), ['https://api.github.com/app']);
+  });
+
+  it('declines on a person\'s machine handed the service\'s configuration, as any copied configuration does', async (t) => {
+    const it_ = world('unused');
+    const config = ConfigSchema.parse({ ...syncConfig, dibs: { ...syncConfig.dibs, mirrorOwner: 'example-sync[bot]' } });
+    const { identity: _personal, ...withoutIdentity } = it_.overrides;
+    const laptop = containerFor(t, config, withoutIdentity, {});
+    const pretending = containerFor(t, config, withoutIdentity, { BOARD_QUEUE_IDENTITY: 'app' });
+
+    const fromGh = await laptop.tick.run();
+    const fromNoKey = await pretending.tick.run();
+
+    // Whatever this machine's command line tool is signed in as, it is never asked: no person is an App.
+    assert.match(fromGh.sync?.refused ?? '', /example-sync\[bot\], is a GitHub App; a person's machine never runs as one/);
+    assert.equal(fromGh.sync?.refusal, 'identity-unreadable');
+    assert.match(fromNoKey.sync?.refused ?? '', /runs as its GitHub App, and the environment names none/);
+    assert.deepEqual(it_.coordination.calls, []);
   });
 });

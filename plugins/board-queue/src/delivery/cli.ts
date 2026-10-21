@@ -22,6 +22,12 @@ import {
   tickLines,
 } from './human-text.ts';
 import { momentOf, positiveIntegerOf } from './input-text.ts';
+import { SCHEDULED_RUN_VARIABLE } from './scheduled-run.ts';
+import { runService, serviceHealth, stopOnSignals } from './service-runtime.ts';
+import { runsAsTheService } from './local-identity.ts';
+import { DECLINES, declineOf } from '../application/service-duty.ts';
+import type { Decline } from '../application/service-duty.ts';
+import { checkServiceCredentials } from '../infrastructure/service-credentials.ts';
 import { installSchedule, loadCommands } from './launchd-install.ts';
 import { BRIEF_STATES, briefLines, briefOf } from './repository-brief.ts';
 import { enableCommands, installSystemdUnits } from './systemd-install.ts';
@@ -101,6 +107,8 @@ export type CommandContext = {
   flags: Flags;
   /** Writes one line to the answer stream. */
   out: (line: string) => void;
+  /** Writes one line to the error stream. */
+  err: (line: string) => void;
   /** The wiring, built on the first ask and closed by the runner. */
   container: () => Container;
   /** Everything piped in, or an empty string when nothing was. */
@@ -117,7 +125,8 @@ export type Command = {
   readonly usage: string;
   readonly summary: string;
   readonly flags?: FlagSpec;
-  run(context: CommandContext): Promise<void>;
+  /** Resolves to the exit code when it is not 0 — a command that refuses throws instead. */
+  run(context: CommandContext): Promise<number | void>;
 };
 
 const JSON_FLAG: FlagSpec = { json: { type: 'boolean' } };
@@ -242,9 +251,6 @@ const show: Command = {
   },
 };
 
-/** The variable the scheduled launcher sets; a run started any other way is refused. */
-export const SCHEDULED_RUN_VARIABLE = 'BOARD_QUEUE_SCHEDULED';
-
 const tick: Command = {
   usage: 'tick [--json]',
   summary: 'one pass of the worker; the schedule runs it, a session never does',
@@ -265,8 +271,76 @@ const tick: Command = {
     // A tick that did not run is an answer, not a failure: the lock is held, or
     // the queue is waiting out a refusal. Whoever is watching the schedule reads
     // the report either way.
+    const servicePass = runsAsTheService(process.env);
+    if (servicePass) {
+      // The service checks its key and token again on every pass, so one replaced
+      // in its file since the last pass is checked before anything uses it.
+      try {
+        checkServiceCredentials(process.env, context.container().config);
+      } catch (error) {
+        if (!(error instanceof RefusedByRule)) {
+          throw error;
+        }
+        return declined(context, 'credentials-refused', error.describe());
+      }
+    }
     const report = await context.container().tick.run();
     printed(context, report, () => tickLines(report));
+    // On a person's machine a worker that may not keep the boards in step has
+    // simply answered; in the service that is the whole job not being done.
+    const decline = servicePass ? declineOf(report) : null;
+    return decline === null ? 0 : declined(context, decline, report.sync?.refused ?? null);
+  },
+};
+
+/** Says why the service's pass declined its job, and answers the exit code that stands for it. */
+function declined(context: CommandContext, decline: Decline, why: string | null): number {
+  const meaning = DECLINES[decline];
+  context.err(`the service declined its job: ${meaning.says}${why === null ? '' : ` — ${why}`}`);
+  return meaning.exitCode;
+}
+
+/** The command line's own entry point, which each of the service's passes runs through. */
+const CLI_ENTRY = path.join(import.meta.dirname, '..', '..', 'bin', 'board-queue.ts');
+
+const service: Command = {
+  usage: 'service',
+  summary: 'run the worker as a long-running service under a GitHub App: a pass every five minutes until stopped',
+  run: async (context) => {
+    // The schedule lives in this process, so each pass it starts is a scheduled
+    // one; a person's machine has its own scheduler and never runs this.
+    const ended = await runService({
+      env: process.env,
+      config: loadConfig(),
+      stateDir: stateDir(),
+      cliEntry: CLI_ENTRY,
+      nodePath: context.nodePath,
+      log: {
+        line: (text) => {
+          context.out(`board-queue service: ${text}`);
+        },
+      },
+      stop: stopOnSignals(process),
+      pid: process.pid,
+    });
+    // A pass that could not be ended leaves a process behind that only a fresh
+    // start clears; exiting non-zero is what has the container restarted.
+    return ended.mustRestart ? 1 : 0;
+  },
+};
+
+const health: Command = {
+  usage: 'health [--json]',
+  summary: 'whether the service is doing its job, from its heartbeat alone; exits 1 when it is not',
+  flags: JSON_FLAG,
+  run: async (context) => {
+    const verdict = serviceHealth(stateDir());
+    // An unhealthy answer is the refusal's one line on the error stream, which
+    // is what a health check keeps; a script asking for --json reads it here too.
+    printed(context, verdict, () => (verdict.healthy ? [`healthy: ${verdict.reason}`] : []));
+    if (!verdict.healthy) {
+      throw new RefusedByRule(`the service is unhealthy: ${verdict.reason}`);
+    }
   },
 };
 
@@ -377,6 +451,8 @@ export const commands: Record<string, Command> = {
   retry,
   show,
   tick,
+  service,
+  health,
   audit,
   brief,
   'install-launchd': installLaunchd,
@@ -430,11 +506,14 @@ export async function runCli(argv: readonly string[], streams: CliStreams = proc
 
   const opened: { container: Container | null } = { container: null };
   try {
-    await command.run({
+    const code = await command.run({
       positionals: parsed.positionals,
       flags: new Flags(parsed.values, command.usage),
       out: (line) => {
         streams.out(line);
+      },
+      err: (line) => {
+        streams.err(line);
       },
       container: () => {
         opened.container ??= buildContainer({ config: loadConfig(), stateDir: stateDir() });
@@ -446,7 +525,7 @@ export async function runCli(argv: readonly string[], streams: CliStreams = proc
       nodePath: streams.nodePath,
       configHome: streams.configHome,
     });
-    return 0;
+    return typeof code === 'number' ? code : 0;
   } catch (error) {
     if (error instanceof MisusedCommand) {
       streams.err(error.message);

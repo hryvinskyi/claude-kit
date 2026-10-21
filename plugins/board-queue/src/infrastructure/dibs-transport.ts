@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Logger } from '../application/ports.ts';
 import { NoAnswer, RefusedByRule, TransientFailure } from '../domain/errors.ts';
 import type { FetchLike } from './github-http.ts';
+import { readOwnerOnlyFile } from './owner-only-file.ts';
 import { redactSecrets } from './redaction.ts';
 
 /** Every call is answered within this, or it is a call that failed. */
@@ -141,15 +142,36 @@ function causeOf(cause: unknown): string {
 }
 
 /**
- * The integration's token, read from the environment variable the configuration
- * names. The variable is read at the moment of a call, so a worker that keeps in
- * step with nothing never asks for it, and its value is never repeated anywhere.
+ * The integration's token, from the environment variable the configuration
+ * names, or from the file that variable's `_FILE` twin names — the form a
+ * container takes a secret in, which keeps it out of the process environment.
+ * The file must be this account's own and readable by nobody else. Naming both
+ * is refused rather than one quietly winning.
+ *
+ * The token is read at the moment of a call, so a worker that keeps in step with
+ * nothing never asks for it, a token replaced in its file is the one the next
+ * call sends, and its value is never repeated anywhere.
  */
 export function tokenFromEnvironment(env: Readonly<Record<string, string | undefined>>, name: string): () => string {
+  const fileVariable = `${name}_FILE`;
   return () => {
     const value = (env[name] ?? '').trim();
+    const file = (env[fileVariable] ?? '').trim();
+    if (value !== '' && file !== '') {
+      throw new RefusedByRule(`both ${name} and ${fileVariable} are set; set one of them`);
+    }
+    if (file !== '') {
+      const token = readOwnerOnlyFile(file, `the file named by ${fileVariable}`).text.trim();
+      if (token === '') {
+        throw new RefusedByRule(`the file named by ${fileVariable} holds no token for the coordination server`);
+      }
+      return token;
+    }
     if (value === '') {
-      throw new RefusedByRule(`${name} holds no token for the coordination server; set it in the worker's environment`);
+      throw new RefusedByRule(
+        `${name} holds no token for the coordination server; set it in the worker's environment, `
+        + `or name a file holding it in ${fileVariable}`,
+      );
     }
     return value;
   };

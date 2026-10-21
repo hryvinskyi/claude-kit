@@ -50,6 +50,9 @@ async function audit(container: Container, argv: readonly string[]): Promise<str
     out: (line) => {
       lines.push(line);
     },
+    err: (line) => {
+      lines.push(line);
+    },
     container: () => container,
     stdin: () => Promise.resolve(''),
     home: tmpdir(),

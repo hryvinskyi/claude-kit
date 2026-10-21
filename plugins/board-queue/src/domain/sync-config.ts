@@ -92,11 +92,7 @@ export const ForgeConfigSchema = z
      * queue's own writes keep room under the same limit.
      */
     maxStatusWritesPerHour: z.number().int().positive().default(300),
-    /**
-     * A pass asks GitHub nothing more once it has run this long: by default before
-     * the next tick is due, and never past the time after which the single tick
-     * lock is taken from a holder that looks dead.
-     */
+    /** A pass asks GitHub nothing more once it has run this long: by default before the next tick is due. */
     maxPassMinutes: z.number().int().min(1).max(25).default(4),
     /**
      * Whether the jobs may run under a person's credential. They write statuses every

@@ -178,6 +178,97 @@ describe('AppTokenProvider', () => {
     assert.equal(fetcher.calls[1]?.headers['authorization'], `Bearer ${assertion}`);
   });
 
+  it('reads the App\'s own login with an assertion only its key signs', async () => {
+    const fetcher = new FakeFetch([{ body: { slug: 'example-sync', name: 'Example sync' } }]);
+    const provider = new AppTokenProvider({
+      appId: '123456',
+      privateKeyPath: keyPath,
+      owner: 'example-org',
+      ownerType: 'organization',
+      fetchImpl: fetcher.fetch,
+      clock: new FakeClock(),
+    });
+
+    assert.equal(await provider.appLogin(), 'example-sync[bot]');
+
+    assert.equal(fetcher.calls.length, 1);
+    assert.equal(fetcher.calls[0]?.url, 'https://api.github.com/app');
+    assert.equal(fetcher.calls[0]?.method, 'GET');
+    const assertion = (fetcher.calls[0]?.headers['authorization'] ?? '').replace('Bearer ', '');
+    const [header = '', claims = '', signature = ''] = assertion.split('.');
+    const verifier = createVerify('RSA-SHA256');
+    verifier.update(`${header}.${claims}`);
+    verifier.end();
+    assert.equal(verifier.verify(publicKey, Buffer.from(signature, 'base64url')), true);
+  });
+
+  it('names the step when the App\'s login cannot be read', async () => {
+    const provider = (script: ConstructorParameters<typeof FakeFetch>[0]) => new AppTokenProvider({
+      appId: '123456',
+      privateKeyPath: keyPath,
+      owner: 'example-org',
+      ownerType: 'organization',
+      fetchImpl: new FakeFetch(script).fetch,
+      clock: new FakeClock(),
+    });
+
+    await assert.rejects(() => provider([{ status: 401, body: { message: 'Bad credentials' } }]).appLogin(),
+      /reading which App the key belongs to answered 401/);
+    await assert.rejects(() => provider([{ body: { name: 'no slug' } }]).appLogin(),
+      /reading which App the key belongs to/);
+  });
+
+  it('gives every one of the App\'s own calls a deadline', async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const provider = new AppTokenProvider({
+      appId: '123456',
+      privateKeyPath: keyPath,
+      installationId: '99',
+      owner: 'example-org',
+      ownerType: 'organization',
+      fetchImpl: async (url, init) => {
+        signals.push(init.signal);
+        return url.endsWith('/app')
+          ? Response.json({ slug: 'example-sync' })
+          : Response.json({ token: INSTALLATION_TOKEN }, { status: 201 });
+      },
+      clock: new FakeClock(),
+    });
+
+    await provider.appLogin();
+    await provider.token();
+
+    assert.equal(signals.length, 2);
+    for (const signal of signals) {
+      assert.ok(signal instanceof AbortSignal);
+      assert.equal(signal.aborted, false);
+    }
+  });
+
+  it('gives up on a call that does not answer in time, naming the step', async () => {
+    const provider = new AppTokenProvider({
+      appId: '123456',
+      privateKeyPath: keyPath,
+      owner: 'example-org',
+      ownerType: 'organization',
+      fetchImpl: async (_url, init) => {
+        const signal = init.signal;
+        if (signal === null || signal === undefined) {
+          throw new Error('a call without a deadline');
+        }
+        // Stands in for the deadline passing, which the real signal does after ten seconds.
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      },
+      clock: new FakeClock(),
+    });
+
+    await assert.rejects(() => provider.appLogin(), (error: unknown) => {
+      assert.ok(error instanceof TransientFailure);
+      assert.match(error.message, /reading which App the key belongs to could not be reached/);
+      return true;
+    });
+  });
+
   it('skips the lookup when the installation is already known', async () => {
     const fetcher = new FakeFetch([{ status: 201, body: { token: INSTALLATION_TOKEN } }]);
     const provider = new AppTokenProvider({

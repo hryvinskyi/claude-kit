@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { CursorExpired, RefusedByRule, TransientFailure } from '../../src/domain/errors.ts';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DibsHttpClient, tokenFromEnvironment } from '../../src/infrastructure/dibs-http.ts';
 import { FakeFetch, type ScriptedResponse } from '../fakes/fake-fetch.ts';
 import { RecordingLogger } from '../fakes/wire-doubles.ts';
@@ -215,6 +218,35 @@ describe('importing the board\'s work', () => {
 describe('the integration\'s token', () => {
   it('is read from the variable the configuration names, when a call needs it', () => {
     assert.equal(tokenFromEnvironment({ DIBS_TOKEN: ` ${TOKEN} ` }, 'DIBS_TOKEN')(), TOKEN);
+  });
+
+  it('is read from the file its _FILE twin names, which must be this account\'s alone', (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'board-queue-token-file-'));
+    t.after(() => {
+      rmSync(directory, { recursive: true, force: true });
+    });
+    const owned = join(directory, 'token');
+    writeFileSync(owned, `${TOKEN}\n`, { mode: 0o400 });
+    chmodSync(owned, 0o400);
+    const shared = join(directory, 'shared');
+    writeFileSync(shared, `${TOKEN}\n`, { mode: 0o644 });
+    chmodSync(shared, 0o644);
+    const empty = join(directory, 'empty');
+    writeFileSync(empty, '\n', { mode: 0o600 });
+
+    assert.equal(tokenFromEnvironment({ DIBS_TOKEN_FILE: owned }, 'DIBS_TOKEN')(), TOKEN);
+    assert.throws(() => tokenFromEnvironment({ DIBS_TOKEN_FILE: shared }, 'DIBS_TOKEN')(), (error: unknown) =>
+      error instanceof RefusedByRule && /DIBS_TOKEN_FILE is mode 644/.test(error.describe())
+      && !error.describe().includes(directory) && !error.describe().includes(TOKEN));
+    assert.throws(() => tokenFromEnvironment({ DIBS_TOKEN_FILE: empty }, 'DIBS_TOKEN')(), /holds no token/);
+  });
+
+  it('is refused when both the variable and its _FILE twin are set', () => {
+    assert.throws(
+      () => tokenFromEnvironment({ DIBS_TOKEN: TOKEN, DIBS_TOKEN_FILE: '/run/secrets/token' }, 'DIBS_TOKEN')(),
+      (error: unknown) => error instanceof RefusedByRule
+        && error.describe() === 'both DIBS_TOKEN and DIBS_TOKEN_FILE are set; set one of them',
+    );
   });
 
   it('is refused by the variable\'s name when the variable is empty', () => {

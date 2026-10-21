@@ -37,7 +37,7 @@ export function stateDir(): string {
 }
 
 /**
- * The three files that live in it. Each takes the directory rather than looking
+ * The files that live in it. Each takes the directory rather than looking
  * it up, so a caller that already resolved one state directory — the composition
  * root, a test on a temporary directory — keeps everything in that one place.
  */
@@ -51,4 +51,9 @@ export function logPath(dir: string = stateDir()): string {
 
 export function auditPath(dir: string = stateDir()): string {
   return path.join(dir, 'audit.json');
+}
+
+/** The heartbeat the worker writes when it runs as a long-running service. */
+export function beatPath(dir: string = stateDir()): string {
+  return path.join(dir, 'service.json');
 }

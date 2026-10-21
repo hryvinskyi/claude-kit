@@ -4,7 +4,7 @@ import type { DrainQueue, TickReport } from './drain-queue.ts';
 import type { ForgeReport } from './forge-pass.ts';
 import type { ImportReport } from './import-ready-work.ts';
 import type { MirrorReport } from './mirror-claims.ts';
-import type { SyncOwner } from './sync-owner.ts';
+import type { OwnerRefusal, SyncOwner } from './sync-owner.ts';
 import {
   readLastAudit,
   readLastAuditAttemptAt,
@@ -32,6 +32,8 @@ export type SyncJobs = {
 export type SyncTickReport = {
   /** Why this worker declined to keep in step, when it did. */
   refused?: string;
+  /** Which kind of reason that was. */
+  refusal?: OwnerRefusal;
   mirror?: MirrorReport | { skipped: string };
   import?: ImportReport;
   forge?: ForgeReport | { skipped: string };
@@ -102,6 +104,7 @@ export class RunTick {
     const syncReport: SyncTickReport = {};
     if (allowed !== null && !allowed.ok) {
       syncReport.refused = allowed.reason;
+      syncReport.refusal = allowed.refusal;
     }
     const mayKeepInStep = sync !== null && allowed !== null && allowed.ok;
     if (mayKeepInStep && sync.mirror !== undefined) {

@@ -14,7 +14,8 @@ import { writeForgeRun } from './sync-meta.ts';
 import type { ForgeRepositoryRun, ForgeRun } from './sync-meta.ts';
 
 /** What one pass did, or why it did not run. */
-export type ForgeReport = { skipped: string } | { run: ForgeRun };
+/** A pass that did not run, `declined` when this worker may not run it at all; or the pass that ran. */
+export type ForgeReport = { skipped: string; declined?: true } | { run: ForgeRun };
 
 /** How long a forgotten row has stood still: statuses written, and pull requests that ended and were reported. */
 const KEPT_FOR_MS = 30 * 24 * 60 * 60 * 1000;
@@ -125,7 +126,7 @@ export class ForgePass {
         refused,
         pruned: { statuses: 0, pulls: 0 },
       });
-      return { skipped: refused };
+      return { skipped: refused, declined: true };
     }
     const calls = new ForgeCalls({
       allowance: this.#forge,

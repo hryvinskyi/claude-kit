@@ -35,18 +35,19 @@ import { DibsHttpClient, tokenFromEnvironment } from '../infrastructure/dibs-htt
 import { DibsForgeClient } from '../infrastructure/dibs-forge-http.ts';
 import { GitHubRestForge } from '../infrastructure/github-rest-forge.ts';
 import { SqliteForgeLedger } from '../infrastructure/sqlite-forge-ledger.ts';
-import { GhCliIdentity } from '../infrastructure/gh-cli-identity.ts';
 import { GitHubRestDependencies } from '../infrastructure/github-rest-dependencies.ts';
 import { SqliteDependencyCache } from '../infrastructure/sqlite-dependency-cache.ts';
 import { FileAuditReport } from '../infrastructure/file-audit-report.ts';
 import { FileLogger } from '../infrastructure/file-logger.ts';
 import { GitHubGraphqlBoard } from '../infrastructure/github-graphql-board.ts';
 import { BudgetLedger, GitHubHttp } from '../infrastructure/github-http.ts';
+import type { FetchLike } from '../infrastructure/github-http.ts';
 import { GitHubRestIssues } from '../infrastructure/github-rest-issues.ts';
 import { auditPath, dbPath, logPath } from '../infrastructure/paths.ts';
 import { SqliteActionRepository } from '../infrastructure/sqlite-action-repository.ts';
 import { SystemClock, RealSleeper } from '../infrastructure/system-clock.ts';
 import { AccountCredentials } from '../infrastructure/token-providers.ts';
+import { localIdentity } from './local-identity.ts';
 
 /**
  * What a test puts in place of the things that reach outside the machine. The
@@ -66,8 +67,10 @@ export type ContainerOverrides = {
   coordination?: ClaimFeed & WorkImport;
   /** Stands in for the REST lists of what blocks an issue. */
   dependencies?: DependencyReader;
-  /** Stands in for the login this machine's GitHub command line tool is signed in as. */
+  /** Stands in for the login this worker is judged by, whichever source the environment names. */
   identity?: LocalIdentity;
+  /** Stands in for the network under the GitHub App's own calls: its credential and its login. */
+  appFetch?: FetchLike;
   /** Stands in for GitHub's pull requests, branches, workflow runs and commit statuses. */
   forge?: Forge;
   /** Stands in for the coordination server, as the forge jobs reach it. */
@@ -80,6 +83,8 @@ export type BuildContainerOptions = {
   config: Config;
   /** Where the queue, the log and the reports live. */
   stateDir: string;
+  /** Where the credential and the identity source are read from; the process's own by default. */
+  env?: Record<string, string | undefined>;
   overrides?: ContainerOverrides;
 };
 
@@ -127,6 +132,7 @@ export type Container = {
  */
 export function buildContainer(options: BuildContainerOptions): Container {
   const { config, stateDir } = options;
+  const env = options.env ?? process.env;
   const overrides = options.overrides ?? {};
 
   const clock = overrides.clock ?? new SystemClock();
@@ -141,10 +147,11 @@ export function buildContainer(options: BuildContainerOptions): Container {
   // because the board writes then cost the App's allowance instead of the
   // allowance the person is working inside.
   const credentials = new AccountCredentials({
-    env: process.env,
+    env,
     boards: directory.boards().map((placement) => placement.board),
     logger,
     clock,
+    ...(overrides.appFetch === undefined ? {} : { fetchImpl: overrides.appFetch }),
   });
   // One account's allowance, whichever board's call reported it last.
   const ledger = new BudgetLedger();
@@ -182,6 +189,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
   const closers: (() => void)[] = [];
   const syncJobs = sync === null || !syncIsOn(sync) ? undefined : buildSyncJobs({
     sync,
+    env,
     repository,
     kinds,
     directory,
@@ -234,9 +242,11 @@ export function buildContainer(options: BuildContainerOptions): Container {
       policy,
       clock,
       logger,
-      audit: async () => {
-        await audit.execute();
-      },
+      ...(config.audit.enabled ? {
+        audit: async () => {
+          await audit.execute();
+        },
+      } : {}),
       ...(syncJobs === undefined ? {} : { sync: syncJobs }),
     }),
     close: () => {
@@ -250,6 +260,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
 
 type SyncWiring = {
   sync: SyncConfig;
+  env: Record<string, string | undefined>;
   repository: ActionRepository;
   kinds: KindRegistry;
   directory: BoardDirectory;
@@ -280,15 +291,21 @@ type SyncWiring = {
  * for otherwise. Both run behind the check that this worker is the one that may.
  */
 function buildSyncJobs(wiring: SyncWiring): SyncJobs {
-  const { sync, repository, clock, logger, overrides } = wiring;
+  const { sync, env, repository, clock, logger, overrides } = wiring;
   const coordination = overrides.coordination ?? new DibsHttpClient({
     server: sync.server,
-    token: tokenFromEnvironment(process.env, sync.tokenEnv),
+    token: tokenFromEnvironment(env, sync.tokenEnv),
     logger,
   });
   const jobs: SyncJobs = {
     owner: new SyncOwner({
-      identity: overrides.identity ?? new GhCliIdentity(),
+      identity: overrides.identity ?? localIdentity({
+        env,
+        mirrorOwner: sync.mirrorOwner,
+        board: firstBoard(wiring.directory),
+        clock,
+        fetchImpl: overrides.appFetch,
+      }),
       sync,
       repository,
       clock,
@@ -340,7 +357,7 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
       identity: wiring.forgeIdentity,
       coordination: overrides.forgeCoordination ?? new DibsForgeClient({
         server: sync.server,
-        token: tokenFromEnvironment(process.env, sync.tokenEnv),
+        token: tokenFromEnvironment(env, sync.tokenEnv),
         logger,
       }),
       ledger,
@@ -364,6 +381,15 @@ function placementOfRepository(directory: BoardDirectory, repo: string): BoardPl
     throw new RefusedByRule(`${repo} is carried by no configured board`);
   }
   return placement;
+}
+
+/** Any configured board; the configuration refuses one that names none. */
+function firstBoard(directory: BoardDirectory): BoardPlacement {
+  const [first] = directory.boards();
+  if (first === undefined) {
+    throw new RefusedByRule('the configuration names no board');
+  }
+  return first;
 }
 
 /** One transport per board, built the first time something of that board is asked about. */

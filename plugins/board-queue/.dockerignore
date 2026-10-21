@@ -1,0 +1,6 @@
+# The image takes only what `board-queue service` runs; everything else stays out of the context.
+*
+!package.json
+!package-lock.json
+!bin/board-queue.ts
+!src/

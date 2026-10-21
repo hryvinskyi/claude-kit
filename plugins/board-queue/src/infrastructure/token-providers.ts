@@ -16,6 +16,8 @@ const DEFAULT_CACHE_TTL_SEC = 50 * 60;
 /** The window an App's own assertion is good for, and the clock skew it allows. */
 const JWT_BACKDATE_SEC = 60;
 const JWT_LIFETIME_SEC = 9 * 60;
+/** How long one of the App's own calls may take before it is given up on. */
+const APP_CALL_TIMEOUT_MS = 10_000;
 
 /**
  * The variable that names the App's key file, and the older one that some
@@ -40,6 +42,7 @@ const INSTALLATION_PATH: Record<BoardOwnerType, (owner: string) => string> = {
 const ExitStatus = z.object({ status: z.number() });
 const InstallationPayload = z.object({ id: z.number().int() });
 const AccessTokenPayload = z.object({ token: z.string().min(1) });
+const AppPayload = z.object({ slug: z.string().trim().min(1) });
 
 /** Running a command, narrow enough for a test to stand in for. */
 export type CommandRunner = (command: string, args: readonly string[]) => string;
@@ -184,6 +187,18 @@ export class AppTokenProvider implements TokenProvider {
     // Every call mints a fresh credential; the caching wrapper is what holds one.
   }
 
+  /**
+   * The login GitHub shows for what this App does — its slug and `[bot]` — read
+   * from GitHub with an assertion only the App's key can sign. It names who holds
+   * the key, which a configuration file cannot: a copied file says anything, a
+   * copied file without the key answers nothing here.
+   */
+  async appLogin(): Promise<string> {
+    const step = 'reading which App the key belongs to';
+    const payload = await this.call('GET', '/app', this.signAssertion(), step);
+    return `${decodeWire(AppPayload, payload, step).slug}[bot]`;
+  }
+
   private signAssertion(): string {
     let pem: string;
     try {
@@ -225,6 +240,7 @@ export class AppTokenProvider implements TokenProvider {
           accept: 'application/vnd.github+json',
           'user-agent': this.userAgent,
         },
+        signal: AbortSignal.timeout(APP_CALL_TIMEOUT_MS),
       });
     } catch (cause) {
       throw new TransientFailure(`${step} could not be reached: ${sentenceOf(cause)}`);

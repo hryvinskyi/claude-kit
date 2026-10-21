@@ -4,7 +4,12 @@ import type { ActionRepository, Clock, Logger } from './ports.ts';
 import { writeSyncRefusal } from './sync-meta.ts';
 import type { LocalIdentity } from './sync-ports.ts';
 
-export type OwnerVerdict = { readonly ok: true } | { readonly ok: false; readonly reason: string };
+/** Why a worker declined: its login could not be read, or it is somebody other than the owner. */
+export type OwnerRefusal = 'identity-unreadable' | 'not-the-owner';
+
+export type OwnerVerdict =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string; readonly refusal: OwnerRefusal };
 
 export type SyncOwnerDeps = {
   identity: LocalIdentity;
@@ -56,13 +61,18 @@ export class SyncOwner {
     try {
       login = await this.#identity.login();
     } catch (error) {
-      return { ok: false, reason: `this worker's GitHub login could not be read: ${describeUnknown(error)}` };
+      return {
+        ok: false,
+        reason: `this worker's GitHub login could not be read: ${describeUnknown(error)}`,
+        refusal: 'identity-unreadable',
+      };
     }
     const owner = this.#sync.mirrorOwner;
     if (login === null || login.trim() === '') {
       return {
         ok: false,
         reason: `this worker's GitHub login could not be read; only ${owner}'s worker keeps in step`,
+        refusal: 'identity-unreadable',
       };
     }
     if (login.trim().toLowerCase() !== owner.toLowerCase()) {
@@ -70,6 +80,7 @@ export class SyncOwner {
         ok: false,
         reason: `this worker runs as ${login.trim()}, and only ${owner}'s worker keeps the boards in step — `
           + 'turn the mirror and the importer off in this configuration',
+        refusal: 'not-the-owner',
       };
     }
     return { ok: true };
