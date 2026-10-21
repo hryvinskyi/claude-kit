@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -254,20 +254,93 @@ describe('a worker that keeps the board in step, on a real queue file', () => {
     assert.deepEqual(app.calls.map((call) => call.url), ['https://api.github.com/app']);
   });
 
-  it('declines on a person\'s machine handed the service\'s configuration, as any copied configuration does', async (t) => {
-    const it_ = world('unused');
+  it('runs none of the owner\'s jobs on a person\'s machine handed the service\'s configuration, quietly', async (t) => {
+    const it_ = world('bob');
     const config = ConfigSchema.parse({ ...syncConfig, dibs: { ...syncConfig.dibs, mirrorOwner: 'example-sync[bot]' } });
     const { identity: _personal, ...withoutIdentity } = it_.overrides;
-    const laptop = containerFor(t, config, withoutIdentity, {});
+    const laptop = containerFor(t, config, it_.overrides, {});
     const pretending = containerFor(t, config, withoutIdentity, { BOARD_QUEUE_IDENTITY: 'app' });
 
     const fromGh = await laptop.tick.run();
     const fromNoKey = await pretending.tick.run();
 
-    // Whatever this machine's command line tool is signed in as, it is never asked: no person is an App.
-    assert.match(fromGh.sync?.refused ?? '', /example-sync\[bot\], is a GitHub App; a person's machine never runs as one/);
-    assert.equal(fromGh.sync?.refusal, 'identity-unreadable');
+    // A person's login never ends in [bot]: such a worker is simply not the owner's.
+    assert.equal(fromGh.sync?.refused, 'this worker runs as bob, and only example-sync[bot]\'s worker runs '
+      + 'the claim mirror and the importer');
+    assert.equal(fromGh.sync?.refusal, 'not-the-owner');
     assert.match(fromNoKey.sync?.refused ?? '', /runs as its GitHub App, and the environment names none/);
+    assert.equal(fromNoKey.sync?.refusal, 'identity-unreadable');
     assert.deepEqual(it_.coordination.calls, []);
+  });
+
+  it('mirrors its own person\'s moves on every worker, and leaves the owner\'s jobs to the owner\'s, quietly', async (t) => {
+    const it_ = world('bob-gh');
+    it_.coordination.member('bob', 'bob-gh').log(claim(4, 'claimed', 45, 'bob')).item(45, 'gh:example-org/first-repo#13')
+      .holds(45, 'bob');
+    const config = ConfigSchema.parse({
+      ...syncConfig,
+      dibs: { ...syncConfig.dibs, mirror: { ...syncConfig.dibs?.mirror, scope: 'own' } },
+    });
+    const container = containerFor(t, config, it_.overrides);
+
+    const report = await container.tick.run();
+    const status = await container.status.execute();
+
+    assert.deepEqual(it_.board.valuesOf(TWELVE), { Status: 'Todo' }, 'alice\'s claim is left to alice\'s worker');
+    const filed = await container.list.execute({});
+    assert.deepEqual(filed.map((action) => [action.kind, action.ref]), [
+      ['board.set-fields', 'example-org/first-repo#13'],
+      ['issue.assignees', 'example-org/first-repo#13'],
+    ]);
+    assert.equal(status.sync?.mirror.lastRun?.filedFor, 'bob');
+    assert.equal(status.sync?.mirror.lastRun?.othersMoves, 1);
+    assert.equal(report.sync?.refusal, 'not-the-owner');
+    assert.equal(it_.coordination.batches.length, 0, 'the importer runs only in alice\'s worker');
+    const lines = statusLines(status);
+    assert.ok(lines.includes('not run here — this worker runs as bob-gh, and only alice\'s worker runs the importer'));
+    assert.ok(lines.some((line) => line.endsWith('mirror on, each person\'s own moves · importer on · forge off · importer only in alice\'s worker')));
+  });
+
+  it('reaches the server with the token the dibs tool stored, and never writes it down', async (t) => {
+    const it_ = world('bob-gh');
+    const loginDir = mkdtempSync(join(tmpdir(), 'board-queue-sync-login-'));
+    t.after(() => {
+      rmSync(loginDir, { recursive: true, force: true });
+    });
+    const token = 'dibs_storedstoredstoredstoredstoredstored';
+    writeFileSync(join(loginDir, 'credentials.toml'),
+      `[[credential]]\nserver = "https://dibs.example.com"\nproject = "widgets"\ntoken = "${token}"\n`);
+    chmodSync(join(loginDir, 'credentials.toml'), 0o600);
+    const server = new FakeFetch([
+      { body: { members: [{ handle: 'bob', display_name: 'Bob', external_login: 'bob-gh', role: 'member' }] } },
+      { body: { events: [], next: null } },
+      { body: { claims: [{ item: 41, holder: 'bob', state: 'working', branches: {} }] } },
+      { body: { item: { id: 41, ref: 'gh:example-org/first-repo#12' } } },
+    ]);
+    const config = ConfigSchema.parse({
+      ...syncConfig,
+      dibs: {
+        ...syncConfig.dibs,
+        token: { from: 'dibs-login' },
+        mirror: { ...syncConfig.dibs?.mirror, scope: 'own' },
+        importer: { enabled: false },
+      },
+    });
+    const { coordination: _fake, ...overrides } = it_.overrides;
+    const container = containerFor(t, config, { ...overrides, dibsFetch: server.fetch }, { DIBS_CONFIG_DIR: loginDir });
+
+    const report = await container.tick.run();
+
+    assert.equal(report.done, 2);
+    assert.deepEqual(it_.issues.assigneesOf(TWELVE), ['bob-gh']);
+    assert.deepEqual(server.calls.map((call) => call.url), [
+      'https://dibs.example.com/v1/members',
+      'https://dibs.example.com/v1/events?after=0&limit=500',
+      'https://dibs.example.com/v1/claims',
+      'https://dibs.example.com/v1/items/41',
+    ]);
+    assert.ok(server.calls.every((call) => call.headers['authorization'] === `Bearer ${token}`));
+    assert.equal(report.sync?.refused, undefined, 'no job here waits for the owner\'s worker');
+    assert.ok(!readFileSync(join(container.stateDir, 'worker.log'), 'utf8').includes(token));
   });
 });

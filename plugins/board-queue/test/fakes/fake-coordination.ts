@@ -136,5 +136,10 @@ export class FakeCoordination implements ClaimFeed, WorkImport {
 
 /** A claim event of the fake log, with the defaults a test rarely cares about. */
 export function claim(id: number, kind: ClaimEvent['kind'], item: number, member: string, previous?: string): ClaimEvent {
-  return { id, kind, item, member, previous: previous ?? null };
+  return { id, kind, item, member, previous: previous ?? null, by: null };
+}
+
+/** An admin's release of a member's claim; with no admin, the server's operator's. */
+export function forcedRelease(id: number, item: number, holder: string, admin: string | null): ClaimEvent {
+  return { id, kind: 'force_released', item, member: holder, previous: null, by: admin };
 }

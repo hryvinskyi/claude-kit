@@ -20,10 +20,19 @@ export const ClaimStatusesSchema = z
   })
   .strict();
 
+/**
+ * Whose moves a worker's mirror files. `all`: every move, in the one worker
+ * whose login is `mirrorOwner`. `own`: in every person's worker, only the moves
+ * that person caused, so each move is filed once, under the login of whoever made
+ * it, and spends that person's allowance.
+ */
+export const MirrorScopeSchema = z.enum(['all', 'own']);
+
 export const MirrorConfigSchema = z
   .object({
-    /** Off unless a deployment turns it on, in exactly one worker. */
+    /** Off unless a deployment turns it on. */
     enabled: z.boolean().default(false),
+    scope: MirrorScopeSchema.default('all'),
     status: ClaimStatusesSchema,
     /** Whether the holder of a claim is also assigned to the issue. */
     assignees: z.boolean().default(true),
@@ -103,14 +112,43 @@ export const ForgeConfigSchema = z
   })
   .strict();
 
+const EnvironmentVariable = z.string().trim()
+  .regex(/^[A-Z_][A-Z0-9_]*$/, 'name an environment variable, such as DIBS_TOKEN');
+
+/**
+ * Where the coordination server's token comes from, per source, beside the word
+ * that names it. Never the token itself.
+ */
+export type DibsTokenSources = {
+  /** The variable that holds it, or whose `_FILE` twin names a file that does. */
+  env: { readonly env: string };
+  /** The login the dibs command line tool stored on this machine for the configured server and project. */
+  'dibs-login': Record<never, never>;
+};
+
+export type DibsTokenSourceName = keyof DibsTokenSources;
+
+export type DibsTokenSource<K extends DibsTokenSourceName = DibsTokenSourceName> = {
+  [P in K]: { readonly from: P } & DibsTokenSources[P];
+}[K];
+
+export const DibsTokenSourceSchema = z.discriminatedUnion('from', [
+  z.object({ from: z.literal('env'), env: EnvironmentVariable }).strict(),
+  z.object({ from: z.literal('dibs-login') }).strict(),
+]);
+
 /**
  * What this worker keeps in step with a coordination server: claims there moving
  * rows here, and the board's open work and what blocks it reported there.
  *
- * Either direction copies one system's state onto another on the whole team's
- * behalf, so it runs in exactly one worker: the one whose GitHub login is
- * `mirrorOwner`. A configuration copied to another machine names somebody else
- * and starts nothing there.
+ * The importer and the forge jobs copy one system's state onto another on the
+ * whole team's behalf, so they run in exactly one worker: the one whose GitHub
+ * login is `mirrorOwner`. A configuration copied to another machine names
+ * somebody else and starts neither there. The mirror runs there too, unless its
+ * scope is `own`, which runs it in every person's worker for that person's moves.
+ *
+ * The token's source is named once, by `token` or by the older `tokenEnv`, and
+ * read as `token` either way.
  */
 export const SyncConfigSchema = z
   .object({
@@ -124,9 +162,11 @@ export const SyncConfigSchema = z
       .transform((url) => url.replace(/\/+$/, '')),
     /** The project on that server. */
     project: z.string().trim().min(1),
-    /** The environment variable holding an integration's token for that project; never the token itself. */
-    tokenEnv: z.string().trim().regex(/^[A-Z_][A-Z0-9_]*$/, 'name an environment variable, such as DIBS_TOKEN'),
-    /** The GitHub login of the one worker that runs either direction. */
+    /** The variable holding the token for that project, never the token: the older spelling of an `env` token. */
+    tokenEnv: EnvironmentVariable.optional(),
+    /** Where the token for that project comes from. */
+    token: DibsTokenSourceSchema.optional(),
+    /** The GitHub login of the one worker that runs the importer, the forge jobs and an `all` mirror. */
     mirrorOwner: z.string().trim().min(1),
     /** The repositories whose issues are kept in step; each must be carried by a configured board. */
     repos: z.array(z.string().trim().refine(isRepoFullName, 'a repository is written owner/name')).min(1),
@@ -134,13 +174,36 @@ export const SyncConfigSchema = z
     importer: ImporterConfigSchema.default({}),
     forge: ForgeConfigSchema.default({}),
   })
-  .strict();
+  .strict()
+  .transform(({ tokenEnv, token, ...sync }, context) => {
+    if (tokenEnv !== undefined && token !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['token'],
+        message: 'name the token by token or by tokenEnv, not both',
+      });
+      return z.NEVER;
+    }
+    const source: DibsTokenSource | undefined = token
+      ?? (tokenEnv === undefined ? undefined : { from: 'env', env: tokenEnv });
+    if (source === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['token'],
+        message: 'name where the token comes from: token { "from": "env", "env": "DIBS_TOKEN" } '
+          + 'or { "from": "dibs-login" }',
+      });
+      return z.NEVER;
+    }
+    return { ...sync, token: source };
+  });
 
 export type SyncConfig = z.infer<typeof SyncConfigSchema>;
 export type MirrorConfig = z.infer<typeof MirrorConfigSchema>;
 export type ImporterConfig = z.infer<typeof ImporterConfigSchema>;
 export type ForgeConfig = z.infer<typeof ForgeConfigSchema>;
 export type ClaimStatuses = z.infer<typeof ClaimStatusesSchema>;
+export type MirrorScope = z.infer<typeof MirrorScopeSchema>;
 
 function withoutCredentials(address: string): boolean {
   try {
@@ -149,6 +212,27 @@ function withoutCredentials(address: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether the mirror is on and files only the moves of this worker's own person,
+ * which is the one job that does not wait for this worker to be `mirrorOwner`'s.
+ */
+export function mirrorsOwnMoves(sync: SyncConfig): boolean {
+  return sync.mirror?.enabled === true && sync.mirror.scope === 'own';
+}
+
+/** A job that runs only in `mirrorOwner`'s worker. */
+export type OwnerJob = 'mirror' | 'importer' | 'forge';
+
+/** The jobs switched on that run only in `mirrorOwner`'s worker. */
+export function ownerJobsOf(sync: SyncConfig): OwnerJob[] {
+  const on: Readonly<Record<OwnerJob, boolean>> = {
+    mirror: sync.mirror?.enabled === true && sync.mirror.scope === 'all',
+    importer: sync.importer.enabled,
+    forge: sync.forge.enabled,
+  };
+  return (['mirror', 'importer', 'forge'] as const).filter((job) => on[job]);
 }
 
 /** Whether any job is switched on; with none, nothing about the server is ever asked. */

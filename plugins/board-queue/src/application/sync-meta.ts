@@ -44,6 +44,18 @@ const MirrorRunSchema = z.object({
   cursorExpired: z.object({ at: Moment, prunedThrough: z.number().int().nonnegative() }).nullable(),
   /** When the mirror last started from the head of the log, at which event, and why. */
   startedFromHead: z.object({ at: Moment, event: z.number().int().nonnegative(), because: z.string() }).nullable(),
+  /** The member whose moves alone this run filed; null when it filed everybody's. */
+  filedFor: z.string().nullable().default(null),
+  /** Moves another person caused, left to that person's own worker. */
+  othersMoves: z.number().int().nonnegative().default(0),
+  /** Moves no person's worker can file — their author is unnamed, removed or has no GitHub login — filed here. */
+  orphanMoves: z.number().int().nonnegative().default(0),
+  /** Moves passed over because the server no longer shows the state they left. */
+  staleMoves: z.number().int().nonnegative().default(0),
+  /** Why this run filed nothing and read nothing, when whose moves to file could not be settled. */
+  declined: z.string().nullable().default(null),
+  /** A configured owner the project does not know, so that nobody files the moves no person's worker can. */
+  ownerWarning: z.string().nullable().default(null),
 });
 
 export type MirrorRun = z.infer<typeof MirrorRunSchema>;
@@ -127,7 +139,17 @@ const ForgeRunSchema = z.object({
 export type ForgeRepositoryRun = z.infer<typeof ForgeRepositoryRunSchema>;
 export type ForgeRun = z.infer<typeof ForgeRunSchema>;
 
-const RefusalSchema = z.object({ at: Moment, reason: z.string() });
+/** Why a worker declined the jobs that run only in the owner's: its login could not be read, or it is somebody else. */
+export const OwnerRefusalSchema = z.enum(['identity-unreadable', 'not-the-owner']);
+
+export type OwnerRefusal = z.infer<typeof OwnerRefusalSchema>;
+
+const RefusalSchema = z.object({
+  at: Moment,
+  reason: z.string(),
+  /** Absent from a note an earlier version wrote. */
+  refusal: OwnerRefusalSchema.optional(),
+});
 
 export type SyncRefusal = z.infer<typeof RefusalSchema>;
 
@@ -222,7 +244,11 @@ export async function writeSyncRefusal(repository: ActionRepository, refusal: Sy
   await repository.setMeta(SYNC_REFUSED, refusal === null ? 'null' : JSON.stringify(refusal));
 }
 
-async function readJson<T>(repository: ActionRepository, key: string, schema: z.ZodType<T>): Promise<T | null> {
+async function readJson<T>(
+  repository: ActionRepository,
+  key: string,
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+): Promise<T | null> {
   const stored = await repository.getMeta(key);
   if (stored === null) {
     return null;

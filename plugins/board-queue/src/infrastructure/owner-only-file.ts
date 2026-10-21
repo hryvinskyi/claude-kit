@@ -1,8 +1,8 @@
 import { closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { RefusedByRule } from '../domain/errors.ts';
 
-/** The only permissions a secret's file may carry: the owner reads it, or reads and writes it. */
-const OWNER_ONLY_MODES = new Set([0o400, 0o600]);
+/** The permission bits of anybody but a file's owner: a secret's file carries none of them. */
+const GROUP_AND_WORLD = 0o077;
 
 export type OwnerOnlyText = { text: string; mode: string };
 
@@ -32,8 +32,11 @@ export function readOwnerOnlyFile(path: string, named: string): OwnerOnlyText {
       throw new RefusedByRule(`${named} belongs to another account; it must be this account's own`);
     }
     const mode = stat.mode & 0o777;
-    if (!OWNER_ONLY_MODES.has(mode)) {
-      throw new RefusedByRule(`${named} is mode ${mode.toString(8)}; make it 0400 or 0600, readable by its owner alone`);
+    if ((mode & GROUP_AND_WORLD) !== 0) {
+      throw new RefusedByRule(
+        `${named} is mode ${mode.toString(8)}; take every permission away from its group and from everybody else, `
+        + 'so that its owner alone may read it (chmod go-rwx)',
+      );
     }
     return { text: readFileSync(descriptor, 'utf8'), mode: `0${mode.toString(8)}` };
   } finally {

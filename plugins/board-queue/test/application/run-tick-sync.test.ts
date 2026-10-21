@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { OwnMoves } from '../../src/application/mirror-audience.ts';
 import { MirrorClaims } from '../../src/application/mirror-claims.ts';
 import { RunTick } from '../../src/application/run-tick.ts';
 import type { SyncJobs } from '../../src/application/run-tick.ts';
-import { readSyncRefusal } from '../../src/application/sync-meta.ts';
+import { mirrorCursorKey, readSyncRefusal } from '../../src/application/sync-meta.ts';
 import { SyncOwner } from '../../src/application/sync-owner.ts';
+import { ConfigSchema } from '../../src/domain/config.ts';
 import type { LocalIdentity } from '../../src/application/sync-ports.ts';
 import { BoardDirectory } from '../../src/domain/board-directory.ts';
 import { TransientFailure } from '../../src/domain/errors.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { defaultKindRegistry } from '../../src/domain/kinds/default-kinds.ts';
+import type { SyncConfig } from '../../src/domain/sync-config.ts';
 import { catalogField, catalogOf, seedItem } from '../fakes/fake-board-gateway.ts';
 import { FakeCoordination, claim } from '../fakes/fake-coordination.ts';
 import { syncConfig, syncOf } from '../fixtures/sync.ts';
@@ -66,6 +69,32 @@ function worker(fixture: TickFixture, feed: FakeCoordination, login: string | nu
   });
 }
 
+/** The fixture's configuration with a mirror of each worker's own person's moves. */
+function ownScopeSync(overrides: Record<string, unknown> = {}) {
+  return syncOf(ConfigSchema.parse({
+    ...syncConfig,
+    dibs: { ...SYNC, mirror: { ...SYNC.mirror, scope: 'own' }, ...overrides },
+  }));
+}
+
+function mirrorFor(fixture: TickFixture, feed: FakeCoordination, sync: SyncConfig, audience: OwnMoves): MirrorClaims {
+  const mirror = sync.mirror;
+  if (mirror === undefined) {
+    throw new Error('the configuration mirrors nothing');
+  }
+  return new MirrorClaims({
+    feed,
+    repository: fixture.repository,
+    kinds: defaultKindRegistry(syncConfig),
+    directory: BoardDirectory.of(syncConfig.boards),
+    sync,
+    mirror,
+    clock: fixture.clock,
+    logger: fixture.logger,
+    audience,
+  });
+}
+
 function feedWithAClaim(): FakeCoordination {
   return new FakeCoordination()
     .item(41, 'gh:example-org/first-repo#12')
@@ -117,10 +146,11 @@ describe('a tick that keeps the board in step', () => {
     const report = await worker(fixture, feed, 'bob').run();
 
     assert.deepEqual(feed.calls, [], 'nothing was asked of the server');
-    assert.match(report.sync?.refused ?? '', /runs as bob, and only alice's worker/);
+    assert.equal(report.sync?.refused, 'this worker runs as bob, and only alice\'s worker runs the claim mirror and the importer');
+    assert.equal(report.sync?.refusal, 'not-the-owner');
     assert.equal(report.sync?.mirror, undefined);
     assert.equal(report.done, 1);
-    assert.match((await readSyncRefusal(fixture.repository))?.reason ?? '', /only alice's worker/);
+    assert.match((await readSyncRefusal(fixture.repository))?.reason ?? '', /only alice's worker runs the claim mirror/);
   });
 
   it('declines when the login cannot be read at all', async () => {
@@ -194,5 +224,81 @@ describe('a tick that keeps the board in step', () => {
 
     assert.deepEqual(report.sync?.mirror, { skipped: 'another tick holds the lock' });
     assert.deepEqual(feed.calls, []);
+  });
+  it('mirrors its own person\'s moves on a worker that is not the owner, and leaves the owner\'s jobs quietly', async () => {
+    const fixture = tickFixture({
+      catalog: qaCatalog(),
+      items: [seedItem(TWELVE, 'item-12', { Status: 'Todo' })],
+      issues: [{ ref: TWELVE }],
+    });
+    const feed = new FakeCoordination()
+      .item(41, 'gh:example-org/first-repo#12')
+      .member('alice', 'alice-gh')
+      .member('bob', 'bob-gh')
+      .log(claim(3, 'claimed', 41, 'bob'))
+      .holds(41, 'bob');
+    await fixture.repository.setMeta(mirrorCursorKey(SYNC.server, SYNC.project), '0');
+    const sync = ownScopeSync();
+    const bob = identity('bob-gh');
+    const importer = async () => Promise.reject(new Error('the importer must not run on this worker'));
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      sync: {
+        owner: new SyncOwner({ identity: bob, sync, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        mirror: () => mirrorFor(fixture, feed, sync, new OwnMoves(bob, SYNC.mirrorOwner)).execute(),
+        mirrorScope: 'own',
+        importer,
+      },
+    });
+
+    const report = await tick.run();
+    await tick.run();
+
+    assert.deepEqual(fixture.board.valuesOf(TWELVE), { Status: 'In Progress' });
+    assert.deepEqual(fixture.issues.assigneesOf(TWELVE), ['bob-gh']);
+    assert.equal(report.sync?.refusal, 'not-the-owner');
+    assert.equal(report.sync?.refused, 'this worker runs as bob-gh, and only alice\'s worker runs the importer');
+    assert.equal(report.sync?.import, undefined);
+    assert.deepEqual(fixture.logger.lines.filter((line) => line.level === 'error'), []);
+    assert.equal(
+      fixture.logger.lines.filter((line) => line.message === 'the jobs kept for the owner\'s worker do not run on this one').length,
+      1,
+      'said once, not at every tick',
+    );
+    assert.equal((await readSyncRefusal(fixture.repository))?.refusal, 'not-the-owner');
+  });
+
+  it('never asks whether it is the owner\'s when only its own person\'s moves are mirrored, and forgets an old refusal', async () => {
+    const fixture = tickFixture();
+    await worker(fixture, feedWithAClaim(), 'bob').run();
+    const sync = ownScopeSync({ importer: { enabled: false } });
+    let asked = 0;
+    const counted = { login: () => { asked += 1; return Promise.resolve('alice-gh'); } };
+    const owner = { login: () => Promise.reject(new Error('the owner check must not be asked')) };
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      sync: {
+        owner: new SyncOwner({ identity: owner, sync, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        mirror: () => mirrorFor(fixture, feedWithAClaim(), sync, new OwnMoves(counted, SYNC.mirrorOwner)).execute(),
+        mirrorScope: 'own',
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.equal(report.sync?.refused, undefined);
+    assert.equal(asked, 1);
+    assert.equal(await readSyncRefusal(fixture.repository), null);
+    const mirrored = report.sync?.mirror;
+    assert.ok(mirrored !== undefined && !('skipped' in mirrored));
+    assert.equal(mirrored.filedFor, 'alice');
   });
 });

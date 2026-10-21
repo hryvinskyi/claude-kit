@@ -113,6 +113,54 @@ describe('keeping in step with a coordination server', () => {
     assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, tokenEnv: 'dibs_abcdef' } }).length > 0);
   });
 
+  it('reads the older tokenEnv as a token from that variable', () => {
+    const parsed = ConfigSchema.parse({ boards: [ORG], fields: ['Status'], dibs });
+    assert.deepEqual(parsed.dibs?.token, { from: 'env', env: 'DIBS_TOKEN' });
+  });
+
+  it('takes the token from a variable or from the dibs tool\'s login, and from one source only', () => {
+    const { tokenEnv: _tokenEnv, ...sourceless } = dibs;
+    const login = ConfigSchema.parse({ boards: [ORG], fields: ['Status'], dibs: { ...sourceless, token: { from: 'dibs-login' } } });
+    const variable = ConfigSchema.parse({
+      boards: [ORG],
+      fields: ['Status'],
+      dibs: { ...sourceless, token: { from: 'env', env: 'DIBS_LAPTOP_TOKEN' } },
+    });
+
+    assert.deepEqual(login.dibs?.token, { from: 'dibs-login' });
+    assert.deepEqual(variable.dibs?.token, { from: 'env', env: 'DIBS_LAPTOP_TOKEN' });
+    assert.deepEqual(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: sourceless }), [
+      'name where the token comes from: token { "from": "env", "env": "DIBS_TOKEN" } or { "from": "dibs-login" }',
+    ]);
+    assert.deepEqual(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, token: { from: 'dibs-login' } } }), [
+      'name the token by token or by tokenEnv, not both',
+    ]);
+    for (const token of [{ from: 'keychain' }, { from: 'env', env: 'dibs_abcdef' }, { from: 'dibs-login', path: '/x' }]) {
+      assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...sourceless, token } }).length > 0, JSON.stringify(token));
+    }
+  });
+
+  it('reads a parsed configuration again as the same one', () => {
+    const parsed = ConfigSchema.parse({ boards: [ORG], fields: ['Status'], dibs });
+
+    assert.deepEqual(ConfigSchema.parse(parsed), parsed);
+  });
+
+  it('mirrors everybody\'s moves unless the configuration says only the worker\'s own person\'s', () => {
+    const status = { claimed: 'In Progress', released: 'Todo' };
+    const all = ConfigSchema.parse({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, mirror: { enabled: true, status } } });
+    const own = ConfigSchema.parse({
+      boards: [ORG],
+      fields: ['Status'],
+      dibs: { ...dibs, mirror: { enabled: true, scope: 'own', status } },
+    });
+
+    assert.equal(all.dibs?.mirror?.scope, 'all');
+    assert.equal(own.dibs?.mirror?.scope, 'own');
+    assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, mirror: { enabled: true, scope: 'mine', status } } })
+      .length > 0);
+  });
+
   it('refuses a mirror that names no claimed or released status', () => {
     const mirror = { enabled: true, status: { claimed: 'In Progress' } };
     assert.ok(refusalsOf({ boards: [ORG], fields: ['Status'], dibs: { ...dibs, mirror } }).length > 0);

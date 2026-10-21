@@ -20,6 +20,11 @@ export type ClaimEvent = {
   readonly member: string | null;
   /** For a takeover, whose stale claim ended; null otherwise. */
   readonly previous: string | null;
+  /**
+   * For a release by an admin, the admin; null otherwise, and for a release the
+   * server's operator made from its command line.
+   */
+  readonly by: string | null;
 };
 
 /** Which of the configured statuses an event stands for. */
@@ -30,6 +35,16 @@ export type IssueMove = {
   readonly item: number;
   /** The last event that went into it, which is what names the move once it is filed. */
   readonly lastEventId: number;
+  /**
+   * Who caused that last event, and so whose move this is: the state the item
+   * is left in is the one that member's action left. Null when the log did not
+   * name them.
+   */
+  readonly causedBy: string | null;
+  /** The kind of that last event, which says what the server should show for the item now. */
+  readonly lastKind: ClaimEventKind;
+  /** Who held the claim as of that last event; null when the log did not name them. */
+  readonly holder: string | null;
   /** The board status the last event that stands for one asks for, or nothing when none did. */
   readonly status: string | null;
   /** Handles to assign, in the order they were first named. */
@@ -68,6 +83,33 @@ const STEPS: { readonly [K in ClaimEventKind]: Step } = {
 };
 
 /**
+ * Who caused each claim event: the member whose action appended it.
+ *
+ * - `claimed`: the member who claimed the item.
+ * - `taken_over`: the member who took the stale claim over, not the one it was taken from.
+ * - `released`: the holder, who put the work down.
+ * - `force_released`: the admin who ended the claim. A release the server's
+ *   operator made from its command line names no admin; it falls to the holder,
+ *   whose row it is, so that somebody's worker still files it.
+ * - `review_started`: the holder, who recorded a pull request on the claim.
+ * - `review_ended`: the holder of the claim that is worked on again — whether they
+ *   dropped the pull request or the forge reported it closed.
+ */
+const ACTORS: { readonly [K in ClaimEventKind]: (event: ClaimEvent) => string | null } = {
+  claimed: (event) => event.member,
+  taken_over: (event) => event.member,
+  released: (event) => event.member,
+  force_released: (event) => event.by ?? event.member,
+  review_started: (event) => event.member,
+  review_ended: (event) => event.member,
+};
+
+/** The member who caused a claim event. */
+export function actorOf(event: ClaimEvent): string | null {
+  return ACTORS[event.kind](event);
+}
+
+/**
  * One move per item, in the order of the last event of each: what a page of the
  * log says each item should look like now, in the board's own statuses. Events
  * must come oldest first, as the log hands them out.
@@ -78,13 +120,50 @@ export function collapseClaims(events: readonly ClaimEvent[], statuses: ClaimSta
     const before = moves.get(event.item) ?? {
       item: event.item,
       lastEventId: event.id,
+      causedBy: null,
+      lastKind: event.kind,
+      holder: null,
       status: null,
       assign: [],
       unassign: [],
     };
-    moves.set(event.item, STEPS[event.kind](before, event, statuses));
+    moves.set(event.item, {
+      ...STEPS[event.kind](before, event, statuses),
+      causedBy: actorOf(event),
+      lastKind: event.kind,
+      holder: event.member,
+    });
   }
   return [...moves.values()].sort((one, other) => one.lastEventId - other.lastEventId);
+}
+
+/** An item's live claim on the server now: who holds it and whether its work waits on a review; null for none. */
+export type LiveState = { readonly holder: string; readonly inReview: boolean } | null;
+
+const heldBy = (inReview: boolean) => (move: IssueMove, live: LiveState): boolean =>
+  live !== null && move.holder !== null && live.holder === move.holder && live.inReview === inReview;
+
+const free = (_move: IssueMove, live: LiveState): boolean => live === null;
+
+/**
+ * What the server must still show for a move to be filed: a claim, a takeover or
+ * the end of a review stands while the same member holds the item, worked on; the
+ * start of a review while that member holds it in review; a release while nobody
+ * holds it. Anything else is a later state somebody else's move, or a later move
+ * of the same member, files.
+ */
+const STANDS: { readonly [K in ClaimEventKind]: (move: IssueMove, live: LiveState) => boolean } = {
+  claimed: heldBy(false),
+  taken_over: heldBy(false),
+  review_ended: heldBy(false),
+  review_started: heldBy(true),
+  released: free,
+  force_released: free,
+};
+
+/** Whether the state a move leaves an item in is still the item's state on the server. */
+export function stillStands(move: IssueMove, live: LiveState): boolean {
+  return STANDS[move.lastKind](move, live);
 }
 
 /**

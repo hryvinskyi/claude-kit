@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -83,7 +83,7 @@ describe('what the service needs before its first pass', () => {
     const notOurs = refusal(envWith({ GITHUB_APP_PRIVATE_KEY_PATH: someoneElses }));
 
     assert.match(missing, /is not there/);
-    assert.match(tooOpen, /mode 644; make it 0400 or 0600/);
+    assert.match(tooOpen, /mode 644; take every permission away from its group and from everybody else/);
     assert.match(garbage, /does not hold a private key/);
     assert.match(locked, /this account cannot read it/);
     assert.match(inline, /holds a key rather than the path to one/);
@@ -125,5 +125,17 @@ describe('what the service needs before its first pass', () => {
     assert.match(tooOpen, /DIBS_TEST_TOKEN_FILE is mode 644/);
     assert.equal(tooOpen.includes(TOKEN), false);
     assert.match(both, /both DIBS_TEST_TOKEN and DIBS_TEST_TOKEN_FILE are set/);
+  });
+  it('takes the server\'s token from a stored dibs login when the configuration names that source', () => {
+    const loginDir = join(directory, 'dibs');
+    mkdirSync(loginDir, { mode: 0o700 });
+    const file = join(loginDir, 'credentials.toml');
+    writeFileSync(file, `[[credential]]\nserver = "https://dibs.example.com"\nproject = "widgets"\ntoken = "${TOKEN}"\n`);
+    chmodSync(file, 0o600);
+    const config = ConfigSchema.parse({ ...syncConfig, dibs: { ...syncConfig.dibs, token: { from: 'dibs-login' } } });
+
+    assert.equal(checkServiceCredentials(envWith({ DIBS_CONFIG_DIR: loginDir }), config).appId, '123456');
+    const elsewhere = refusal(envWith({ DIBS_CONFIG_DIR: join(directory, 'absent') }), config);
+    assert.match(elsewhere, /the dibs login file is not there/);
   });
 });

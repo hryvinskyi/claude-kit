@@ -20,10 +20,31 @@ const VIEW: SyncView = {
   server: 'https://dibs.example.com',
   project: 'widgets',
   owner: 'alice',
-  mirror: { enabled: true, lastRun: null },
+  ownerJobs: ['mirror'],
+  mirror: { enabled: true, scope: 'all', lastRun: null },
   importer: { enabled: false, lastRun: null },
   forge: { enabled: false, lastRun: null },
   refused: null,
+};
+
+const MIRROR_RUN = {
+  at: '2026-03-02T09:00:00.000Z',
+  events: 4,
+  filed: 2,
+  duplicates: 0,
+  ignored: 0,
+  refused: 0,
+  unresolved: 0,
+  cursor: 12,
+  error: null,
+  cursorExpired: null,
+  startedFromHead: null,
+  filedFor: null,
+  othersMoves: 0,
+  orphanMoves: 0,
+  staleMoves: 0,
+  declined: null,
+  ownerWarning: null,
 };
 
 describe('what keeping in step looks like on a terminal', () => {
@@ -39,6 +60,7 @@ describe('what keeping in step looks like on a terminal', () => {
       refused: { at: '2026-03-02T09:00:00.000Z', reason: 'this worker runs as bob' },
       mirror: {
         enabled: true,
+        scope: 'all',
         lastRun: {
           at: '2026-03-02T09:00:00.000Z',
           events: 4,
@@ -51,6 +73,12 @@ describe('what keeping in step looks like on a terminal', () => {
           error: 'the event log could not be reached',
           cursorExpired: { at: '2026-03-01T09:00:00.000Z', prunedThrough: 8 },
           startedFromHead: { at: '2026-02-01T09:00:00.000Z', event: 4, because: 'it had never run' },
+          filedFor: null,
+          othersMoves: 0,
+          orphanMoves: 0,
+          staleMoves: 0,
+          declined: null,
+          ownerWarning: null,
         },
       },
     });
@@ -169,5 +197,66 @@ describe('what keeping in step looks like on a terminal', () => {
       'import: skipped — the last import was recent',
       'forge: skipped — the queue is waiting out a refusal',
     ]);
+  });
+  it('says a mirror files each person\'s own moves, and which jobs only the owner\'s worker runs', () => {
+    const own: SyncView = {
+      ...VIEW,
+      ownerJobs: ['importer', 'forge'],
+      mirror: { enabled: true, scope: 'own', lastRun: { ...MIRROR_RUN, filedFor: 'bob', othersMoves: 3, orphanMoves: 2, staleMoves: 1 } },
+      importer: { enabled: true, lastRun: null },
+      forge: { enabled: true, lastRun: null },
+      refused: {
+        at: '2026-03-02T09:00:00.000Z',
+        reason: 'this worker runs as bob-gh, and only alice\'s worker runs the importer and the forge jobs',
+        refusal: 'not-the-owner',
+      },
+    };
+
+    assert.deepEqual(syncStatusLines(own), [
+      'in step with https://dibs.example.com (widgets): mirror on, each person\'s own moves · importer on · forge on'
+      + ' · importer and forge only in alice\'s worker',
+      'not run here — this worker runs as bob-gh, and only alice\'s worker runs the importer and the forge jobs',
+      'mirror 2026-03-02T09:00:00.000Z — 4 events read, 2 filed, 0 already filed, 3 left to other people\'s workers,'
+      + ' 2 no person\'s worker files, filed here, 1 passed over because the server has moved on, bob\'s own, cursor 12',
+    ]);
+    assert.equal(
+      syncStatusLines({ ...own, ownerJobs: [], importer: { enabled: false, lastRun: null }, forge: { enabled: false, lastRun: null } })[0],
+      'in step with https://dibs.example.com (widgets): mirror on, each person\'s own moves · importer off · forge off',
+    );
+  });
+
+  it('says loudly that the configured owner is no member', () => {
+    const lines = syncStatusLines({
+      ...VIEW,
+      mirror: { enabled: true, scope: 'own', lastRun: { ...MIRROR_RUN, filedFor: 'bob', ownerWarning: 'no member names alcie-gh' } },
+    });
+
+    assert.ok(lines.includes('mirror: no member names alcie-gh'));
+  });
+
+  it('says why a mirror files nothing on this worker', () => {
+    const lines = syncStatusLines({
+      ...VIEW,
+      mirror: {
+        enabled: true,
+        scope: 'own',
+        lastRun: { ...MIRROR_RUN, declined: 'this worker runs as dave-gh, and no member of the project names that GitHub login' },
+      },
+    });
+
+    assert.ok(lines.includes(
+      'mirror 2026-03-02T09:00:00.000Z — files nothing here: this worker runs as dave-gh, and no member of the project names that GitHub login',
+    ));
+    assert.deepEqual(tickLines({ ...QUIET_TICK, sync: { mirror: { ...MIRROR_RUN, declined: 'no member' } } }).slice(1), [
+      'mirror: files nothing here, see status',
+    ]);
+  });
+
+  it('keeps a worker that is not the owner\'s out of every tick\'s output, and a fault in it', () => {
+    const calm = tickLines({ ...QUIET_TICK, sync: { refused: 'this worker runs as bob', refusal: 'not-the-owner' } });
+    const fault = tickLines({ ...QUIET_TICK, sync: { refused: 'the login could not be read', refusal: 'identity-unreadable' } });
+
+    assert.deepEqual(calm.slice(1), []);
+    assert.deepEqual(fault.slice(1), ['in step: declined — the login could not be read']);
   });
 });

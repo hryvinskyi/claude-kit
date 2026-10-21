@@ -41,12 +41,33 @@ describe('reading the coordination server\'s log', () => {
     assert.equal(fetcher.calls[0]?.headers['authorization'], `Bearer ${TOKEN}`);
     assert.deepEqual(page, {
       claims: [
-        { id: 3, kind: 'claimed', item: 12, member: 'alice', previous: null },
-        { id: 5, kind: 'taken_over', item: 12, member: 'bob', previous: 'alice' },
+        { id: 3, kind: 'claimed', item: 12, member: 'alice', previous: null, by: null },
+        { id: 5, kind: 'taken_over', item: 12, member: 'bob', previous: 'alice', by: null },
       ],
       shown: 3,
       next: 5,
     });
+  });
+
+  it('names the admin who ended a claim, and nobody when the server\'s operator did', async () => {
+    const { dibs } = client([{
+      body: {
+        events: [
+          { id: 6, at: '2026-03-02T09:00:00Z', kind: 'force_released', payload: { item: 12, member: 7, by: 9 },
+            members: { 7: 'alice', 9: 'carol' } },
+          { id: 7, at: '2026-03-02T09:01:00Z', kind: 'force_released', payload: { item: 13, member: 7, by: null },
+            members: { 7: 'alice' } },
+        ],
+        next: 7,
+      },
+    }]);
+
+    const page = await dibs.page(5, 500);
+
+    assert.deepEqual(page.claims, [
+      { id: 6, kind: 'force_released', item: 12, member: 'alice', previous: null, by: 'carol' },
+      { id: 7, kind: 'force_released', item: 13, member: 'alice', previous: null, by: null },
+    ]);
   });
 
   it('reads a pull request dropped from a claim, or merged and set aside, as no move of the claim', async () => {

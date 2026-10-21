@@ -14,6 +14,7 @@ import { ReleaseAction } from '../application/release-action.ts';
 import { RetryAction } from '../application/retry-action.ts';
 import { ImportReadyWork } from '../application/import-ready-work.ts';
 import { LimiterWait } from '../application/limiter-wait.ts';
+import { MIRROR_AUDIENCES } from '../application/mirror-audience.ts';
 import { MirrorClaims } from '../application/mirror-claims.ts';
 import { ForgePass } from '../application/forge-pass.ts';
 import type { Forge, ForgeCoordination, ForgeIdentity } from '../application/forge-ports.ts';
@@ -31,7 +32,8 @@ import { defaultKindRegistry } from '../domain/kinds/default-kinds.ts';
 import type { KindRegistry } from '../domain/kinds/registry.ts';
 import type { SyncConfig } from '../domain/sync-config.ts';
 import { syncIsOn } from '../domain/sync-config.ts';
-import { DibsHttpClient, tokenFromEnvironment } from '../infrastructure/dibs-http.ts';
+import { DibsHttpClient } from '../infrastructure/dibs-http.ts';
+import { dibsToken } from '../infrastructure/dibs-token.ts';
 import { DibsForgeClient } from '../infrastructure/dibs-forge-http.ts';
 import { GitHubRestForge } from '../infrastructure/github-rest-forge.ts';
 import { SqliteForgeLedger } from '../infrastructure/sqlite-forge-ledger.ts';
@@ -65,6 +67,8 @@ export type ContainerOverrides = {
   reports?: AuditReportSink;
   /** Stands in for the coordination server, for both directions of keeping in step. */
   coordination?: ClaimFeed & WorkImport;
+  /** Stands in for the network under the coordination server's real clients, token and all. */
+  dibsFetch?: FetchLike;
   /** Stands in for the REST lists of what blocks an issue. */
   dependencies?: DependencyReader;
   /** Stands in for the login this worker is judged by, whichever source the environment names. */
@@ -286,26 +290,24 @@ type SyncWiring = {
 };
 
 /**
- * The two directions of keeping in step, built only when the configuration
- * switches one on: nothing about the coordination server is opened, read or asked
- * for otherwise. Both run behind the check that this worker is the one that may.
+ * The jobs that keep in step, built only when the configuration switches one on:
+ * nothing about the coordination server is opened, read or asked for otherwise.
+ * The importer and the forge jobs run behind the check that this worker is the
+ * owner's; the mirror does too, unless it files only this worker's own person's
+ * moves, which it settles with the login this worker runs as.
  */
 function buildSyncJobs(wiring: SyncWiring): SyncJobs {
   const { sync, env, repository, clock, logger, overrides } = wiring;
   const coordination = overrides.coordination ?? new DibsHttpClient({
     server: sync.server,
-    token: tokenFromEnvironment(env, sync.tokenEnv),
+    token: dibsToken(sync, env),
     logger,
+    ...(overrides.dibsFetch === undefined ? {} : { fetchImpl: overrides.dibsFetch }),
   });
+  const identityDeps = { env, board: firstBoard(wiring.directory), clock, fetchImpl: overrides.appFetch };
   const jobs: SyncJobs = {
     owner: new SyncOwner({
-      identity: overrides.identity ?? localIdentity({
-        env,
-        mirrorOwner: sync.mirrorOwner,
-        board: firstBoard(wiring.directory),
-        clock,
-        fetchImpl: overrides.appFetch,
-      }),
+      identity: overrides.identity ?? localIdentity(identityDeps),
       sync,
       repository,
       clock,
@@ -323,8 +325,10 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
       mirror,
       clock,
       logger,
+      audience: MIRROR_AUDIENCES[mirror.scope](overrides.identity ?? localIdentity(identityDeps), sync.mirrorOwner),
     });
     jobs.mirror = () => claims.execute();
+    jobs.mirrorScope = mirror.scope;
   }
   if (sync.importer.enabled) {
     const cache = new SqliteDependencyCache(dbPath(wiring.stateDir));
@@ -357,8 +361,9 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
       identity: wiring.forgeIdentity,
       coordination: overrides.forgeCoordination ?? new DibsForgeClient({
         server: sync.server,
-        token: tokenFromEnvironment(env, sync.tokenEnv),
+        token: dibsToken(sync, env),
         logger,
+        ...(overrides.dibsFetch === undefined ? {} : { fetchImpl: overrides.dibsFetch }),
       }),
       ledger,
       repository,

@@ -10,7 +10,9 @@ import type { MirrorConfig, SyncConfig } from '../domain/sync-config.ts';
 import { describeUnknown } from './drain-queue.ts';
 import { draftAction } from './enqueue-action.ts';
 import type { EnqueueRequest } from './enqueue-action.ts';
-import { ItemRefs, MemberLogins } from './mirror-lookups.ts';
+import { everyone } from './mirror-audience.ts';
+import type { Audience, AudienceRefusal, LiveClaims, MirrorAudience } from './mirror-audience.ts';
+import { ItemRefs, LiveClaimsOnce, MemberLogins } from './mirror-lookups.ts';
 import type { ActionRepository, Clock, Logger, MetaWrite } from './ports.ts';
 import {
   mirrorCursorKey,
@@ -21,7 +23,7 @@ import {
   readMirrorRun,
   writeMirrorRun,
 } from './sync-meta.ts';
-import type { MirrorRun } from './sync-meta.ts';
+import type { MirrorRun, StoredCursor } from './sync-meta.ts';
 import type { ClaimFeed, ClaimFeedPage, LiveClaim } from './sync-ports.ts';
 
 /** The most events one page of the log holds, which is the most the server hands out. */
@@ -42,6 +44,17 @@ const MAX_PAGES_TO_THE_HEAD = 1000;
 
 const ORIGIN = 'the claim mirror';
 
+/**
+ * Which refusals the log repeats at every run. A login that cannot be read is a
+ * fault of this machine somebody should fix; a login the project does not know is
+ * a standing state of the configuration, said once when it starts or changes.
+ */
+const SAID_AT_EVERY_RUN: { readonly [K in AudienceRefusal]: boolean } = {
+  'login-unreadable': true,
+  'no-member': false,
+  ambiguous: false,
+};
+
 /** What one run of the mirror did, in the words a log line and a status report use. */
 export type MirrorReport = MirrorRun;
 
@@ -54,6 +67,8 @@ export type MirrorClaimsDeps = {
   mirror: MirrorConfig;
   clock: Clock;
   logger: Logger;
+  /** Whose moves are filed; everybody's unless the deployment says otherwise. */
+  audience?: MirrorAudience;
   /** How many events one page asks for; the server's own limit unless a test says otherwise. */
   pageSize?: number;
 };
@@ -100,6 +115,16 @@ type Drafted = {
  * however the pages fell; the key every action carries — the event its state is as
  * of — is the store's own backstop against filing one state twice.
  *
+ * A run first settles whose moves it files: everybody's, or only those of the
+ * person this worker runs as — and, in the owner's worker, those no person's
+ * worker can file. A move is the move of whoever caused the last event of its
+ * item, so a page that holds one person's claim and another's takeover of it files
+ * one move, in the taker's worker; a fresh start files only the live claims that
+ * person holds. A worker that files only some moves files one only while the
+ * server still shows the state it left, because other workers file theirs on
+ * schedules of their own. A run that cannot settle whose moves it files reads and
+ * files nothing, leaves the cursor where it was, and says why.
+ *
  * It writes nothing to GitHub itself: what it files is drained by the worker,
  * paced like any other work.
  */
@@ -113,6 +138,7 @@ export class MirrorClaims {
   readonly #clock: Clock;
   readonly #logger: Logger;
   readonly #pageSize: number;
+  readonly #audience: MirrorAudience;
   readonly #repos: ReadonlySet<string>;
   readonly #cursorKey: string;
   readonly #owned: readonly string[];
@@ -127,6 +153,7 @@ export class MirrorClaims {
     this.#clock = deps.clock;
     this.#logger = deps.logger;
     this.#pageSize = deps.pageSize ?? FEED_PAGE_SIZE;
+    this.#audience = deps.audience ?? everyone;
     this.#repos = new Set(deps.sync.repos.map((repo) => repo.toLowerCase()));
     this.#cursorKey = mirrorCursorKey(deps.sync.server, deps.sync.project);
     this.#owned = statusesTheMirrorOwns(deps.mirror.status);
@@ -147,30 +174,59 @@ export class MirrorClaims {
       error: null,
       cursorExpired: before?.cursorExpired ?? null,
       startedFromHead: before?.startedFromHead ?? null,
+      filedFor: null,
+      othersMoves: 0,
+      orphanMoves: 0,
+      staleMoves: 0,
+      declined: null,
+      ownerWarning: null,
     };
-    const lookups = {
-      refs: new ItemRefs(this.#feed, this.#repository, this.#sync, this.#logger),
-      logins: new MemberLogins(this.#feed, this.#repository, this.#sync, this.#logger),
-    };
+    const logins = new MemberLogins(this.#feed, this.#repository, this.#sync, this.#logger);
+    let refusal: AudienceRefusal | null = null;
     try {
-      if (stored.kind === 'unreadable') {
-        throw new Error(
-          `the mirror's cursor note reads "${stored.stored}", which is not a position in the log; `
-          + `nothing is read until it is corrected or removed (${this.#cursorKey})`,
-        );
-      }
-      if (stored.kind === 'none') {
-        await this.#startFromTheHead(report, lookups, 0, 'it had never run');
+      const answer = await this.#audience.resolve(logins);
+      if (answer.ok) {
+        report.filedFor = answer.audience.filedFor;
+        report.ownerWarning = answer.warning;
+        await this.#read(report, stored, {
+          refs: new ItemRefs(this.#feed, this.#repository, this.#sync, this.#logger),
+          logins,
+          audience: answer.audience,
+          live: new LiveClaimsOnce(this.#feed),
+        });
       } else {
-        await this.#follow(report, lookups);
+        report.declined = answer.reason;
+        refusal = answer.refusal;
       }
     } catch (error) {
       report.error = error instanceof BoardQueueError ? error.describe() : describeUnknown(error);
       this.#logger.warn('the claim mirror stopped', { reason: report.error, cursor: report.cursor });
     }
     await writeMirrorRun(this.#repository, report);
-    this.#logger.info('claims mirrored', { ...report });
+    if (report.ownerWarning !== null) {
+      this.#logger.warn('the configured owner is no member of the project', { reason: report.ownerWarning });
+    }
+    if (report.declined === null) {
+      this.#logger.info('claims mirrored', { ...report });
+    } else if (refusal !== null && (SAID_AT_EVERY_RUN[refusal] || before?.declined !== report.declined)) {
+      this.#logger.warn('the claim mirror files nothing on this worker', { reason: report.declined });
+    }
     return report;
+  }
+
+  /** Reads the log from where the cursor stands: from the head when there is none yet. */
+  async #read(report: MirrorReport, stored: StoredCursor, lookups: Lookups): Promise<void> {
+    if (stored.kind === 'unreadable') {
+      throw new Error(
+        `the mirror's cursor note reads "${stored.stored}", which is not a position in the log; `
+        + `nothing is read until it is corrected or removed (${this.#cursorKey})`,
+      );
+    }
+    if (stored.kind === 'none') {
+      await this.#startFromTheHead(report, lookups, 0, 'it had never run');
+      return;
+    }
+    await this.#follow(report, lookups);
   }
 
   /** Follows the log from the cursor for as long as the cursor moves, a few pages at most. */
@@ -228,9 +284,15 @@ export class MirrorClaims {
     }
     const filings: Filing[] = [];
     for (const claim of await this.#feed.liveClaims()) {
+      const share = lookups.audience.shareOf(claim.holder);
+      if (share === 'others') {
+        report.othersMoves += 1;
+        continue;
+      }
       const ref = await this.#issueOf(claim.item, report, lookups);
       if (ref !== null) {
         filings.push(this.#filingOfClaim(claim, ref, head));
+        report.orphanMoves += share === 'orphan' ? 1 : 0;
       }
     }
     report.cursor = head;
@@ -258,6 +320,18 @@ export class MirrorClaims {
   async #filingsOf(moves: readonly IssueMove[], report: MirrorReport, lookups: Lookups): Promise<Filing[]> {
     const filings: Filing[] = [];
     for (const move of moves) {
+      const share = lookups.audience.shareOf(move.causedBy);
+      if (share === 'others') {
+        // Somebody else caused the state this item is left in; their worker files it.
+        report.othersMoves += 1;
+        continue;
+      }
+      if (!(await lookups.audience.stillStands(move, lookups.live))) {
+        // The server has moved on since: a later move, filed by whichever worker
+        // made it, is what the row should show.
+        report.staleMoves += 1;
+        continue;
+      }
       const ref = await this.#issueOf(move.item, report, lookups);
       if (ref === null) {
         continue;
@@ -272,6 +346,7 @@ export class MirrorClaims {
         report.duplicates += 1;
         continue;
       }
+      report.orphanMoves += share === 'orphan' ? 1 : 0;
       filings.push({
         item: move.item,
         ref,
@@ -363,4 +438,8 @@ export class MirrorClaims {
 type Lookups = {
   readonly refs: ItemRefs;
   readonly logins: MemberLogins;
+  /** Whose moves this run files. */
+  readonly audience: Audience;
+  /** The live claims the moves are checked against. */
+  readonly live: LiveClaims;
 };

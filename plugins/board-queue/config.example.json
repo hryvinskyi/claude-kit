@@ -30,11 +30,12 @@
   "dibs": {
     "server": "https://dibs.example.com",
     "project": "example-project",
-    "tokenEnv": "DIBS_TOKEN",
+    "token": { "from": "env", "env": "DIBS_TOKEN" },
     "mirrorOwner": "example-user",
     "repos": ["example-org/example-repo"],
     "mirror": {
       "enabled": false,
+      "scope": "all",
       "status": { "claimed": "In progress", "released": "Todo", "review": "In review" },
       "assignees": true
     },

@@ -1,3 +1,4 @@
+import type { MirrorScope } from '../domain/sync-config.ts';
 import type { BudgetPolicy } from './budget-policy.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { DrainQueue, TickReport } from './drain-queue.ts';
@@ -15,13 +16,18 @@ import type { ActionRepository, Clock, Logger } from './ports.ts';
 
 /**
  * Keeping the boards in step with a coordination server, when this deployment
- * does: the check that this is the one worker that may, and the directions that
- * are switched on.
+ * does: the check that this is the one worker that may run the jobs kept for the
+ * owner's, and the directions that are switched on.
  */
 export type SyncJobs = {
   owner: SyncOwner;
   /** Carries claims onto the boards as filed work; runs before the queue is drained. */
   mirror?: () => Promise<MirrorReport>;
+  /**
+   * Whose moves the mirror files: `all` runs it only in the owner's worker, `own`
+   * in every worker, for the moves of the person it runs as. `all` unless named.
+   */
+  mirrorScope?: MirrorScope;
   /** Reports the board's work to the server; runs after the queue and the report, when there is room. */
   importer?: () => Promise<ImportReport>;
   /** Keeps GitHub's pull requests, statuses, branches and runs in step with the server; runs last, when there is room. */
@@ -92,6 +98,9 @@ export class RunTick {
   }
 
   /**
+   * The owner's check is asked only when a job that waits for it is on. A mirror of
+   * this worker's own person's moves does not wait for it.
+   *
    * The mirror runs first, so the moves it files are drained in the same tick; the
    * import and the forge pass run last, because they read, and reading waits for
    * the work somebody asked for. Any one of them failing is recorded and the rest
@@ -100,14 +109,19 @@ export class RunTick {
    */
   async run(): Promise<WorkerReport> {
     const sync = this.#sync;
-    const allowed = sync === null ? null : await sync.owner.verdict();
+    const mirrorWaitsForOwner = sync?.mirror !== undefined && (sync.mirrorScope ?? 'all') === 'all';
+    const ownerJobs = sync !== null && (mirrorWaitsForOwner || sync.importer !== undefined || sync.forge !== undefined);
+    const allowed = sync !== null && ownerJobs ? await sync.owner.verdict() : null;
+    if (sync !== null && !ownerJobs) {
+      await sync.owner.notNeeded();
+    }
     const syncReport: SyncTickReport = {};
     if (allowed !== null && !allowed.ok) {
       syncReport.refused = allowed.reason;
       syncReport.refusal = allowed.refusal;
     }
     const mayKeepInStep = sync !== null && allowed !== null && allowed.ok;
-    if (mayKeepInStep && sync.mirror !== undefined) {
+    if (sync?.mirror !== undefined && (mayKeepInStep || !mirrorWaitsForOwner)) {
       syncReport.mirror = await this.#locked('the claim mirror', sync.mirror);
     }
 

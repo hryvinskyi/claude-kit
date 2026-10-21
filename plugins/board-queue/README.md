@@ -235,11 +235,12 @@ step with one of its projects, in both directions:
 "dibs": {
   "server": "https://dibs.example.com",
   "project": "widgets",
-  "tokenEnv": "DIBS_TOKEN",
+  "token": { "from": "env", "env": "DIBS_TOKEN" },
   "mirrorOwner": "alice",
   "repos": ["example-org/example-repo"],
   "mirror": {
     "enabled": true,
+    "scope": "all",
     "status": { "claimed": "In Progress", "released": "Todo", "review": "In Review" },
     "assignees": true
   },
@@ -247,14 +248,79 @@ step with one of its projects, in both directions:
 }
 ```
 
-**Exactly one worker runs it.** Every person runs a worker, and a mirror in each would keep its own cursor
-and file every move once per person. Both directions are off unless the configuration turns them on, and
-each tick first asks whether this worker's login is `mirrorOwner` — on a person's machine the login its GitHub
-command line tool is signed in as, in the service (*As a service*, below) the login of its GitHub App, `<slug>[bot]`,
-read from GitHub with the App's key; on any other worker the tick declines, says why in `status`, and drains its
-own queue as usual. `tokenEnv` names the
-variable holding the token of the project's `importer` member, never the token; the variable is read only when
-a call needs it.
+**The importer and the forge jobs run in exactly one worker.** Every person runs a worker, and one configuration
+is copied to every machine; two importers would each walk the board and spend an allowance doing it. Every job is
+off unless the configuration turns it on, and a tick that has the importer, the forge jobs or an `all` mirror on
+first asks whether this worker's login is `mirrorOwner` — on a person's machine the login its GitHub command line
+tool is signed in as, in the service (*As a service*, below) the login of its GitHub App, `<slug>[bot]`, read from
+GitHub with the App's key. Any other worker runs none of those jobs and drains its own queue as usual. That is how
+such a worker is meant to run, so it is not reported as a failure: `status` says `not run here — this worker runs
+as bob, and only alice's worker runs the importer`, the log says it once when it starts or its reason changes, and
+the output of each tick says nothing about it. A person's login never ends in `[bot]`, so a person's worker handed a
+configuration whose owner is an App is simply one of those. A login that cannot be read at all is a fault, logged
+at every tick.
+
+**The mirror's scope** says where it runs. `"scope": "all"`, the default, runs it in `mirrorOwner`'s worker for
+everybody's moves, filed under that worker's login. `"scope": "own"` runs it in every person's worker, each filing
+only the moves its own person caused, under that person's login and allowance; `mirrorOwner` does not gate it. A
+worker finds its person by its login (the `gh` login, or the App's in the service): the member of the project whose
+`external_login` in `GET /v1/members` is that login, compared without regard to case. A login no member names, one
+two members name, or one that cannot be read, files nothing and reads nothing past the members — the cursor stays
+where it was — and `status` says why (`mirror … — files nothing here: …`); the rest of the tick runs as usual. A
+move is the move of whoever caused the last event of its item in the page that was read:
+
+| Event | Caused by |
+|---|---|
+| `claimed` | the member who claimed |
+| `taken_over` | the member who took the stale claim over, not the one it was taken from |
+| `released` | the holder |
+| `force_released` | the admin who ended the claim (`by`); the holder when the server's operator did it from its command line, so that somebody's worker files it |
+| `review_started` | the holder, who recorded a pull request |
+| `review_ended` | the holder of the claim that is worked on again |
+
+So a page holding Alice's claim and Bob's takeover of it files one move, in Bob's worker: the status, Bob assigned
+and Alice unassigned. A fresh start, and a rebuild after the log lost events, files only the live claims the
+person holds. Each worker keeps its own cursor, the last event filed for each item and its own dedupe keys, in its
+own queue, so no two workers share or race over them; and since each move has one author, no two workers file it.
+
+**A move is filed only while it still stands.** Workers read the log on schedules of their own — a laptop that
+slept through a weekend reads Friday's page on Monday — so before filing a move an `own` mirror reads the live
+claims (`GET /v1/claims`, once per run, only when a move needs it): a claim, a takeover or the end of a review is
+filed only while the same member still holds the item and works on it, the start of a review only while they hold
+it in review, and a release only while nobody holds the item. A move the server has moved on from is passed over
+and counted in `status` (`… passed over because the server has moved on`): whoever made the later move files it.
+
+**Moves no person's worker files** — a move whose author the log does not name, or who is no member with a GitHub
+login (a member removed since, also from the server's command line, or one who never set an `external_login`) —
+are filed by `mirrorOwner`'s worker when it runs an `own` mirror, under the same check, and its `status` counts them
+(`… no person's worker files, filed here`). Every other worker leaves them. When no member names `mirrorOwner` as
+their GitHub login, nobody files them, and every worker that is not the owner's says so in `status` and its log at
+every run. What stays unfiled: the moves of a member who runs no worker, or whose worker cannot read their login
+(`dibs login --keychain`, or a stored login on Windows).
+
+**One worker per person.** Two workers signed in to the same GitHub login — a second laptop, or a second state
+directory — each file that person's moves, so every move is filed twice. Run one.
+
+**The token** is named, never written, by `token`:
+
+- `{ "from": "env", "env": "DIBS_TOKEN" }` — the variable holding it, or, when `<VAR>_FILE` is set instead, the file
+  that names (the account's own, with no permission for its group or anybody else). `"tokenEnv": "DIBS_TOKEN"` is the older spelling of the
+  same thing and still works; naming both is refused.
+- `{ "from": "dibs-login" }` — the login `dibs login` stored on this machine for the configured `server` and
+  `project`: the credentials file in `DIBS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/dibs`, else `~/.config/dibs` (macOS
+  included). The file must be the account's own and carry no permission for its group or anybody else, as the dibs
+  tool keeps it. A login for another server or project is refused, naming the ones the file holds. A login made
+  with `dibs login --keychain` keeps its token in the operating system's credential store and only a note in the
+  file; a scheduled worker cannot answer that store's prompt, so it is refused with that reason — sign in again
+  without `--keychain`, or use an `env` source. On Windows the dibs tool guards the file with an access list this
+  worker cannot check, so this source is not supported there: use an `env` source.
+
+Either way the token is read when a call needs it, never before, and no message, log line or status repeats it.
+On a person's machine `dibs-login` gives the worker the person's own member token, which is all an `own` mirror
+needs: the events, members, claims and items it reads are open to every member. The importer and the forge jobs
+call routes only an admin or the project's `importer` may call, so `mirrorOwner`'s worker needs an admin's login or
+the importer's token. The server counts only the importer's calls as its integration's: run them under an admin's
+token and, while the project's reviews rely on an integration, its status reports the integration as silent.
 
 **The mirror** (server → board) follows the event log from its cursor at the start of each tick, up to five
 pages of 500, for as long as the cursor moves: the server leaves out of a page what this reader may not see while
@@ -295,13 +361,13 @@ so an item that left the board is closed on the server, while a board that sudde
 nothing and says why in `status`. It writes nothing to GitHub and files nothing in
 the queue, and what it sends changes no claim, so it never sets off a move of the mirror.
 
-**The forge jobs** (GitHub ↔ server) are for one service that runs under an identity of its own — a GitHub App
+**The forge jobs** (GitHub ↔ server) are meant for a worker that runs under an identity of its own — a GitHub App
 installed on the repositories kept in step, with Pull requests, Contents and Actions read and Commit statuses
-read/write — not for a person's worker. They are off unless `forge.enabled` says otherwise, run behind the same
-`mirrorOwner` check, and start only where every repository's calls go out under the App's credential: there the
-App's credential is used with nothing to fall back to, so a call never quietly goes out as a person. A worker
-whose calls would use a person's credential declines, and `status` says why, unless the configuration sets
-`allowPersonalToken`:
+read/write. They are off unless `forge.enabled` says otherwise, run behind the same `mirrorOwner` check, and start
+only where every repository's calls go out under the App's credential: there the App's credential is used with
+nothing to fall back to, so a call never quietly goes out as a person. A worker whose calls would use a person's
+credential declines, and `status` says why, unless the configuration sets `allowPersonalToken` — which a team
+without an App sets so that `mirrorOwner`'s own worker runs them under that person's token and allowance:
 
 ```json
 "forge": { "enabled": true, "paceMs": 1000, "overlapMinutes": 10, "minRemaining": 500,
@@ -539,19 +605,19 @@ docker build -t board-queue:<version> plugins/board-queue
   seconds after SIGKILL stops the service with exit code 1, so whatever runs it starts it afresh.
 - **Its identity is the App's.** Each pass is started with `BOARD_QUEUE_IDENTITY=app`, so it is judged by the
   App's login (`<slug>[bot]`, from `GET /app` signed with the App's key) rather than by a `gh` login, and
-  `mirrorOwner` names that login. A person's worker leaves the variable unset and keeps the `gh` check, which
-  never stands for an owner whose login ends in `[bot]`; a copied configuration, or the variable set on a machine
-  without the App's key, starts nothing there.
+  `mirrorOwner` names that login. A person's worker leaves the variable unset and keeps the `gh` check, whose
+  login never ends in `[bot]`, so a copied configuration runs none of the owner's jobs there, quietly; the variable
+  set on a machine without the App's key starts nothing either.
 - **A pass that declines the job fails.** On a person's machine a worker that is not the owner simply answers.
   In the service each such pass exits with a code of its own — 3 the App's login could not be read, 4 the App
   is not `mirrorOwner`, 5 the forge jobs would not run under the App's credential, 6 the App's key or the token
   was refused — and the heartbeat records which, without anything secret.
 - **It refuses to start** without `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` naming a file of the
-  service's own account, mode 0400 or 0600 exactly, that holds a private key, and the coordination server's
+  service's own account, with no permission for its group or anybody else, that holds a private key, and the coordination server's
   token, or when the configuration keeps nothing in step. `GITHUB_APP_INSTALLATION_ID` may be set to skip the
   installation lookup. Every pass checks the key and the token again before it uses them; each file is opened
   once and checked on what was opened. No message repeats the key, its path or a token.
-- **Secrets in files.** The token may be given as a file: when `<tokenEnv>_FILE` is set — `DIBS_TOKEN_FILE` for
+- **Secrets in files.** The token may be given as a file: when the `env` source's `<VAR>_FILE` is set — `DIBS_TOKEN_FILE` for
   `DIBS_TOKEN` — the token is read from the file it names, which must be the account's own and readable by nobody
   else, and setting both is refused. Mount the key and the token as files in one directory rather than one by one:
   a file replaced in the directory by a rename is the one the next pass reads, so a rotated key or token takes

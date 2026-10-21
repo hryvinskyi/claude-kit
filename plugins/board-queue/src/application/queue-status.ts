@@ -1,5 +1,6 @@
 import type { Action } from '../domain/action.ts';
-import type { SyncConfig } from '../domain/sync-config.ts';
+import { ownerJobsOf } from '../domain/sync-config.ts';
+import type { MirrorScope, OwnerJob, SyncConfig } from '../domain/sync-config.ts';
 import { readLastAudit, readLastBudget, readLastTickAt } from './queue-meta.ts';
 import { readForgeRun, readImportRun, readMirrorRun, readSyncRefusal } from './sync-meta.ts';
 import type { ForgeRun, ImportRun, MirrorRun, SyncRefusal } from './sync-meta.ts';
@@ -72,9 +73,11 @@ export type HeldActionView = {
 export type SyncView = {
   server: string;
   project: string;
-  /** The one worker's login that runs either direction. */
+  /** The one worker's login that runs the jobs kept for the owner's worker. */
   owner: string;
-  mirror: { enabled: boolean; lastRun: MirrorRun | null };
+  /** The jobs switched on that run only in the owner's worker. */
+  ownerJobs: OwnerJob[];
+  mirror: { enabled: boolean; scope: MirrorScope; lastRun: MirrorRun | null };
   importer: { enabled: boolean; lastRun: ImportRun | null };
   forge: { enabled: boolean; lastRun: ForgeRun | null };
   refused: SyncRefusal | null;
@@ -193,7 +196,8 @@ export class QueueStatus {
       server: sync.server,
       project: sync.project,
       owner: sync.mirrorOwner,
-      mirror: { enabled: sync.mirror?.enabled === true, lastRun: mirrorRun },
+      ownerJobs: ownerJobsOf(sync),
+      mirror: { enabled: sync.mirror?.enabled === true, scope: sync.mirror?.scope ?? 'all', lastRun: mirrorRun },
       importer: { enabled: sync.importer.enabled, lastRun: importRun },
       forge: { enabled: sync.forge.enabled, lastRun: forgeRun },
       refused,

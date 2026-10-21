@@ -17,12 +17,7 @@ export const IDENTITY_VARIABLE = 'BOARD_QUEUE_IDENTITY';
  * person's.
  */
 const SOURCES = {
-  gh: (deps: IdentityDeps) => (isAppLogin(deps.mirrorOwner)
-    ? new RefusedIdentity(
-      `the configured owner, ${deps.mirrorOwner}, is a GitHub App; a person's machine never runs as one, so `
-      + 'only the service keeps this configuration in step',
-    )
-    : new GhCliIdentity()),
+  gh: () => new GhCliIdentity(),
   app: (deps: IdentityDeps) => new AppIdentity(() => AppTokenProvider.fromEnv(deps.env, deps.board.board, {
     clock: deps.clock,
     fetchImpl: deps.fetchImpl,
@@ -33,8 +28,6 @@ export type IdentitySource = keyof typeof SOURCES;
 
 export type IdentityDeps = {
   env: Record<string, string | undefined>;
-  /** The login the configuration says keeps the boards in step. */
-  mirrorOwner: string;
   /** Any configured board: an App's login is the same whichever account it is installed on. */
   board: BoardPlacement;
   clock: Clock;
@@ -47,41 +40,31 @@ export function runsAsTheService(env: Record<string, string | undefined>): boole
   return (env[IDENTITY_VARIABLE] ?? '').trim() === 'app';
 }
 
-/** An App's login, as GitHub writes it. */
-function isAppLogin(login: string): boolean {
-  return login.trim().toLowerCase().endsWith('[bot]');
-}
-
-/** An identity that never answers, for a source that cannot stand for this worker; it says why. */
-class RefusedIdentity implements LocalIdentity {
-  readonly #reason: string;
-
-  constructor(reason: string) {
-    this.#reason = reason;
-  }
-
-  login(): Promise<string | null> {
-    return Promise.reject(new RefusedByRule(this.#reason));
-  }
-}
-
 function isSource(name: string): name is IdentitySource {
   return Object.hasOwn(SOURCES, name);
 }
 
 /**
- * The identity this worker is judged by. A value the variable cannot mean is
- * refused by name rather than read as a person's machine, because a service that
- * silently fell back to `gh` would decline on every pass for a reason nobody looks
- * for.
+ * The source the environment names. A value the variable cannot mean is refused
+ * by name rather than read as a person's machine, because a service that silently
+ * fell back to `gh` would decline on every pass for a reason nobody looks for.
  */
-export function localIdentity(deps: IdentityDeps): LocalIdentity {
-  const named = (deps.env[IDENTITY_VARIABLE] ?? '').trim();
+function sourceOf(env: Record<string, string | undefined>): IdentitySource {
+  const named = (env[IDENTITY_VARIABLE] ?? '').trim();
   const source = named === '' ? 'gh' : named;
   if (!isSource(source)) {
     throw new RefusedByRule(
       `${IDENTITY_VARIABLE} is "${source}", which names no identity; it is one of: ${Object.keys(SOURCES).join(', ')}`,
     );
   }
-  return SOURCES[source](deps);
+  return source;
+}
+
+/**
+ * Who this worker runs as: the person its machine is signed in as, or the
+ * service's App. A person's login never ends in `[bot]`, so a person's worker
+ * handed a configuration whose owner is an App is simply not the owner's.
+ */
+export function localIdentity(deps: IdentityDeps): LocalIdentity {
+  return SOURCES[sourceOf(deps.env)](deps);
 }

@@ -33,24 +33,25 @@ function refusal(path: string): string {
 }
 
 describe('a file that holds a secret', () => {
-  it('is read when it is this account\'s own, 0400 or 0600', (t) => {
+  it('is read when it is this account\'s own and carries no permission for anybody else', (t) => {
     const directory = scratch(t);
 
     assert.deepEqual(readOwnerOnlyFile(secret(directory, 'a', 0o400), 'x'), { text: 'the-secret-value\n', mode: '0400' });
     assert.deepEqual(readOwnerOnlyFile(secret(directory, 'b', 0o600), 'x'), { text: 'the-secret-value\n', mode: '0600' });
+    assert.deepEqual(readOwnerOnlyFile(secret(directory, 'c', 0o700), 'x'), { text: 'the-secret-value\n', mode: '0700' });
   });
 
   it('is refused when anyone else may read it, when it is not a file, or not there — naming it, never its path or text', (t) => {
     const directory = scratch(t);
     const said = [
       refusal(secret(directory, 'group', 0o640)),
-      refusal(secret(directory, 'executable', 0o700)),
+      refusal(secret(directory, 'world', 0o604)),
       refusal(directory),
       refusal(join(directory, 'absent')),
     ];
 
-    assert.match(said[0] ?? '', /mode 640; make it 0400 or 0600/);
-    assert.match(said[1] ?? '', /mode 700/);
+    assert.match(said[0] ?? '', /mode 640; take every permission away from its group and from everybody else/);
+    assert.match(said[1] ?? '', /mode 604/);
     assert.match(said[2] ?? '', /is not a file/);
     assert.match(said[3] ?? '', /is not there, or this account cannot read it/);
     for (const sentence of said) {

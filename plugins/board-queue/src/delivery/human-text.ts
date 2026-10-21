@@ -6,6 +6,8 @@ import type { ActionView } from '../application/list-actions.ts';
 import type { QueueStatusView, SyncView } from '../application/queue-status.ts';
 import type { ForgeRepositoryRun, ForgeRun } from '../application/sync-meta.ts';
 import type { BoardItemView } from '../application/show-board-item.ts';
+import type { MirrorReport } from '../application/mirror-claims.ts';
+import type { OwnerJob } from '../domain/sync-config.ts';
 
 /**
  * What the queue looks like to somebody reading a terminal.
@@ -93,19 +95,26 @@ export function statusLines(status: QueueStatusView): string[] {
 
 /** What keeping in step with the coordination server looks like from this worker. */
 export function syncStatusLines(sync: SyncView): string[] {
-  const on = (enabled: boolean): string => (enabled ? 'on' : 'off');
-  const lines = [
-    `in step with ${sync.server} (${sync.project}): mirror ${on(sync.mirror.enabled)} · `
-    + `importer ${on(sync.importer.enabled)} · forge ${on(sync.forge.enabled)} · only in ${sync.owner}'s worker`,
-  ];
+  const lines = [`in step with ${sync.server} (${sync.project}): ${jobsLine(sync)}`];
   if (sync.refused !== null) {
-    lines.push(`declined ${sync.refused.at} — ${sync.refused.reason}`);
+    // A worker that is not the owner's is meant not to run the owner's jobs: it is
+    // told so, not told it failed.
+    lines.push(sync.refused.refusal === 'not-the-owner'
+      ? `not run here — ${sync.refused.reason}`
+      : `declined ${sync.refused.at} — ${sync.refused.reason}`);
   }
   const mirror = sync.mirror.lastRun;
-  if (mirror !== null) {
+  if (mirror !== null && mirror.declined !== null) {
+    lines.push(`mirror ${mirror.at} — files nothing here: ${mirror.declined}`);
+  } else if (mirror !== null) {
     lines.push(`mirror ${mirror.at} — ${String(mirror.events)} events read, ${String(mirror.filed)} filed, `
-      + `${String(mirror.duplicates)} already filed, cursor ${String(mirror.cursor)}`
+      + `${String(mirror.duplicates)} already filed`
+      + (mirror.filedFor === null ? '' : ownMovesTally(mirror, mirror.filedFor))
+      + `, cursor ${String(mirror.cursor)}`
       + (mirror.error === null ? '' : ` — stopped: ${mirror.error}`));
+    if (mirror.ownerWarning !== null) {
+      lines.push(`mirror: ${mirror.ownerWarning}`);
+    }
     if (mirror.cursorExpired !== null) {
       lines.push(`mirror lost events: the log was pruned through ${String(mirror.cursorExpired.prunedThrough)} `
         + `before they were read (${mirror.cursorExpired.at}); the live claims are filed in their place next`);
@@ -131,6 +140,34 @@ export function syncStatusLines(sync: SyncView): string[] {
     lines.push(...forgeRunLines(forge));
   }
   return lines;
+}
+
+/** What a mirror of one person's moves did with the moves that were not that person's. */
+function ownMovesTally(mirror: MirrorReport, filedFor: string): string {
+  const counted = (count: number, what: string): string => (count > 0 ? `, ${String(count)} ${what}` : '');
+  return `, ${String(mirror.othersMoves)} left to other people's workers`
+    + counted(mirror.orphanMoves, 'no person\'s worker files, filed here')
+    + counted(mirror.staleMoves, 'passed over because the server has moved on')
+    + `, ${filedFor}'s own`;
+}
+
+const OWNER_JOB_WORDS = {
+  mirror: 'mirror',
+  importer: 'importer',
+  forge: 'forge',
+} as const satisfies Record<OwnerJob, string>;
+
+/** Which jobs are on, and which of them run only in the owner's worker. */
+function jobsLine(sync: SyncView): string {
+  const on = (enabled: boolean): string => (enabled ? 'on' : 'off');
+  const ownMoves = sync.mirror.enabled && sync.mirror.scope === 'own';
+  const mirror = ownMoves ? 'on, each person\'s own moves' : on(sync.mirror.enabled);
+  const jobs = `mirror ${mirror} · importer ${on(sync.importer.enabled)} · forge ${on(sync.forge.enabled)}`;
+  if (!ownMoves) {
+    return `${jobs} · only in ${sync.owner}'s worker`;
+  }
+  const ownerOnly = sync.ownerJobs.map((job) => OWNER_JOB_WORDS[job]);
+  return ownerOnly.length === 0 ? jobs : `${jobs} · ${ownerOnly.join(' and ')} only in ${sync.owner}'s worker`;
 }
 
 /** The last forge pass: what it asked GitHub, what it did per repository, and why it stopped. */
@@ -210,15 +247,14 @@ function queueTickLines(report: TickReport): string[] {
 /** What a tick did about keeping in step, a line per direction. */
 function syncTickLines(sync: SyncTickReport): string[] {
   const lines: string[] = [];
-  if (sync.refused !== undefined) {
+  // A worker that is not the owner's says so in its status, not in every tick's
+  // output: it is how such a worker is meant to run.
+  if (sync.refused !== undefined && sync.refusal !== 'not-the-owner') {
     lines.push(`in step: declined — ${sync.refused}`);
   }
   const mirror = sync.mirror;
   if (mirror !== undefined) {
-    lines.push('skipped' in mirror
-      ? `mirror: skipped — ${mirror.skipped}`
-      : `mirror: ${String(mirror.events)} events · ${String(mirror.filed)} filed`
-        + (mirror.error === null ? '' : ` · stopped: ${mirror.error}`));
+    lines.push(mirrorTickLine(mirror));
   }
   const imported = sync.import;
   if (imported !== undefined) {
@@ -236,6 +272,17 @@ function syncTickLines(sync: SyncTickReport): string[] {
         + (forge.run.stoppedBecause === null ? '' : ` · stopped: ${forge.run.stoppedBecause}`));
   }
   return lines;
+}
+
+function mirrorTickLine(mirror: MirrorReport | { skipped: string }): string {
+  if ('skipped' in mirror) {
+    return `mirror: skipped — ${mirror.skipped}`;
+  }
+  if (mirror.declined !== null) {
+    return 'mirror: files nothing here, see status';
+  }
+  return `mirror: ${String(mirror.events)} events · ${String(mirror.filed)} filed`
+    + (mirror.error === null ? '' : ` · stopped: ${mirror.error}`);
 }
 
 export function boardItemLines(item: BoardItemView): string[] {

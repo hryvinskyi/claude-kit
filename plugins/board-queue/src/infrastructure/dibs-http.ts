@@ -37,6 +37,8 @@ const EventPage = z.object({
 
 const HeldClaim = z.object({ item: z.number().int().positive(), member: z.number().int().positive() });
 const TakenClaim = HeldClaim.extend({ previous: z.number().int().positive() });
+/** `by` is the admin; null when the server's operator released the claim from its command line. */
+const ForcedClaim = HeldClaim.extend({ by: z.number().int().positive().nullable().default(null) });
 
 const MembersAnswer = z.object({
   members: z.array(z.object({ handle: z.string(), external_login: z.string().nullable().optional() })),
@@ -76,11 +78,22 @@ const CLAIM_PAYLOADS: { readonly [K in ClaimEventKind]: Translate } = {
         item: parsed.data.item,
         member: members[String(parsed.data.member)] ?? null,
         previous: members[String(parsed.data.previous)] ?? null,
+        by: null,
       }
       : null;
   },
   released: held,
-  force_released: held,
+  force_released: (payload, members) => {
+    const parsed = ForcedClaim.safeParse(payload);
+    return parsed.success
+      ? {
+        item: parsed.data.item,
+        member: members[String(parsed.data.member)] ?? null,
+        previous: null,
+        by: parsed.data.by === null ? null : members[String(parsed.data.by)] ?? null,
+      }
+      : null;
+  },
   review_started: held,
   review_ended: held,
 };
@@ -88,7 +101,7 @@ const CLAIM_PAYLOADS: { readonly [K in ClaimEventKind]: Translate } = {
 function held(payload: unknown, members: MemberNames): Omit<ClaimEvent, 'id' | 'kind'> | null {
   const parsed = HeldClaim.safeParse(payload);
   return parsed.success
-    ? { item: parsed.data.item, member: members[String(parsed.data.member)] ?? null, previous: null }
+    ? { item: parsed.data.item, member: members[String(parsed.data.member)] ?? null, previous: null, by: null }
     : null;
 }
 

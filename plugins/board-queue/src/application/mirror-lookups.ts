@@ -2,7 +2,9 @@ import { BoardQueueError } from '../domain/errors.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { ActionRepository, Logger } from './ports.ts';
 import { mirrorLoginKey, mirrorRefKey } from './sync-meta.ts';
-import type { ClaimFeed } from './sync-ports.ts';
+import type { LiveState } from '../domain/sync/claim-moves.ts';
+import type { LiveClaims, MemberDirectory } from './mirror-audience.ts';
+import type { ClaimFeed, WorkMember } from './sync-ports.ts';
 
 /** The server and project whose lookups are kept, so two of them never share an answer. */
 export type LookupScope = {
@@ -63,18 +65,19 @@ export class ItemRefs {
 }
 
 /**
- * Each member's GitHub login. The members are read once per run, and only when a
- * move names somebody; what each one named is kept in the queue's notes, so the
+ * Each member's GitHub login, and the members a login stands for. The members are
+ * read once per run, and only when a move names somebody or the run asks whose
+ * moves are this worker's; what each one named is kept in the queue's notes, so the
  * login of a member who has since been removed — whose claims the removal ended —
  * is still known when the issue is unassigned. A member who never named a login
  * is left out of an assignment, and said so.
  */
-export class MemberLogins {
+export class MemberLogins implements MemberDirectory {
   readonly #feed: ClaimFeed;
   readonly #repository: ActionRepository;
   readonly #scope: LookupScope;
   readonly #logger: Logger;
-  #read = false;
+  #members: readonly WorkMember[] | null = null;
   readonly #held = new Map<string, string>();
 
   constructor(feed: ClaimFeed, repository: ActionRepository, scope: LookupScope, logger: Logger) {
@@ -102,12 +105,17 @@ export class MemberLogins {
     return logins;
   }
 
-  async #readOnce(): Promise<void> {
-    if (this.#read) {
-      return;
+  members(): Promise<readonly WorkMember[]> {
+    return this.#readOnce();
+  }
+
+  async #readOnce(): Promise<readonly WorkMember[]> {
+    if (this.#members !== null) {
+      return this.#members;
     }
-    this.#read = true;
-    for (const member of await this.#feed.members()) {
+    const members = await this.#feed.members();
+    this.#members = members;
+    for (const member of members) {
       if (member.login === null) {
         continue;
       }
@@ -115,5 +123,24 @@ export class MemberLogins {
       const key = mirrorLoginKey(this.#scope.server, this.#scope.project, member.handle);
       await this.#repository.setMeta(key, member.login);
     }
+    return members;
+  }
+}
+
+/** The live claims of the project, read once per run, the first time a move is checked against them. */
+export class LiveClaimsOnce implements LiveClaims {
+  readonly #feed: ClaimFeed;
+  #held: Promise<ReadonlyMap<number, LiveState>> | null = null;
+
+  constructor(feed: ClaimFeed) {
+    this.#feed = feed;
+  }
+
+  async of(item: number): Promise<LiveState> {
+    this.#held ??= this.#feed.liveClaims().then((claims) => new Map(claims.map((claim) => [
+      claim.item,
+      { holder: claim.holder, inReview: claim.inReview },
+    ])));
+    return (await this.#held).get(item) ?? null;
   }
 }
