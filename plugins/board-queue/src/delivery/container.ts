@@ -16,12 +16,13 @@ import { ImportReadyWork } from '../application/import-ready-work.ts';
 import { LimiterWait } from '../application/limiter-wait.ts';
 import { MIRROR_AUDIENCES } from '../application/mirror-audience.ts';
 import { MirrorClaims } from '../application/mirror-claims.ts';
+import { FinishClaims } from '../application/finish-claims.ts';
 import { ForgePass } from '../application/forge-pass.ts';
 import type { Forge, ForgeCoordination, ForgeIdentity } from '../application/forge-ports.ts';
 import { RunTick } from '../application/run-tick.ts';
 import type { SyncJobs } from '../application/run-tick.ts';
 import { SyncOwner } from '../application/sync-owner.ts';
-import type { ClaimFeed, DependencyReader, LocalIdentity, WorkImport } from '../application/sync-ports.ts';
+import type { ClaimFeed, DependencyReader, LocalIdentity, OwnClaims, WorkImport } from '../application/sync-ports.ts';
 import { ShowBoardItem } from '../application/show-board-item.ts';
 import { BoardDirectory } from '../domain/board-directory.ts';
 import type { BoardKey, BoardPlacement } from '../domain/board-directory.ts';
@@ -66,8 +67,8 @@ export type ContainerOverrides = {
   tokens?: TokenProvider;
   /** Somewhere other than the state directory to leave the board report. */
   reports?: AuditReportSink;
-  /** Stands in for the coordination server, for both directions of keeping in step. */
-  coordination?: ClaimFeed & WorkImport;
+  /** Stands in for the coordination server, for every job that keeps in step with it but the forge jobs. */
+  coordination?: ClaimFeed & WorkImport & OwnClaims;
   /** Stands in for the network under the coordination server's real clients, token and all. */
   dibsFetch?: FetchLike;
   /** Stands in for the REST lists of what blocks an issue. */
@@ -306,7 +307,9 @@ type SyncWiring = {
  * nothing about the coordination server is opened, read or asked for otherwise.
  * The importer and the forge jobs run behind the check that this worker is the
  * owner's; the mirror does too, unless it files only this worker's own person's
- * moves, which it settles with the login this worker runs as.
+ * moves, which it settles with the login this worker runs as. Ending finished
+ * claims never waits for it: it ends only the claims of the member the token
+ * speaks for.
  */
 function buildSyncJobs(wiring: SyncWiring): SyncJobs {
   const { sync, env, repository, clock, logger, overrides } = wiring;
@@ -341,6 +344,11 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
     });
     jobs.mirror = () => claims.execute();
     jobs.mirrorScope = mirror.scope;
+  }
+  const finish = sync.finish;
+  if (finish?.enabled === true) {
+    const finishing = new FinishClaims({ claims: coordination, repository, sync, finish, clock, logger });
+    jobs.finish = () => finishing.execute();
   }
   if (sync.importer.enabled) {
     const cache = new SqliteDependencyCache(dbPath(wiring.stateDir));

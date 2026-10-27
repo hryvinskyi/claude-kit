@@ -236,6 +236,58 @@ describe('importing the board\'s work', () => {
   });
 });
 
+describe('the claims of the member the token speaks for', () => {
+  it('names the token\'s member, and nobody for an integration\'s token', async () => {
+    const { dibs, fetcher } = client([
+      { body: { member: { handle: 'alice', display_name: 'Alice', external_login: 'alice-gh', role: 'member' } } },
+      { body: { member: { handle: 'board', display_name: 'Board', external_login: null, role: 'importer' } } },
+    ]);
+
+    assert.equal(await dibs.holder(), 'alice');
+    assert.equal(await dibs.holder(), null);
+    assert.equal(fetcher.calls[0]?.url, `${SERVER}/v1/me`);
+  });
+
+  it('reads each claimed item\'s board status and its claim, and leaves out one that changed hands', async () => {
+    const { dibs, fetcher } = client([
+      { body: { items: [
+        { id: 41, ref: 'gh:acme/widgets#7', title: 'Refunds', status: 'claimed', source_status: 'Ready for QA' },
+        { id: 42, ref: null, title: 'Local', status: 'claimed', source_status: null },
+        { id: 43, ref: 'gh:acme/widgets#9', title: 'Taken over', status: 'claimed' },
+        { id: 44, ref: 'gh:acme/widgets#10', title: 'Gone', status: 'claimed' },
+      ] } },
+      { body: { item: { id: 41 }, claim: { holder: 'alice', claimed_at: '2026-03-02T08:00:00Z', state: 'working' } } },
+      { body: { item: { id: 42 }, claim: { holder: 'alice', claimed_at: '2026-03-02T08:10:00Z', state: 'in_review' } } },
+      { body: { item: { id: 43 }, claim: { holder: 'bob', claimed_at: '2026-03-02T08:20:00Z', state: 'working' } } },
+      { status: 404, body: { error: { code: 'not_found', message: 'No such item.' } } },
+    ]);
+
+    assert.deepEqual(await dibs.held('alice'), [
+      { item: 41, ref: 'gh:acme/widgets#7', claimedAt: '2026-03-02T08:00:00Z', boardStatus: 'Ready for QA', inReview: false },
+      { item: 42, ref: null, claimedAt: '2026-03-02T08:10:00Z', boardStatus: null, inReview: true },
+    ]);
+    assert.equal(fetcher.calls[0]?.url, `${SERVER}/v1/items?status=claimed&holder=alice`);
+    assert.equal(fetcher.calls[1]?.url, `${SERVER}/v1/items/41`);
+  });
+
+  it('completes a claim, and answers that none was held when the server says the member holds none', async () => {
+    const { dibs, fetcher } = client([
+      { body: { claim: { item: 41, holder: 'alice' }, item: { id: 41, ref: 'gh:acme/widgets#7', title: 'Refunds' } } },
+      { status: 409, body: { error: { code: 'no_claim', message: 'You hold no claim on it.' } } },
+      { status: 403, body: { error: { code: 'not_holder', message: 'Bob holds it.', details: { holder: 'bob' } } } },
+      { status: 403, body: { error: { code: 'forbidden', message: 'Integrations may not.' } } },
+    ]);
+
+    assert.equal(await dibs.complete(41), true);
+    assert.equal(await dibs.complete(41), false);
+    assert.equal(await dibs.complete(41), false);
+    await assert.rejects(dibs.complete(41), (error: unknown) =>
+      error instanceof TransientFailure && /403 \(forbidden\)/.test(error.describe()));
+    assert.equal(fetcher.calls[0]?.method, 'POST');
+    assert.equal(fetcher.calls[0]?.url, `${SERVER}/v1/items/41/done`);
+  });
+});
+
 describe('the integration\'s token', () => {
   it('is read from the variable the configuration names, when a call needs it', () => {
     assert.equal(tokenFromEnvironment({ DIBS_TOKEN: ` ${TOKEN} ` }, 'DIBS_TOKEN')(), TOKEN);

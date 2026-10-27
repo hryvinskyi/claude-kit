@@ -1,9 +1,10 @@
 import { z } from 'zod';
+import type { Sighting } from '../domain/sync/finished-claims.ts';
 import { parseJson } from './json-values.ts';
 import type { ActionRepository, MetaWrite } from './ports.ts';
 
 /**
- * What the two directions of keeping in step with a coordination server leave
+ * What the jobs that keep in step with a coordination server leave
  * behind for the next run and for a status report. The keys and the shapes live
  * here, so the writer and every reader agree on them; anything read back is
  * parsed, and a note this version cannot read counts as no note.
@@ -16,6 +17,7 @@ const IMPORT_LAST_RUN = 'import.lastRun';
 export const IMPORT_LAST_COMPLETE_OPEN = 'import.lastCompleteOpen';
 const SYNC_REFUSED = 'sync.refused';
 const FORGE_LAST_RUN = 'forge.lastRun';
+const FINISH_LAST_RUN = 'finish.lastRun';
 
 const Moment = z.string().datetime({ offset: true });
 
@@ -139,6 +141,29 @@ const ForgeRunSchema = z.object({
 export type ForgeRepositoryRun = z.infer<typeof ForgeRepositoryRunSchema>;
 export type ForgeRun = z.infer<typeof ForgeRunSchema>;
 
+const FinishRunSchema = z.object({
+  at: Moment,
+  /** The member whose claims were read; null when the token speaks for no person. */
+  holder: z.string().nullable(),
+  /** Claims that member held, live or stale. */
+  held: Count,
+  /** The claims completed, by the item's outside reference, or its id where it has none. */
+  completed: z.array(z.string()),
+  /** Claims found finished whose holder no longer held them by the time they were completed. */
+  gone: Count,
+  /** Why the run ended nothing, when the token speaks for no person. */
+  declined: z.string().nullable(),
+  /** Why the run stopped short, when it did; what it had completed by then stands. */
+  error: z.string().nullable(),
+});
+
+export type FinishRun = z.infer<typeof FinishRunSchema>;
+
+const SightingsSchema = z.record(
+  z.string().regex(/^\d+$/),
+  z.object({ claimedAt: z.string(), boardStatus: z.string().nullable() }),
+);
+
 /** Why a worker declined the jobs that run only in the owner's: its login could not be read, or it is somebody else. */
 export const OwnerRefusalSchema = z.enum(['identity-unreadable', 'not-the-owner']);
 
@@ -222,6 +247,37 @@ export async function readForgeRun(repository: ActionRepository): Promise<ForgeR
 
 export async function writeForgeRun(repository: ActionRepository, run: ForgeRun): Promise<void> {
   await repository.setMeta(FORGE_LAST_RUN, JSON.stringify(run));
+}
+
+export async function readFinishRun(repository: ActionRepository): Promise<FinishRun | null> {
+  return readJson(repository, FINISH_LAST_RUN, FinishRunSchema);
+}
+
+export async function writeFinishRun(repository: ActionRepository, run: FinishRun): Promise<void> {
+  await repository.setMeta(FINISH_LAST_RUN, JSON.stringify(run));
+}
+
+/** What the last pass saw of each held claim; a note this version cannot read is no sighting at all. */
+export async function readSightings(repository: ActionRepository, key: string): Promise<Map<number, Sighting>> {
+  const stored = await readJson(repository, key, SightingsSchema);
+  return new Map(Object.entries(stored ?? {}).map(([item, sighting]) => [Number(item), sighting]));
+}
+
+export async function writeSightings(
+  repository: ActionRepository,
+  key: string,
+  sightings: ReadonlyMap<number, Sighting>,
+): Promise<void> {
+  const stored: Record<string, Sighting> = {};
+  for (const [item, sighting] of sightings) {
+    stored[String(item)] = sighting;
+  }
+  await repository.setMeta(key, JSON.stringify(stored));
+}
+
+/** What the last pass saw of the claims held on one server's project; another's is never mistaken for it. */
+export function finishSightingsKey(server: string, project: string): string {
+  return `finish.sightings:${server}:${project}`;
 }
 
 /** When an import was last started, finished or not; it is what holds the cadence. */

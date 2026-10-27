@@ -2,6 +2,7 @@ import type { MirrorScope } from '../domain/sync-config.ts';
 import type { BudgetPolicy } from './budget-policy.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { DrainQueue, TickReport } from './drain-queue.ts';
+import type { FinishReport } from './finish-claims.ts';
 import type { ForgeReport } from './forge-pass.ts';
 import type { ImportReport } from './import-ready-work.ts';
 import type { MirrorReport } from './mirror-claims.ts';
@@ -28,6 +29,11 @@ export type SyncJobs = {
    * in every worker, for the moves of the person it runs as. `all` unless named.
    */
   mirrorScope?: MirrorScope;
+  /**
+   * Ends this worker's own person's claims whose issues the board calls finished;
+   * runs in every worker, after the mirror, and asks GitHub nothing.
+   */
+  finish?: () => Promise<FinishReport>;
   /** Reports the board's work to the server; runs after the queue and the report, when there is room. */
   importer?: () => Promise<ImportReport>;
   /** Keeps GitHub's pull requests, statuses, branches and runs in step with the server; runs last, when there is room. */
@@ -41,6 +47,7 @@ export type SyncTickReport = {
   /** Which kind of reason that was. */
   refusal?: OwnerRefusal;
   mirror?: MirrorReport | { skipped: string };
+  finish?: FinishReport | { skipped: string };
   import?: ImportReport;
   forge?: ForgeReport | { skipped: string };
 };
@@ -99,7 +106,8 @@ export class RunTick {
 
   /**
    * The owner's check is asked only when a job that waits for it is on. A mirror of
-   * this worker's own person's moves does not wait for it.
+   * this worker's own person's moves does not wait for it, and neither does ending
+   * that person's finished claims.
    *
    * The mirror runs first, so the moves it files are drained in the same tick; the
    * import and the forge pass run last, because they read, and reading waits for
@@ -123,6 +131,9 @@ export class RunTick {
     const mayKeepInStep = sync !== null && allowed !== null && allowed.ok;
     if (sync?.mirror !== undefined && (mayKeepInStep || !mirrorWaitsForOwner)) {
       syncReport.mirror = await this.#locked('the claim mirror', sync.mirror);
+    }
+    if (sync?.finish !== undefined) {
+      syncReport.finish = await this.#locked('ending finished claims', sync.finish);
     }
 
     const report = await this.#drain.run();

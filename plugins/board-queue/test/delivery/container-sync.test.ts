@@ -160,6 +160,28 @@ describe('a worker that keeps the board in step, on a real queue file', () => {
     assert.match(status.sync?.refused?.reason ?? '', /runs as bob/);
   });
 
+  it('ends its own person\'s claims whose issues moved on to QA, on a worker that is not the owner', async (t) => {
+    const it_ = world('bob-gh');
+    it_.coordination.tokenHolder = 'bob';
+    const held = { item: 45, ref: 'gh:example-org/first-repo#13', claimedAt: '2026-03-02T08:00:00Z', inReview: false };
+    it_.coordination.heldBy('bob', { ...held, boardStatus: 'In Progress' });
+    const config = ConfigSchema.parse({
+      ...syncConfig,
+      dibs: { ...syncConfig.dibs, finish: { enabled: true, statuses: ['Ready for QA'] } },
+    });
+    const container = containerFor(t, config, it_.overrides);
+
+    await container.tick.run();
+    it_.coordination.heldBy('bob', { ...held, boardStatus: 'Ready for QA' });
+    const report = await container.tick.run();
+    const status = await container.status.execute();
+
+    assert.equal(report.sync?.refusal, 'not-the-owner', 'the owner\'s jobs are left to alice\'s worker');
+    assert.deepEqual(it_.coordination.completed, [45]);
+    assert.deepEqual(status.sync?.finish.lastRun?.completed, ['gh:example-org/first-repo#13']);
+    assert.ok(statusLines(status).some((line) => line.includes('finished claims ended at Ready for QA')));
+  });
+
   it('builds nothing that reaches the server while both directions are off', async (t) => {
     const it_ = world('alice');
     const quiet = ConfigSchema.parse({

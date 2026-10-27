@@ -4,7 +4,7 @@ import type { SyncTickReport, WorkerReport } from '../application/run-tick.ts';
 import type { EnqueueOutcome } from '../application/enqueue-action.ts';
 import type { ActionView } from '../application/list-actions.ts';
 import type { QueueStatusView, SyncView } from '../application/queue-status.ts';
-import type { ForgeRepositoryRun, ForgeRun } from '../application/sync-meta.ts';
+import type { FinishRun, ForgeRepositoryRun, ForgeRun } from '../application/sync-meta.ts';
 import type { BoardItemView } from '../application/show-board-item.ts';
 import type { MirrorReport } from '../application/mirror-claims.ts';
 import type { OwnerJob } from '../domain/sync-config.ts';
@@ -130,6 +130,7 @@ export function syncStatusLines(sync: SyncView): string[] {
       lines.push(`mirror passed over ${String(mirror.unresolved)} moves whose item could not be read; see the log`);
     }
   }
+  lines.push(...finishLines(sync.finish.lastRun));
   const imported = sync.importer.lastRun;
   if (imported !== null) {
     lines.push(`import ${imported.at} — ${String(imported.items)} items in ${String(imported.batches)} batches, `
@@ -143,6 +144,20 @@ export function syncStatusLines(sync: SyncView): string[] {
     lines.push(...forgeRunLines(forge));
   }
   return lines;
+}
+
+/** What the last run that ends finished claims did, when there was one. */
+function finishLines(run: FinishRun | null): string[] {
+  if (run === null) {
+    return [];
+  }
+  if (run.declined !== null) {
+    return [`finished claims ${run.at} — ends nothing here: ${run.declined}`];
+  }
+  const ended = run.completed.length === 0 ? 'none ended' : `ended ${run.completed.join(', ')}`;
+  return [`finished claims ${run.at} — ${String(run.held)} held by ${run.holder ?? 'nobody'}, ${ended}`
+    + (run.gone > 0 ? `, ${String(run.gone)} no longer held` : '')
+    + (run.error === null ? '' : ` — stopped: ${run.error}`)];
 }
 
 /** What a mirror of one person's moves did with the moves that were not that person's. */
@@ -165,7 +180,8 @@ function jobsLine(sync: SyncView): string {
   const on = (enabled: boolean): string => (enabled ? 'on' : 'off');
   const ownMoves = sync.mirror.enabled && sync.mirror.scope === 'own';
   const mirror = ownMoves ? 'on, each person\'s own moves' : on(sync.mirror.enabled);
-  const jobs = `mirror ${mirror} · importer ${on(sync.importer.enabled)} · forge ${on(sync.forge.enabled)}`;
+  const finish = sync.finish.enabled ? ` · finished claims ended at ${sync.finish.statuses.join(' / ')}` : '';
+  const jobs = `mirror ${mirror}${finish} · importer ${on(sync.importer.enabled)} · forge ${on(sync.forge.enabled)}`;
   if (!ownMoves) {
     return `${jobs} · only in ${sync.owner}'s worker`;
   }
@@ -258,6 +274,14 @@ function syncTickLines(sync: SyncTickReport): string[] {
   const mirror = sync.mirror;
   if (mirror !== undefined) {
     lines.push(mirrorTickLine(mirror));
+  }
+  const finish = sync.finish;
+  if (finish !== undefined) {
+    lines.push('skipped' in finish
+      ? `finished claims: skipped — ${finish.skipped}`
+      : `finished claims: ${String(finish.completed.length)} ended`
+        + (finish.declined === null ? '' : ` · ends nothing here: ${finish.declined}`)
+        + (finish.error === null ? '' : ` · stopped: ${finish.error}`));
   }
   const imported = sync.import;
   if (imported !== undefined) {

@@ -4,6 +4,7 @@ import type {
   ImportAnswer,
   ImportBatch,
   LiveClaim,
+  OwnClaims,
   RefusedEdge,
   WorkImport,
   WorkMember,
@@ -11,6 +12,7 @@ import type {
 import type { BoardQueueError } from '../../src/domain/errors.ts';
 import { CursorExpired } from '../../src/domain/errors.ts';
 import type { ClaimEvent } from '../../src/domain/sync/claim-moves.ts';
+import type { HeldClaim } from '../../src/domain/sync/finished-claims.ts';
 
 /**
  * One event of the fake log: a claim event; another event the reader sees and has
@@ -19,15 +21,29 @@ import type { ClaimEvent } from '../../src/domain/sync/claim-moves.ts';
  */
 export type LoggedEvent = ClaimEvent | { readonly id: number; readonly kind: 'other' | 'hidden' };
 
-export type CoordinationCall = 'page' | 'members' | 'itemRef' | 'liveClaims' | 'putItems';
+export type CoordinationCall =
+  | 'page'
+  | 'members'
+  | 'itemRef'
+  | 'liveClaims'
+  | 'putItems'
+  | 'holder'
+  | 'held'
+  | 'complete';
 
 /**
  * The coordination server, in memory: a log of events, its members, its items'
- * references, and every batch it was sent. A test scripts the refusals it wants
- * and counts what was asked.
+ * references, every batch it was sent, and the claims of the member its token
+ * speaks for. A test scripts the refusals it wants and counts what was asked.
  */
-export class FakeCoordination implements ClaimFeed, WorkImport {
+export class FakeCoordination implements ClaimFeed, WorkImport, OwnClaims {
   readonly calls: CoordinationCall[] = [];
+  /** The items whose claims were completed, in order. */
+  readonly completed: number[] = [];
+  /** The member the token speaks for; null for an integration's token. */
+  tokenHolder: string | null = 'alice';
+  /** Items whose claims change hands between a listing and their completion, so the completion finds none. */
+  readonly goneOnCompletion = new Set<number>();
   readonly batches: ImportBatch[] = [];
   readonly pagesAskedFrom: number[] = [];
   /** Events the log removed: a cursor at or before this is refused as expired. */
@@ -39,6 +55,7 @@ export class FakeCoordination implements ClaimFeed, WorkImport {
   readonly #members: WorkMember[] = [];
   readonly #refs = new Map<number, string | null>();
   readonly #claims: LiveClaim[] = [];
+  readonly #held = new Map<number, HeldClaim & { readonly holder: string }>();
   readonly #scripted = new Map<CoordinationCall, BoardQueueError[]>();
 
   log(...events: readonly LoggedEvent[]): this {
@@ -54,6 +71,15 @@ export class FakeCoordination implements ClaimFeed, WorkImport {
   /** A claim that is live on the server now. */
   holds(item: number, holder: string, inReview = false): this {
     this.#claims.push({ item, holder, inReview });
+    return this;
+  }
+
+  /**
+   * A claim the token's member, or another, holds with the board status its issue
+   * shows; holding it again replaces what was held.
+   */
+  heldBy(holder: string, claim: HeldClaim): this {
+    this.#held.set(claim.item, { ...claim, holder });
     return this;
   }
 
@@ -109,6 +135,29 @@ export class FakeCoordination implements ClaimFeed, WorkImport {
   liveClaims(): Promise<LiveClaim[]> {
     this.#answer('liveClaims');
     return Promise.resolve([...this.#claims]);
+  }
+
+  holder(): Promise<string | null> {
+    this.#answer('holder');
+    return Promise.resolve(this.tokenHolder);
+  }
+
+  held(holder: string): Promise<HeldClaim[]> {
+    this.#answer('held');
+    return Promise.resolve([...this.#held.values()]
+      .filter((claim) => claim.holder === holder)
+      .map(({ holder: _holder, ...claim }) => claim));
+  }
+
+  complete(item: number): Promise<boolean> {
+    this.#answer('complete');
+    const claim = this.#held.get(item);
+    if (claim === undefined || claim.holder !== this.tokenHolder || this.goneOnCompletion.has(item)) {
+      return Promise.resolve(false);
+    }
+    this.#held.delete(item);
+    this.completed.push(item);
+    return Promise.resolve(true);
   }
 
   putItems(batch: ImportBatch): Promise<ImportAnswer> {

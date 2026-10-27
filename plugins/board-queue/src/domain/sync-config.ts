@@ -39,6 +39,23 @@ export const MirrorConfigSchema = z
   })
   .strict();
 
+/**
+ * Ending a person's claims once the board says their work is finished: when an
+ * issue moves into one of `statuses` while its holder's claim is held, that
+ * holder's worker completes the claim, so its areas are free for the next
+ * person. It runs in every person's worker, for the claims of the member its token
+ * speaks for, and never for a claim waiting in review, which the merge of its pull
+ * request ends.
+ */
+export const FinishConfigSchema = z
+  .object({
+    /** Off unless a deployment turns it on. */
+    enabled: z.boolean().default(false),
+    /** The board's statuses that mean the work of a claim is finished, such as waiting for QA, or done. */
+    statuses: z.array(z.string().trim().min(1)).min(1),
+  })
+  .strict();
+
 /** Severity prefixes and the priority each stands for; the coordination server's own default is 2. */
 const DEFAULT_PRIORITIES: Record<string, number> = { S1: 0, S2: 1, S3: 2, S4: 3 };
 
@@ -139,7 +156,8 @@ export const DibsTokenSourceSchema = z.discriminatedUnion('from', [
 
 /**
  * What this worker keeps in step with a coordination server: claims there moving
- * rows here, and the board's open work and what blocks it reported there.
+ * rows here, rows moved into a finished status ending claims there, and the
+ * board's open work and what blocks it reported there.
  *
  * The importer and the forge jobs copy one system's state onto another on the
  * whole team's behalf, so they run in exactly one worker: the one whose GitHub
@@ -171,6 +189,7 @@ export const SyncConfigSchema = z
     /** The repositories whose issues are kept in step; each must be carried by a configured board. */
     repos: z.array(z.string().trim().refine(isRepoFullName, 'a repository is written owner/name')).min(1),
     mirror: MirrorConfigSchema.optional(),
+    finish: FinishConfigSchema.optional(),
     importer: ImporterConfigSchema.default({}),
     forge: ForgeConfigSchema.default({}),
   })
@@ -200,6 +219,7 @@ export const SyncConfigSchema = z
 
 export type SyncConfig = z.infer<typeof SyncConfigSchema>;
 export type MirrorConfig = z.infer<typeof MirrorConfigSchema>;
+export type FinishConfig = z.infer<typeof FinishConfigSchema>;
 export type ImporterConfig = z.infer<typeof ImporterConfigSchema>;
 export type ForgeConfig = z.infer<typeof ForgeConfigSchema>;
 export type ClaimStatuses = z.infer<typeof ClaimStatusesSchema>;
@@ -237,5 +257,6 @@ export function ownerJobsOf(sync: SyncConfig): OwnerJob[] {
 
 /** Whether any job is switched on; with none, nothing about the server is ever asked. */
 export function syncIsOn(sync: SyncConfig): boolean {
-  return sync.mirror?.enabled === true || sync.importer.enabled || sync.forge.enabled;
+  return sync.mirror?.enabled === true || sync.finish?.enabled === true || sync.importer.enabled
+    || sync.forge.enabled;
 }

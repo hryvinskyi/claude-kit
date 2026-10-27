@@ -7,11 +7,13 @@ import type {
   ImportBatch,
   ImportedItem,
   LiveClaim,
+  OwnClaims,
   WorkImport,
   WorkMember,
 } from '../application/sync-ports.ts';
 import { CursorExpired } from '../domain/errors.ts';
 import type { ClaimEvent, ClaimEventKind } from '../domain/sync/claim-moves.ts';
+import type { HeldClaim } from '../domain/sync/finished-claims.ts';
 import { DibsTransport } from './dibs-transport.ts';
 import type { DibsHttpDeps } from './dibs-transport.ts';
 
@@ -53,6 +55,26 @@ const ClaimsAnswer = z.object({
 });
 
 const ItemAnswer = z.object({ item: z.object({ id: z.number().int().positive(), ref: z.string().nullable() }) });
+
+const MeAnswer = z.object({ member: z.object({ handle: z.string(), role: z.string() }) });
+
+const ClaimedItems = z.object({
+  items: z.array(z.object({
+    id: z.number().int().positive(),
+    ref: z.string().nullable(),
+    source_status: z.string().nullable().optional(),
+  })),
+});
+
+const ItemWithClaim = z.object({
+  claim: z.object({ holder: z.string(), claimed_at: z.string(), state: z.string() }).nullable(),
+});
+
+/** The role of a token that speaks for an integration worker rather than a person. */
+const INTEGRATION_ROLE = 'importer';
+
+/** The refusals of a completion that mean the member no longer holds the claim: nothing is left to end. */
+const NO_LONGER_HELD = new Set(['no_claim', 'not_holder']);
 
 const ImportAnswerSchema = z.object({
   items: z.array(z.object({
@@ -111,7 +133,8 @@ function isClaimKind(kind: string): kind is ClaimEventKind {
 
 /**
  * The coordination server, as the mirror and the importer reach it: its event
- * log, its members, its items, and the import of the board's work.
+ * log, its members, its items, and the import of the board's work; and, for the
+ * job that ends finished claims, the claims of the member its token speaks for.
  *
  * Its answers are a foreign model and stop here: an event's payload is read into
  * the claim events the mirror understands, member ids become handles, and every
@@ -120,7 +143,7 @@ function isClaimKind(kind: string): kind is ClaimEventKind {
  * the refusal, never its text and never the token; a cursor behind what the log
  * keeps is a `CursorExpired`.
  */
-export class DibsHttpClient implements ClaimFeed, WorkImport {
+export class DibsHttpClient implements ClaimFeed, WorkImport, OwnClaims {
   readonly #http: DibsTransport;
   readonly #logger: Logger;
 
@@ -176,6 +199,55 @@ export class DibsHttpClient implements ClaimFeed, WorkImport {
       return null;
     }
     return this.#http.decode(ItemAnswer, this.#http.ok(answer, subject), subject).item.ref;
+  }
+
+  async holder(): Promise<string | null> {
+    const subject = 'the token\'s member';
+    const answer = await this.#http.call('GET', '/v1/me', subject);
+    const me = this.#http.decode(MeAnswer, this.#http.ok(answer, subject), subject).member;
+    return me.role === INTEGRATION_ROLE ? null : me.handle;
+  }
+
+  /**
+   * The member's claimed items carry the board status the importer last reported;
+   * each claim's moment and state is read from its item, and an item whose claim
+   * changed hands in between is left out.
+   */
+  async held(holder: string): Promise<HeldClaim[]> {
+    const subject = `the claims of ${holder}`;
+    const query = new URLSearchParams({ status: 'claimed', holder });
+    const answer = await this.#http.call('GET', `/v1/items?${query.toString()}`, subject);
+    const items = this.#http.decode(ClaimedItems, this.#http.ok(answer, subject), subject).items;
+    const held: HeldClaim[] = [];
+    for (const item of items) {
+      const itemSubject = `the work item ${String(item.id)}`;
+      const read = await this.#http.call('GET', `/v1/items/${String(item.id)}`, itemSubject);
+      if (read.status === NOT_FOUND) {
+        continue;
+      }
+      const claim = this.#http.decode(ItemWithClaim, this.#http.ok(read, itemSubject), itemSubject).claim;
+      if (claim === null || claim.holder !== holder) {
+        continue;
+      }
+      held.push({
+        item: item.id,
+        ref: item.ref,
+        claimedAt: claim.claimed_at,
+        boardStatus: item.source_status ?? null,
+        inReview: claim.state === 'in_review',
+      });
+    }
+    return held;
+  }
+
+  async complete(item: number): Promise<boolean> {
+    const subject = `the completion of the work item ${String(item)}`;
+    const answer = await this.#http.call('POST', `/v1/items/${String(item)}/done`, subject);
+    if (answer.code !== null && NO_LONGER_HELD.has(answer.code)) {
+      return false;
+    }
+    this.#http.ok(answer, subject);
+    return true;
   }
 
   async putItems(batch: ImportBatch): Promise<ImportAnswer> {

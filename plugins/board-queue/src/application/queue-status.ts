@@ -2,8 +2,8 @@ import type { Action } from '../domain/action.ts';
 import { ownerJobsOf } from '../domain/sync-config.ts';
 import type { MirrorScope, OwnerJob, SyncConfig } from '../domain/sync-config.ts';
 import { readLastAudit, readLastBudget, readLastTickAt } from './queue-meta.ts';
-import { readForgeRun, readImportRun, readMirrorRun, readSyncRefusal } from './sync-meta.ts';
-import type { ForgeRun, ImportRun, MirrorRun, SyncRefusal } from './sync-meta.ts';
+import { readFinishRun, readForgeRun, readImportRun, readMirrorRun, readSyncRefusal } from './sync-meta.ts';
+import type { FinishRun, ForgeRun, ImportRun, MirrorRun, SyncRefusal } from './sync-meta.ts';
 import type { ActionCounts, ActionRepository, Clock } from './ports.ts';
 
 export type PauseView = {
@@ -78,6 +78,8 @@ export type SyncView = {
   /** The jobs switched on that run only in the owner's worker. */
   ownerJobs: OwnerJob[];
   mirror: { enabled: boolean; scope: MirrorScope; lastRun: MirrorRun | null };
+  /** Ending this worker's own person's claims whose work the board calls finished. */
+  finish: { enabled: boolean; statuses: string[]; lastRun: FinishRun | null };
   importer: { enabled: boolean; lastRun: ImportRun | null };
   forge: { enabled: boolean; lastRun: ForgeRun | null };
   refused: SyncRefusal | null;
@@ -186,8 +188,9 @@ export class QueueStatus {
     if (sync === null) {
       return null;
     }
-    const [mirrorRun, importRun, forgeRun, refused] = await Promise.all([
+    const [mirrorRun, finishRun, importRun, forgeRun, refused] = await Promise.all([
       readMirrorRun(this.#repository),
+      readFinishRun(this.#repository),
       readImportRun(this.#repository),
       readForgeRun(this.#repository),
       readSyncRefusal(this.#repository),
@@ -198,6 +201,11 @@ export class QueueStatus {
       owner: sync.mirrorOwner,
       ownerJobs: ownerJobsOf(sync),
       mirror: { enabled: sync.mirror?.enabled === true, scope: sync.mirror?.scope ?? 'all', lastRun: mirrorRun },
+      finish: {
+        enabled: sync.finish?.enabled === true,
+        statuses: [...(sync.finish?.statuses ?? [])],
+        lastRun: finishRun,
+      },
       importer: { enabled: sync.importer.enabled, lastRun: importRun },
       forge: { enabled: sync.forge.enabled, lastRun: forgeRun },
       refused,

@@ -22,6 +22,7 @@ const VIEW: SyncView = {
   owner: 'alice',
   ownerJobs: ['mirror'],
   mirror: { enabled: true, scope: 'all', lastRun: null },
+  finish: { enabled: false, statuses: [], lastRun: null },
   importer: { enabled: false, lastRun: null },
   forge: { enabled: false, lastRun: null },
   refused: null,
@@ -46,6 +47,46 @@ const MIRROR_RUN = {
   declined: null,
   ownerWarning: null,
 };
+
+const FINISH_RUN = {
+  at: '2026-03-02T09:00:00.000Z',
+  holder: 'alice',
+  held: 3,
+  completed: ['gh:example-org/first-repo#41'],
+  gone: 1,
+  declined: null,
+  error: null,
+};
+
+describe('ending finished claims on a terminal', () => {
+  it('says at which statuses claims end, what the last run ended, and what one tick ended', () => {
+    const lines = syncStatusLines({
+      ...VIEW,
+      finish: { enabled: true, statuses: ['Ready for QA', 'Done'], lastRun: FINISH_RUN },
+    });
+
+    assert.deepEqual(lines, [
+      'in step with https://dibs.example.com (widgets): mirror on · finished claims ended at Ready for QA / Done '
+        + '· importer off · forge off · only in alice\'s worker',
+      'finished claims 2026-03-02T09:00:00.000Z — 3 held by alice, ended gh:example-org/first-repo#41, 1 no longer held',
+    ]);
+    const tick: WorkerReport = { ...QUIET_TICK, sync: { finish: FINISH_RUN } };
+    assert.ok(tickLines(tick).includes('finished claims: 1 ended'));
+  });
+
+  it('says why a worker whose token speaks for an integration ends nothing', () => {
+    const lines = syncStatusLines({
+      ...VIEW,
+      finish: {
+        enabled: true,
+        statuses: ['Done'],
+        lastRun: { ...FINISH_RUN, holder: null, held: 0, completed: [], gone: 0, declined: 'the token speaks for an integration' },
+      },
+    });
+
+    assert.equal(lines[1], 'finished claims 2026-03-02T09:00:00.000Z — ends nothing here: the token speaks for an integration');
+  });
+});
 
 describe('what keeping in step looks like on a terminal', () => {
   it('says which directions are on and whose worker runs them', () => {
