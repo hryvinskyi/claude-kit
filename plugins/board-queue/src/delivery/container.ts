@@ -30,6 +30,7 @@ import type { Config } from '../domain/config.ts';
 import { RefusedByRule } from '../domain/errors.ts';
 import { defaultKindRegistry } from '../domain/kinds/default-kinds.ts';
 import type { KindRegistry } from '../domain/kinds/registry.ts';
+import { StartOfWork } from '../domain/start-of-work.ts';
 import type { SyncConfig } from '../domain/sync-config.ts';
 import { syncIsOn } from '../domain/sync-config.ts';
 import { DibsHttpClient } from '../infrastructure/dibs-http.ts';
@@ -228,7 +229,18 @@ export function buildContainer(options: BuildContainerOptions): Container {
     sleeper,
     logger,
     policy,
-    enqueue: new EnqueueAction({ repository, kinds, directory, clock }),
+    enqueue: new EnqueueAction({
+      repository,
+      kinds,
+      directory,
+      clock,
+      ...starterAssignment(sync, () => overrides.identity ?? localIdentity({
+        env,
+        board: firstBoard(directory),
+        clock,
+        fetchImpl: overrides.appFetch,
+      })),
+    }),
     release: new ReleaseAction(repository, clock),
     cancel: new CancelAction(repository, clock),
     retry: new RetryAction(repository, clock),
@@ -386,6 +398,24 @@ function placementOfRepository(directory: BoardDirectory, repo: string): BoardPl
     throw new RefusedByRule(`${repo} is carried by no configured board`);
   }
   return placement;
+}
+
+/**
+ * Who a move that starts the work assigns, and which statuses start it: the
+ * statuses a claim stands for when the mirror assigns people, and nothing for a
+ * deployment whose mirror is off or assigns nobody. The identity is built only
+ * when it can be asked.
+ */
+function starterAssignment(
+  sync: SyncConfig | null,
+  identity: () => LocalIdentity,
+): { startOfWork?: StartOfWork; identity?: LocalIdentity } {
+  const mirror = sync?.mirror;
+  if (mirror?.enabled !== true || !mirror.assignees) {
+    return {};
+  }
+  const { claimed, takenOver } = mirror.status;
+  return { startOfWork: new StartOfWork([claimed, takenOver ?? claimed]), identity: identity() };
 }
 
 /** Any configured board; the configuration refuses one that names none. */

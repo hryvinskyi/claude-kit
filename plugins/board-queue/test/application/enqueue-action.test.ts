@@ -6,6 +6,7 @@ import type { FieldCatalog } from '../../src/domain/catalog.ts';
 import type { Config } from '../../src/domain/config.ts';
 import { RefusedByRule, UnknownKind } from '../../src/domain/errors.ts';
 import { defaultKindRegistry } from '../../src/domain/kinds/default-kinds.ts';
+import { StartOfWork } from '../../src/domain/start-of-work.ts';
 import {
   ORG_BOARD,
   TEST_BOARD,
@@ -567,5 +568,128 @@ describe('filing an action', () => {
 
     assert.equal(late.duplicateOf, racing.id);
     assert.equal((await repository.list({})).length, 1);
+  });
+});
+
+/** A queue whose deployment says In Progress starts the work, filed from a machine signed in as `login`. */
+function startingHarness(login: string | null): ReturnType<typeof harness> {
+  const repository = new InMemoryActionRepository();
+  const clock = new FakeClock('2026-01-01T09:00:00.000Z');
+  const enqueue = new EnqueueAction({
+    repository,
+    kinds: defaultKindRegistry(testConfig),
+    directory: testDirectory,
+    clock,
+    startOfWork: new StartOfWork(['In Progress']),
+    identity: { login: () => Promise.resolve(login) },
+  });
+  return { repository, clock, enqueue };
+}
+
+describe('assigning whoever starts the work', () => {
+  it('files the assignment of the person filing a move into a status that starts the work, after the move', async () => {
+    const { repository, enqueue } = startingHarness('alice');
+
+    const outcome = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ status: 'in prog' }),
+      origin: 'a session in the first repository',
+    });
+
+    const actions = await repository.list({});
+    assert.deepEqual(actions.map((action) => [action.kind, action.payload, action.origin, action.state]), [
+      ['board.set-fields', setFields({ status: 'in prog' }), 'a session in the first repository', 'queued'],
+      ['issue.assignees', { repo: FIRST, issue: 12, add: ['alice'], remove: [] }, 'a session in the first repository', 'queued'],
+    ]);
+    assert.deepEqual(outcome.assignment, { id: actions[1]?.id, login: 'alice' });
+  });
+
+  it('assigns nobody for a status that does not start the work, nor for work that writes no status', async () => {
+    const { repository, enqueue } = startingHarness('alice');
+
+    const moved = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ status: 'Ready for QA', severity: 'S2' }),
+      origin: 'a session',
+    });
+    await enqueue.execute({
+      kind: 'issue.comment',
+      payload: { repo: FIRST, issue: 12, body: 'In Progress' },
+      origin: 'a session',
+    });
+
+    assert.equal(moved.assignment, undefined);
+    assert.deepEqual((await repository.list({})).map((action) => action.kind), ['board.set-fields', 'issue.comment']);
+  });
+
+  it('holds the assignment while the move is held, so nobody is assigned before it is released', async () => {
+    const { repository, enqueue } = startingHarness('alice');
+
+    await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ status: 'In Progress' }),
+      origin: 'a session',
+      hold: true,
+    });
+
+    assert.deepEqual((await repository.list({})).map((action) => [action.kind, action.state]), [
+      ['board.set-fields', 'held'],
+      ['issue.assignees', 'held'],
+    ]);
+  });
+
+  it('folds a second start of the same issue into the assignment already waiting', async () => {
+    const { repository, enqueue } = startingHarness('alice');
+
+    const first = await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ status: 'In Progress' }), origin: 'a' });
+    const second = await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ status: 'In Progress' }), origin: 'b' });
+
+    assert.equal(second.assignment?.id, first.assignment?.id);
+    assert.equal((await repository.list({ kind: 'issue.assignees' })).length, 1);
+  });
+
+  it('files nothing more for a request already filed under its key', async () => {
+    const { repository, enqueue } = startingHarness('alice');
+    const request = {
+      kind: 'board.set-fields',
+      payload: setFields({ status: 'In Progress' }),
+      origin: 'a script',
+      dedupeKey: 'start-12',
+    };
+
+    await enqueue.execute(request);
+    const again = await enqueue.execute(request);
+
+    assert.equal(again.assignment, undefined);
+    assert.equal((await repository.list({ kind: 'issue.assignees' })).length, 1);
+  });
+
+  it('says nobody is assigned when no login can be read on the filing machine, and files the move anyway', async () => {
+    const { repository, enqueue } = startingHarness(null);
+
+    const outcome = await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ status: 'In Progress' }), origin: 'a' });
+
+    assert.equal(outcome.assignment, undefined);
+    assert.deepEqual(outcome.warnings, [
+      `this starts the work on ${FIRST}#12, but no GitHub login can be read on this machine, so nobody is assigned`,
+    ]);
+    assert.deepEqual((await repository.list({})).map((action) => action.kind), ['board.set-fields']);
+  });
+
+  it('never assigns an App, which GitHub would refuse', async () => {
+    const { repository, enqueue } = startingHarness('board-queue[bot]');
+
+    const outcome = await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ status: 'In Progress' }), origin: 'a' });
+
+    assert.match(outcome.warnings[0] ?? '', /board-queue\[bot\] is an App, so nobody is assigned/);
+    assert.deepEqual((await repository.list({})).map((action) => action.kind), ['board.set-fields']);
+  });
+
+  it('assigns nobody where the deployment names no status that starts the work', async () => {
+    const { repository, enqueue } = harness();
+
+    await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ status: 'In Progress' }), origin: 'a' });
+
+    assert.deepEqual((await repository.list({})).map((action) => action.kind), ['board.set-fields']);
   });
 });

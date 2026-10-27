@@ -58,6 +58,10 @@ export class AssigneesKind implements ActionKind {
     return IssueRef.of(parsed.repo, parsed.issue);
   }
 
+  statusAskedFor(): null {
+    return null;
+  }
+
   /**
    * Login by login, the later request decides: a login it adds is no longer
    * removed, and one it removes is no longer added.

@@ -47,6 +47,9 @@ export interface ActionKind {
   /** The issue this payload is about, or null for work that names no issue. */
   issueRefOf(payload: unknown): IssueRef | null;
 
+  /** The board status this payload asks to be written, as the caller typed it, or null when it writes none. */
+  statusAskedFor(payload: unknown): string | null;
+
   /**
    * Folds a later request into one that is still waiting, and answers null when
    * this kind does not merge. It is only ever asked when the waiting action can

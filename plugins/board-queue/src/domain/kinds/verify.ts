@@ -66,6 +66,11 @@ export class VerifyKind implements ActionKind {
     return IssueRef.of(parsed.repo, parsed.issue);
   }
 
+  /** A verification only reads the row back; it writes no status. */
+  statusAskedFor(): null {
+    return null;
+  }
+
   /** Two verifications are two questions; merging them would lose one of the answers. */
   coalesce(_existing: unknown, _incoming: unknown): unknown {
     return null;

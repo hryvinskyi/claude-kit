@@ -156,7 +156,7 @@ describe('following the claim log', () => {
     const actions = await repository.list({});
     assert.deepEqual(actions.map((action) => action.payload), [
       status(12, 'In Progress'),
-      { repo: 'example-org/first-repo', issue: 12, add: ['bob-gh'], remove: ['alice-gh'] },
+      { repo: 'example-org/first-repo', issue: 12, add: ['alice-gh', 'bob-gh'], remove: [] },
     ]);
   });
 
@@ -232,18 +232,39 @@ describe('following the claim log', () => {
     assert.ok(logger.lines.some((line) => /names no GitHub login/.test(line.message)));
   });
 
-  it('still unassigns a member the project has since removed', async () => {
+  it('still unassigns a member the project has since removed when their claim is taken over', async () => {
     const { repository, feed, mirrorClaims, following } = harness();
     await following();
     feed.log(claim(1, 'claimed', 41, 'bob'));
     await mirrorClaims.execute();
     feed.forget('bob');
-    feed.log(claim(2, 'force_released', 41, 'bob'));
+    feed.log(claim(2, 'taken_over', 41, 'alice', 'bob'));
 
     await mirrorClaims.execute();
 
     const assignments = await repository.list({ kind: 'issue.assignees' });
-    assert.deepEqual(assignments[1]?.payload, { repo: 'example-org/first-repo', issue: 12, add: [], remove: ['bob-gh'] });
+    assert.deepEqual(assignments[1]?.payload, {
+      repo: 'example-org/first-repo',
+      issue: 12,
+      add: ['alice-gh'],
+      remove: ['bob-gh'],
+    });
+  });
+
+  it('leaves the person who started the work assigned when their claim is released', async () => {
+    const { repository, feed, mirrorClaims, following } = harness();
+    await following();
+    feed.log(claim(1, 'claimed', 41, 'bob'));
+    await mirrorClaims.execute();
+    feed.log(claim(2, 'released', 41, 'bob'));
+
+    await mirrorClaims.execute();
+
+    assert.deepEqual((await repository.list({})).map((action) => action.payload), [
+      status(12, 'In Progress'),
+      { repo: 'example-org/first-repo', issue: 12, add: ['bob-gh'], remove: [] },
+      status(12, 'Todo'),
+    ]);
   });
 
   it('files no assignment when the configuration says not to', async () => {
@@ -541,7 +562,6 @@ describe('filing only the moves of the person this worker runs as', () => {
 
     assert.deepEqual((await owner.repository.list({})).map((action) => action.payload), [
       status(12, 'Todo'),
-      { repo: 'example-org/first-repo', issue: 12, add: [], remove: ['dave-gh'] },
     ]);
     assert.equal(filed.orphanMoves, 1);
     assert.deepEqual(await bob.repository.list({}), []);

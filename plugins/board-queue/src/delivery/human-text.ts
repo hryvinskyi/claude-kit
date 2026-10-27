@@ -33,6 +33,9 @@ export function enqueueLines(outcome: EnqueueOutcome): string[] {
   if (outcome.duplicateOf !== undefined) {
     lines.push(`already filed as ${outcome.duplicateOf}; nothing new was filed`);
   }
+  if (outcome.assignment !== undefined) {
+    lines.push(`assigns ${outcome.assignment.login}, who starts the work: ${outcome.assignment.id}`);
+  }
   for (const warning of outcome.warnings) {
     lines.push(`warning: ${warning}`);
   }

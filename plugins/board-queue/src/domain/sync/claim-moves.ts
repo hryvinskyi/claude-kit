@@ -60,6 +60,10 @@ type Step = (move: IssueMove, event: ClaimEvent, statuses: ClaimStatuses) => Iss
  * the one before it, and an assignment it makes undoes an earlier unassignment of
  * the same person, so a run of events collapses to the state the last of them
  * left behind.
+ *
+ * The person who started the work stays assigned when the claim ends, finished
+ * or put down: the issue keeps saying who worked on it. Only a takeover moves the
+ * assignment, because the work then has another person starting it.
  */
 const STEPS: { readonly [K in ClaimEventKind]: Step } = {
   claimed: (move, event, statuses) => assigned(
@@ -70,14 +74,8 @@ const STEPS: { readonly [K in ClaimEventKind]: Step } = {
     assigned(withStatus(move, event, boardStatusOf('takenOver', statuses)), event.member),
     event.previous,
   ),
-  released: (move, event, statuses) => unassigned(
-    withStatus(move, event, boardStatusOf('released', statuses)),
-    event.member,
-  ),
-  force_released: (move, event, statuses) => unassigned(
-    withStatus(move, event, boardStatusOf('released', statuses)),
-    event.member,
-  ),
+  released: (move, event, statuses) => withStatus(move, event, boardStatusOf('released', statuses)),
+  force_released: (move, event, statuses) => withStatus(move, event, boardStatusOf('released', statuses)),
   review_started: (move, event, statuses) => withStatus(move, event, boardStatusOf('review', statuses)),
   review_ended: (move, event, statuses) => withStatus(move, event, boardStatusOf('reviewEnded', statuses)),
 };

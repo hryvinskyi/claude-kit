@@ -9,7 +9,7 @@ import type { ContainerOverrides } from '../../src/delivery/container.ts';
 import { ConfigSchema } from '../../src/domain/config.ts';
 import type { Config } from '../../src/domain/config.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
-import { statusLines } from '../../src/delivery/human-text.ts';
+import { enqueueLines, statusLines } from '../../src/delivery/human-text.ts';
 import { FakeBoardGateway, catalogField, catalogOf, seedItem } from '../fakes/fake-board-gateway.ts';
 import { FakeCoordination, claim } from '../fakes/fake-coordination.ts';
 import { FakeDependencyReader } from '../fakes/fake-dependencies.ts';
@@ -100,6 +100,40 @@ describe('a worker that keeps the board in step, on a real queue file', () => {
     assert.equal(status.sync?.importer.lastRun?.complete, true);
     assert.ok(statusLines(status).some((line) => line.startsWith('mirror 2026-03-02T09:00:00.000Z — 0 events read, 2 filed')));
     assert.ok(statusLines(status).some((line) => line.startsWith('mirror started from the head at event 3')));
+  });
+
+  it('assigns the person who files a move into the claimed status, and the worker applies both', async (t) => {
+    const it_ = world('bob-gh');
+    const container = containerFor(t, syncConfig, it_.overrides);
+
+    const outcome = await container.enqueue.execute({
+      kind: 'board.set-fields',
+      payload: { repo: 'example-org/first-repo', issue: 12, fields: { status: 'In Progress' } },
+      origin: 'a session',
+    });
+    await container.drain.run();
+
+    assert.equal(outcome.assignment?.login, 'bob-gh');
+    assert.deepEqual(it_.board.valuesOf(TWELVE), { Status: 'In Progress' });
+    assert.ok(it_.issues.assigneesOf(TWELVE).includes('bob-gh'));
+    assert.deepEqual(enqueueLines(outcome).slice(1), [`assigns bob-gh, who starts the work: ${outcome.assignment?.id ?? ''}`]);
+  });
+
+  it('assigns nobody through a move when the mirror assigns nobody', async (t) => {
+    const it_ = world('bob-gh');
+    const sync = syncConfig.dibs;
+    assert.ok(sync?.mirror !== undefined);
+    const config = ConfigSchema.parse({ ...syncConfig, dibs: { ...sync, mirror: { ...sync.mirror, assignees: false } } });
+    const container = containerFor(t, config, it_.overrides);
+
+    const outcome = await container.enqueue.execute({
+      kind: 'board.set-fields',
+      payload: { repo: 'example-org/first-repo', issue: 12, fields: { status: 'In Progress' } },
+      origin: 'a session',
+    });
+
+    assert.equal(outcome.assignment, undefined);
+    assert.deepEqual((await container.list.execute({})).map((action) => action.kind), ['board.set-fields']);
   });
 
   it('files nothing a second time when the same events are read again after a restart', async (t) => {

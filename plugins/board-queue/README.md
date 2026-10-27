@@ -74,6 +74,13 @@ that fits one option only — so `S2` reaches `S2 · broken · no workaround`. A
 several, blocks the action and reports what the field accepts. Two of these waiting on the same issue merge
 into one, the later values winning.
 
+**Whoever starts the work is assigned.** A `board.set-fields` whose status starts the work on an issue — the
+mirror's `claimed` or `takenOver` status, matched the way a write matches it — is filed with an `issue.assignees`
+beside it that adds the person filing it: the login the GitHub command line tool is signed in as on the filing
+machine. The assignment waits as the move does (held, or not before a moment). A machine with no readable login,
+or a filer that is a GitHub App, assigns nobody and says so in a warning. A deployment without a mirror names no
+such status and assigns nobody this way.
+
 `"onlyIfStatusIn": ["In Progress", "Todo", ""]` makes the write conditional: the row is found on the board's
 walk and read fresh before anything is written, and the write goes ahead only while its Status is one of the
 listed texts (`""` is a row with no status; a listed text the board offers no option for is passed over).
@@ -330,6 +337,8 @@ filed: a `board.set-fields` of the status the claim stands for (`claimed`, `rele
 too —, `takenOver` and `reviewEnded`, which default to `claimed`, and `review`), conditional on the row still
 carrying one of the statuses the mirror writes or none; and an `issue.assignees` for the holder, mapped to a
 GitHub login through the project's members (a login is kept once read, so a removed member is still unassigned).
+The person who started the work stays assigned when the claim ends: a release moves the status and leaves the
+assignee, and only a takeover moves the assignment, from the stale holder to the member who took it over.
 A completed claim files nothing: the board's final columns are not the mirror's.
 
 **It never replays the log.** On its first run, and when the log no longer keeps what came after the cursor, it

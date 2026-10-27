@@ -36,6 +36,10 @@ export class CloseKind implements ActionKind {
     return IssueRef.of(parsed.repo, parsed.issue);
   }
 
+  statusAskedFor(): null {
+    return null;
+  }
+
   /** A second close request may name another reason or comment; both are kept as filed. */
   coalesce(_existing: unknown, _incoming: unknown): unknown {
     return null;

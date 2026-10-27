@@ -37,6 +37,8 @@ const DESCRIBE = [
   'conditional: it goes ahead only while the row\'s status is one of the listed texts ("" for no status at all),',
   'and otherwise the action ends skipped, writing nothing — the form for work that mirrors another system and',
   'must never move a row out of a column it does not own. A conditional request never merges with another.',
+  'A status that starts the work on an issue also assigns the person filing it, in an issue.assignees filed',
+  'beside it.',
 ].join(' ');
 
 /** Writes single-select values on an issue's board row and reads them back. */
@@ -56,6 +58,10 @@ export class SetFieldsKind implements ActionKind {
   issueRefOf(payload: unknown): IssueRef | null {
     const parsed = this.payloadSchema.parse(payload);
     return IssueRef.of(parsed.repo, parsed.issue);
+  }
+
+  statusAskedFor(payload: unknown): string | null {
+    return this.payloadSchema.parse(payload).fields.status ?? null;
   }
 
   /**

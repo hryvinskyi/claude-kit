@@ -6,9 +6,11 @@ import { RefusedByRule } from '../domain/errors.ts';
 import type { IssueRef } from '../domain/issue-ref.ts';
 import type { ActionKind } from '../domain/kinds/action-kind.ts';
 import type { KindRegistry } from '../domain/kinds/registry.ts';
+import type { StartOfWork } from '../domain/start-of-work.ts';
 import { catalogWarnings } from './catalog-warnings.ts';
 import { isRecord } from './json-values.ts';
 import type { ActionRepository, Clock } from './ports.ts';
+import type { LocalIdentity } from './sync-ports.ts';
 
 export type EnqueueRequest = {
   kind: string;
@@ -42,6 +44,11 @@ export type EnqueueOutcome = {
   state: ActionState;
   /** What the board, as it was last read, says about the values that were asked for. */
   warnings: string[];
+  /**
+   * Set when the request starts the work on an issue: the assignment filed beside
+   * it, for the person who filed it.
+   */
+  assignment?: { id: string; login: string };
 };
 
 /**
@@ -63,12 +70,22 @@ const FURTHEST_AHEAD_DAYS = 30;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** The kind that assigns people, which a start of work is filed as. */
+const ASSIGNEES_KIND = 'issue.assignees';
+
+/** An App's login, which GitHub never assigns an issue to. */
+const BOT_LOGIN = /\[bot\]$/;
+
 export type EnqueueActionDeps = {
   repository: ActionRepository;
   kinds: KindRegistry;
   /** Which repositories may be filed against, and which board carries each. */
   directory: BoardDirectory;
   clock: Clock;
+  /** Which statuses start the work on an issue; none unless the deployment names them. */
+  startOfWork?: StartOfWork;
+  /** Who is filing: the person a start of work is assigned to. */
+  identity?: LocalIdentity;
 };
 
 /**
@@ -84,15 +101,33 @@ export class EnqueueAction {
   readonly #kinds: KindRegistry;
   readonly #directory: BoardDirectory;
   readonly #clock: Clock;
+  readonly #startOfWork: StartOfWork | null;
+  readonly #identity: LocalIdentity | null;
 
   constructor(deps: EnqueueActionDeps) {
     this.#repository = deps.repository;
     this.#kinds = deps.kinds;
     this.#directory = deps.directory;
     this.#clock = deps.clock;
+    this.#startOfWork = deps.startOfWork ?? null;
+    this.#identity = deps.identity ?? null;
   }
 
+  /**
+   * Files the request, and when it moves an issue into a status that starts the
+   * work, files the assignment of whoever filed it beside it: the person who
+   * started the work is the one the issue is assigned to. A request that was
+   * already filed under its dedupe key files nothing more.
+   */
   async execute(request: EnqueueRequest): Promise<EnqueueOutcome> {
+    const outcome = await this.#file(request);
+    if (outcome.duplicateOf !== undefined) {
+      return outcome;
+    }
+    return this.#withStarterAssigned(request, outcome);
+  }
+
+  async #file(request: EnqueueRequest): Promise<EnqueueOutcome> {
     const now = this.#clock.now();
     const notBefore = this.#checkedDelay(request.notBefore ?? null, now);
     const draft = draftAction(this.#kinds, this.#directory, { ...request, notBefore }, now);
@@ -125,6 +160,50 @@ export class EnqueueAction {
       }
     }
     return { id: action.id, state: action.state, warnings };
+  }
+
+  /**
+   * The outcome with the starter's assignment filed beside it, when the request
+   * starts the work on an issue. The assignment waits exactly as the request does,
+   * so a held move never assigns anybody before it is released. A login that
+   * cannot be read, or an App's, is said in a warning rather than guessed.
+   */
+  async #withStarterAssigned(request: EnqueueRequest, outcome: EnqueueOutcome): Promise<EnqueueOutcome> {
+    const start = this.#startOf(request);
+    if (start === null || this.#identity === null) {
+      return outcome;
+    }
+    const login = await this.#identity.login();
+    if (login === null || BOT_LOGIN.test(login)) {
+      const who = login === null ? 'no GitHub login can be read on this machine' : `${login} is an App`;
+      return {
+        ...outcome,
+        warnings: [...outcome.warnings, `this starts the work on ${start.toString()}, but ${who}, so nobody is assigned`],
+      };
+    }
+    const filed = await this.#file({
+      kind: ASSIGNEES_KIND,
+      payload: { repo: start.repoFullName(), issue: start.number, add: [login] },
+      origin: request.origin,
+      hold: request.hold,
+      notBefore: request.notBefore ?? null,
+    });
+    return { ...outcome, assignment: { id: filed.id, login } };
+  }
+
+  /** The issue whose work this request starts, or null when it starts none. */
+  #startOf(request: EnqueueRequest): IssueRef | null {
+    if (this.#startOfWork === null) {
+      return null;
+    }
+    const kind = this.#kinds.get(request.kind);
+    const payload: unknown = kind.payloadSchema.parse(request.payload);
+    const status = kind.statusAskedFor(payload);
+    if (status === null || !this.#startOfWork.starts(status)) {
+      return null;
+    }
+    const ref = kind.issueRefOf(payload);
+    return ref === null ? null : this.#directory.canonical(ref);
   }
 
   /**

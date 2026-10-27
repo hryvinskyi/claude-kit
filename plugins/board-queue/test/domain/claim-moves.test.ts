@@ -37,10 +37,21 @@ describe('collapsing claim events', () => {
         lastKind: 'claimed',
         holder: 'bob',
         status: 'In Progress',
-        assign: ['bob'],
-        unassign: ['alice'],
+        assign: ['alice', 'bob'],
+        unassign: [],
       },
     ]);
+  });
+
+  it('leaves the person who started the work assigned when the claim is released', () => {
+    const [move] = collapseClaims([
+      claim(1, 'claimed', 12, 'alice'),
+      claim(2, 'released', 12, 'alice'),
+    ], STATUSES);
+
+    assert.equal(move?.status, 'Todo');
+    assert.deepEqual(move?.assign, ['alice']);
+    assert.deepEqual(move?.unassign, []);
   });
 
   it('assigns the new holder of a taken-over claim and unassigns the one it was taken from', () => {
@@ -58,11 +69,11 @@ describe('collapsing claim events', () => {
     });
   });
 
-  it('reads a release by an admin as a release', () => {
+  it('reads a release by an admin as a release, which leaves the assignee too', () => {
     const [move] = collapseClaims([claim(4, 'force_released', 12, 'alice')], STATUSES);
 
     assert.equal(move?.status, 'Todo');
-    assert.deepEqual(move?.unassign, ['alice']);
+    assert.deepEqual(move?.unassign, []);
   });
 
   it('moves a claim in review to the review status and back when the review ends', () => {
@@ -126,7 +137,8 @@ describe('who caused a claim event', () => {
 
     assert.equal(move?.causedBy, 'carol');
     assert.equal(move?.status, 'Todo');
-    assert.deepEqual(move?.unassign, ['alice']);
+    assert.deepEqual(move?.assign, ['alice']);
+    assert.deepEqual(move?.unassign, []);
   });
 });
 

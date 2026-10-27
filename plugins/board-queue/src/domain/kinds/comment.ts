@@ -33,6 +33,10 @@ export class CommentKind implements ActionKind {
     return IssueRef.of(parsed.repo, parsed.issue);
   }
 
+  statusAskedFor(): null {
+    return null;
+  }
+
   /** Merging two comments would silently drop one of them. */
   coalesce(_existing: unknown, _incoming: unknown): unknown {
     return null;

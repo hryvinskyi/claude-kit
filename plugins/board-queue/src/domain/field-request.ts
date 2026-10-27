@@ -35,11 +35,20 @@ export function namesRefusedStatus(status: string, refused: readonly string[]): 
  * the person is, rather than five minutes later in a worker log.
  */
 export function couldReachRefusedStatus(wanted: string, refused: readonly string[]): boolean {
+  return couldReachStatus(wanted, refused);
+}
+
+/**
+ * Whether a typed text could be matched to one of these statuses when it is
+ * written: the text is a prefix of the status, or the status of the text, both
+ * ignoring case. An empty text reaches nothing.
+ */
+export function couldReachStatus(wanted: string, statuses: readonly string[]): boolean {
   const name = wanted.trim().toLowerCase();
   if (name === '') {
     return false;
   }
-  return refused.some((candidate) => {
+  return statuses.some((candidate) => {
     const text = candidate.trim().toLowerCase();
     return text !== '' && (name.startsWith(text) || text.startsWith(name));
   });
