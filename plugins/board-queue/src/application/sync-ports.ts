@@ -60,18 +60,21 @@ export interface ClaimFeed {
 }
 
 /**
- * The claims of the member the token speaks for, as the job that ends finished
- * claims reads and ends them. Every call has a deadline; an answer the server
+ * The claims of the member the token speaks for, as the job that lets them go
+ * reads, narrows and ends them. Every call has a deadline; an answer the server
  * could not give is a `TransientFailure`.
  */
 export interface OwnClaims {
   /** The member the token speaks for, or null when it speaks for an integration rather than a person. */
   holder(): Promise<string | null>;
 
-  /** Every claim that member holds, live or stale, with the board status the server last heard for its issue. */
+  /** Every claim that member holds, live or stale, with where the server last heard its issue stands. */
   held(holder: string): Promise<HeldClaim[]>;
 
-  /** Completes the member's claim on the item: true when it ended, false when the member no longer held it. */
+  /** Gives up these areas of the member's claim on the item, which stays held: false when the member no longer held it. */
+  giveUpAreas(item: number, areas: readonly string[]): Promise<boolean>;
+
+  /** Completes the member's claim on the item, for good: false when the member no longer held it. */
   complete(item: number): Promise<boolean>;
 }
 

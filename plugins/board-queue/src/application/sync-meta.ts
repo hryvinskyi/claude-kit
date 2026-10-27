@@ -147,11 +147,13 @@ const FinishRunSchema = z.object({
   holder: z.string().nullable(),
   /** Claims that member held, live or stale. */
   held: Count,
+  /** The claims that gave their areas up and kept their items, by the item's outside reference, or its id. */
+  handedOn: z.array(z.string()).default([]),
   /** The claims completed, by the item's outside reference, or its id where it has none. */
   completed: z.array(z.string()),
-  /** Claims found finished whose holder no longer held them by the time they were completed. */
+  /** Claims whose holder no longer held them by the time they were narrowed or completed. */
   gone: Count,
-  /** Why the run ended nothing, when the token speaks for no person. */
+  /** Why the run let nothing go, when the token speaks for no person. */
   declined: z.string().nullable(),
   /** Why the run stopped short, when it did; what it had completed by then stands. */
   error: z.string().nullable(),
@@ -161,7 +163,7 @@ export type FinishRun = z.infer<typeof FinishRunSchema>;
 
 const SightingsSchema = z.record(
   z.string().regex(/^\d+$/),
-  z.object({ claimedAt: z.string(), boardStatus: z.string().nullable() }),
+  z.object({ claimedAt: z.string(), stage: z.enum(['working', 'handed-on', 'ended']) }),
 );
 
 /** Why a worker declined the jobs that run only in the owner's: its login could not be read, or it is somebody else. */

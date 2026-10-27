@@ -1,5 +1,6 @@
 import { BoardQueueError } from '../domain/errors.ts';
-import { finishedClaims } from '../domain/sync/finished-claims.ts';
+import { claimMoves } from '../domain/sync/finished-claims.ts';
+import type { HeldClaim, Sighting, StageStatuses } from '../domain/sync/finished-claims.ts';
 import type { FinishConfig, SyncConfig } from '../domain/sync-config.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { ActionRepository, Clock, Logger } from './ports.ts';
@@ -20,26 +21,25 @@ export type FinishClaimsDeps = {
 };
 
 /**
- * Ends the claims of this worker's own person whose work the board calls
- * finished: the issue moved into one of the configured statuses while the claim
- * was held. A person who moves a ticket on to QA has finished the code, and the
- * areas the claim holds are what keeps everybody else out of those files.
+ * Lets this worker's own person's claims go as the board moves their work on. A
+ * person who moves a ticket on to QA has finished the code, and the areas the claim
+ * holds are what keeps everybody else out of those files: the claim gives them up
+ * and keeps its item, so the work can be taken up again when QA sends it back. A
+ * ticket that is done, or closed, ends the claim for good.
  *
- * Each run reads the claims the member the token speaks for holds, compares the
- * status each issue shows with what the last run saw, completes the claims whose
- * issues moved into a finished status, and keeps what it saw for the next run.
- * The rule of what counts as finished is the domain's; this only reads, completes
- * and remembers.
+ * Each run reads the claims the member the token speaks for holds, compares how
+ * far each issue has gone with what the last run saw, narrows or completes the
+ * claims whose issues moved on, and keeps what it saw for the next run. What counts
+ * as a move is the domain's rule; this only reads, calls and remembers.
  *
- * A claim that cannot be completed this run keeps the sighting it had, so the next
- * run tries it again; one its holder no longer held is counted and forgotten. A
- * token that speaks for an integration rather than a person ends nothing, and
- * says so.
+ * A call that fails leaves the sighting the claim had, so the next run makes it
+ * again; a claim its holder no longer held is counted and forgotten. A token that
+ * speaks for an integration rather than a person lets nothing go, and says so.
  */
 export class FinishClaims {
   readonly #claims: OwnClaims;
   readonly #repository: ActionRepository;
-  readonly #finish: FinishConfig;
+  readonly #statuses: StageStatuses;
   readonly #clock: Clock;
   readonly #logger: Logger;
   readonly #sightingsKey: string;
@@ -47,7 +47,7 @@ export class FinishClaims {
   constructor(deps: FinishClaimsDeps) {
     this.#claims = deps.claims;
     this.#repository = deps.repository;
-    this.#finish = deps.finish;
+    this.#statuses = { handedOn: new Set(deps.finish.handOn), ended: new Set(deps.finish.complete) };
     this.#clock = deps.clock;
     this.#logger = deps.logger;
     this.#sightingsKey = finishSightingsKey(deps.sync.server, deps.sync.project);
@@ -58,6 +58,7 @@ export class FinishClaims {
       at: this.#clock.now().toISOString(),
       holder: null,
       held: 0,
+      handedOn: [],
       completed: [],
       gone: 0,
       declined: null,
@@ -67,10 +68,10 @@ export class FinishClaims {
       await this.#run(report);
     } catch (error) {
       report.error = error instanceof BoardQueueError ? error.describe() : describeUnknown(error);
-      this.#logger.warn('finished claims were not ended', { reason: report.error });
+      this.#logger.warn('claims were not let go', { reason: report.error });
     }
     await writeFinishRun(this.#repository, report);
-    this.#logger.info('finished claims ended', { ...report });
+    this.#logger.info('claims let go as the board moved their work on', { ...report });
     return report;
   }
 
@@ -78,34 +79,62 @@ export class FinishClaims {
     const holder = await this.#claims.holder();
     if (holder === null) {
       report.declined = 'the coordination server\'s token speaks for an integration, not a person, '
-        + 'so it holds no claims to end';
+        + 'so it holds no claims to let go';
       return;
     }
     report.holder = holder;
     const held = await this.#claims.held(holder);
     report.held = held.length;
-    const decision = finishedClaims(
-      held,
-      await readSightings(this.#repository, this.#sightingsKey),
-      new Set(this.#finish.statuses),
-    );
-    const seen = new Map(decision.seen);
+    const moves = claimMoves(held, await readSightings(this.#repository, this.#sightingsKey), this.#statuses);
+    const seen = new Map(moves.seen);
     try {
-      for (const claim of decision.finished) {
-        const named = claim.ref ?? String(claim.item);
-        if (await this.#claims.complete(claim.item)) {
-          report.completed.push(named);
-          this.#logger.info('a claim whose work the board calls finished was completed', {
-            item: named,
-            status: claim.boardStatus,
-          });
-        } else {
-          report.gone += 1;
-        }
-        seen.delete(claim.item);
+      for (const claim of moves.complete) {
+        await this.#settle(claim, () => this.#claims.complete(claim.item), report.completed, report, seen, null);
+      }
+      for (const claim of moves.handOn) {
+        await this.#settle(
+          claim,
+          () => this.#claims.giveUpAreas(claim.item, claim.areas),
+          report.handedOn,
+          report,
+          seen,
+          { claimedAt: claim.claimedAt, stage: 'handed-on' },
+        );
       }
     } finally {
       await writeSightings(this.#repository, this.#sightingsKey, seen);
+    }
+  }
+
+  /**
+   * Makes one call and records what came of it: the claim named in the report and
+   * its new sighting kept — none for a claim that ended — or, when its holder no
+   * longer held it, counted and forgotten.
+   */
+  async #settle(
+    claim: HeldClaim,
+    call: () => Promise<boolean>,
+    done: string[],
+    report: FinishReport,
+    seen: Map<number, Sighting>,
+    after: Sighting | null,
+  ): Promise<void> {
+    const named = claim.ref ?? String(claim.item);
+    if (!(await call())) {
+      report.gone += 1;
+      seen.delete(claim.item);
+      return;
+    }
+    done.push(named);
+    this.#logger.info('a claim was let go as the board moved its work on', {
+      item: named,
+      status: claim.boardStatus,
+      ended: after === null,
+    });
+    if (after === null) {
+      seen.delete(claim.item);
+    } else {
+      seen.set(claim.item, after);
     }
   }
 }

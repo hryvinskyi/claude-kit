@@ -29,6 +29,7 @@ export type CoordinationCall =
   | 'putItems'
   | 'holder'
   | 'held'
+  | 'giveUpAreas'
   | 'complete';
 
 /**
@@ -40,9 +41,11 @@ export class FakeCoordination implements ClaimFeed, WorkImport, OwnClaims {
   readonly calls: CoordinationCall[] = [];
   /** The items whose claims were completed, in order. */
   readonly completed: number[] = [];
+  /** The areas given up, by item, in order. */
+  readonly givenUp: [number, readonly string[]][] = [];
   /** The member the token speaks for; null for an integration's token. */
   tokenHolder: string | null = 'alice';
-  /** Items whose claims change hands between a listing and their completion, so the completion finds none. */
+  /** Items whose claims change hands between a listing and a call on them, so the call finds none. */
   readonly goneOnCompletion = new Set<number>();
   readonly batches: ImportBatch[] = [];
   readonly pagesAskedFrom: number[] = [];
@@ -147,6 +150,17 @@ export class FakeCoordination implements ClaimFeed, WorkImport, OwnClaims {
     return Promise.resolve([...this.#held.values()]
       .filter((claim) => claim.holder === holder)
       .map(({ holder: _holder, ...claim }) => claim));
+  }
+
+  giveUpAreas(item: number, areas: readonly string[]): Promise<boolean> {
+    this.#answer('giveUpAreas');
+    const claim = this.#held.get(item);
+    if (claim === undefined || claim.holder !== this.tokenHolder || this.goneOnCompletion.has(item)) {
+      return Promise.resolve(false);
+    }
+    this.#held.set(item, { ...claim, areas: claim.areas.filter((area) => !areas.includes(area)) });
+    this.givenUp.push([item, [...areas]]);
+    return Promise.resolve(true);
   }
 
   complete(item: number): Promise<boolean> {

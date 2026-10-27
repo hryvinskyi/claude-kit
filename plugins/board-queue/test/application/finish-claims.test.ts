@@ -13,28 +13,37 @@ import { SERVER, syncOf } from '../fixtures/sync.ts';
 const SYNC = syncOf();
 const SIGHTINGS = finishSightingsKey(SYNC.server, SYNC.project);
 const TAKEN = '2026-03-02T08:00:00Z';
+const AREAS = ['web:checkout', 'api:checkout'];
 
 function heldClaim(item: number, boardStatus: string | null, overrides: Partial<HeldClaim> = {}): HeldClaim {
-  return { item, ref: `gh:example-org/first-repo#${String(item)}`, claimedAt: TAKEN, boardStatus, inReview: false, ...overrides };
+  return {
+    item,
+    ref: `gh:example-org/first-repo#${String(item)}`,
+    claimedAt: TAKEN,
+    boardStatus,
+    closed: false,
+    areas: AREAS,
+    inReview: false,
+    ...overrides,
+  };
 }
 
 function harness() {
   const repository = new InMemoryActionRepository();
   const server = new FakeCoordination();
-  const logger = new RecordingLogger();
   const finish = new FinishClaims({
     claims: server,
     repository,
     sync: SYNC,
-    finish: { enabled: true, statuses: ['Ready for QA', 'Done'] },
+    finish: { enabled: true, handOn: ['Ready for QA'], complete: ['Done'] },
     clock: new FakeClock('2026-03-02T09:00:00.000Z'),
-    logger,
+    logger: new RecordingLogger(),
   });
-  return { repository, server, logger, finish };
+  return { repository, server, finish };
 }
 
-describe('ending the claims whose work the board calls finished', () => {
-  it('completes the claim of an issue moved on to QA since the last run, and leaves the rest held', async () => {
+describe('letting claims go as the board moves their work on', () => {
+  it('gives up the areas of a claim whose issue moved on to QA, keeping its item, and leaves the rest held', async () => {
     const { repository, server, finish } = harness();
     server.heldBy('alice', heldClaim(41, 'In Progress'))
       .heldBy('alice', heldClaim(42, 'In Progress'))
@@ -44,53 +53,70 @@ describe('ending the claims whose work the board calls finished', () => {
     server.heldBy('alice', heldClaim(41, 'Ready for QA')).heldBy('bob', heldClaim(43, 'Ready for QA'));
     const report = await finish.execute();
 
-    assert.deepEqual(server.completed, [41], 'bob\'s claim is left to bob\'s worker');
-    assert.deepEqual(report.completed, ['gh:example-org/first-repo#41']);
+    assert.deepEqual(server.givenUp, [[41, AREAS]], 'bob\'s claim is left to bob\'s worker');
+    assert.deepEqual(server.completed, [], 'the item stays held, so the work can be taken up again');
+    assert.deepEqual(report.handedOn, ['gh:example-org/first-repo#41']);
     assert.equal(report.holder, 'alice');
     assert.equal(report.held, 2);
-    assert.deepEqual([...(await readSightings(repository, SIGHTINGS)).keys()], [42]);
+    assert.deepEqual((await readSightings(repository, SIGHTINGS)).get(41), { claimedAt: TAKEN, stage: 'handed-on' });
     assert.deepEqual(await readFinishRun(repository), report);
   });
 
-  it('ends nothing the first time it sees a claim, so work taken up again after QA stays held', async () => {
+  it('completes the claim once its issue is done or closed, after its areas were given up', async () => {
+    const { repository, server, finish } = harness();
+    server.heldBy('alice', heldClaim(41, 'In Progress')).heldBy('alice', heldClaim(42, 'In Progress'));
+    await finish.execute();
+    server.heldBy('alice', heldClaim(41, 'Ready for QA'));
+    await finish.execute();
+
+    server.heldBy('alice', heldClaim(41, 'Done', { areas: [] }))
+      .heldBy('alice', heldClaim(42, 'In Progress', { closed: true }));
+    const report = await finish.execute();
+
+    assert.deepEqual(server.completed, [41, 42]);
+    assert.deepEqual(report.completed, ['gh:example-org/first-repo#41', 'gh:example-org/first-repo#42']);
+    assert.equal((await readSightings(repository, SIGHTINGS)).size, 0);
+  });
+
+  it('lets nothing go the first time it sees a claim, so work taken up again after QA keeps its areas', async () => {
     const { server, finish } = harness();
     server.heldBy('alice', heldClaim(41, 'Ready for QA'));
 
     await finish.execute();
     const again = await finish.execute();
 
-    assert.deepEqual(server.completed, []);
-    assert.deepEqual(again.completed, []);
+    assert.deepEqual(server.givenUp, []);
+    assert.deepEqual(again.handedOn, []);
   });
 
-  it('counts a finished claim its holder let go of in the meantime, and forgets it', async () => {
+  it('counts a claim its holder let go of in the meantime, and forgets it', async () => {
     const { repository, server, finish } = harness();
     server.heldBy('alice', heldClaim(41, 'In Progress'));
     await finish.execute();
-    server.heldBy('alice', heldClaim(41, 'Done')).goneOnCompletion.add(41);
+    server.heldBy('alice', heldClaim(41, 'Ready for QA')).goneOnCompletion.add(41);
 
     const report = await finish.execute();
 
-    assert.deepEqual(report.completed, []);
+    assert.deepEqual(report.handedOn, []);
     assert.equal(report.gone, 1);
     assert.equal((await readSightings(repository, SIGHTINGS)).size, 0);
   });
 
-  it('tries a completion the server could not answer again at the next run', async () => {
+  it('makes a call the server could not answer again at the next run', async () => {
     const { server, finish } = harness();
     server.heldBy('alice', heldClaim(41, 'In Progress'));
     await finish.execute();
-    server.heldBy('alice', heldClaim(41, 'Ready for QA')).fail('complete', new TransientFailure('the server did not answer'));
+    server.heldBy('alice', heldClaim(41, 'Ready for QA')).fail('giveUpAreas', new TransientFailure('the server did not answer'));
 
     const failed = await finish.execute();
     const retried = await finish.execute();
 
     assert.match(failed.error ?? '', /did not answer/);
-    assert.deepEqual(retried.completed, ['gh:example-org/first-repo#41']);
-    assert.deepEqual(server.completed, [41]);
+    assert.deepEqual(retried.handedOn, ['gh:example-org/first-repo#41']);
+    assert.deepEqual(server.givenUp, [[41, AREAS]]);
   });
 
-  it('ends nothing on a token that speaks for an integration, and says so', async () => {
+  it('lets nothing go on a token that speaks for an integration, and says so', async () => {
     const { server, finish } = harness();
     server.tokenHolder = null;
 

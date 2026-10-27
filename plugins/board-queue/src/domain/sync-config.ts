@@ -40,21 +40,33 @@ export const MirrorConfigSchema = z
   .strict();
 
 /**
- * Ending a person's claims once the board says their work is finished: when an
- * issue moves into one of `statuses` while its holder's claim is held, that
- * holder's worker completes the claim, so its areas are free for the next
- * person. It runs in every person's worker, for the claims of the member its token
- * speaks for, and never for a claim waiting in review, which the merge of its pull
- * request ends.
+ * Letting a person's claims go as the board moves their work on. When an issue
+ * moves into a `handOn` status while its holder's claim is held, that holder's
+ * worker gives up the claim's areas and keeps the item, so the files are free and
+ * the work can still be taken up again; when it moves into a `complete` status, or
+ * the issue is closed, the claim is completed. It runs in every person's worker,
+ * for the claims of the member its token speaks for, and never for a claim waiting
+ * in review, which the merge of its pull request ends.
  */
 export const FinishConfigSchema = z
   .object({
     /** Off unless a deployment turns it on. */
     enabled: z.boolean().default(false),
-    /** The board's statuses that mean the work of a claim is finished, such as waiting for QA, or done. */
-    statuses: z.array(z.string().trim().min(1)).min(1),
+    /** The board's statuses that hand the work on, such as waiting for QA: the claim gives its areas up. */
+    handOn: z.array(z.string().trim().min(1)).default([]),
+    /**
+     * The board's statuses that end the work, such as done: the claim is completed.
+     * A completed item can never be claimed again, so name only statuses no work comes back from.
+     */
+    complete: z.array(z.string().trim().min(1)).default([]),
   })
-  .strict();
+  .strict()
+  .refine((finish) => finish.handOn.length > 0 || finish.complete.length > 0, {
+    message: 'name the statuses that hand the work on, or those that end it',
+  })
+  .refine((finish) => !finish.handOn.some((status) => finish.complete.includes(status)), {
+    message: 'a status either hands the work on or ends it, not both',
+  });
 
 /** Severity prefixes and the priority each stands for; the coordination server's own default is 2. */
 const DEFAULT_PRIORITIES: Record<string, number> = { S1: 0, S2: 1, S3: 2, S4: 3 };
@@ -156,7 +168,7 @@ export const DibsTokenSourceSchema = z.discriminatedUnion('from', [
 
 /**
  * What this worker keeps in step with a coordination server: claims there moving
- * rows here, rows moved into a finished status ending claims there, and the
+ * rows here, rows moved on to QA or done letting claims there go, and the
  * board's open work and what blocks it reported there.
  *
  * The importer and the forge jobs copy one system's state onto another on the

@@ -63,17 +63,23 @@ const ClaimedItems = z.object({
     id: z.number().int().positive(),
     ref: z.string().nullable(),
     source_status: z.string().nullable().optional(),
+    closed: z.boolean().default(false),
   })),
 });
 
 const ItemWithClaim = z.object({
-  claim: z.object({ holder: z.string(), claimed_at: z.string(), state: z.string() }).nullable(),
+  claim: z.object({
+    holder: z.string(),
+    claimed_at: z.string(),
+    state: z.string(),
+    areas: z.array(z.string()).default([]),
+  }).nullable(),
 });
 
 /** The role of a token that speaks for an integration worker rather than a person. */
 const INTEGRATION_ROLE = 'importer';
 
-/** The refusals of a completion that mean the member no longer holds the claim: nothing is left to end. */
+/** The refusals of a narrowing or a completion that mean the member no longer holds the claim. */
 const NO_LONGER_HELD = new Set(['no_claim', 'not_holder']);
 
 const ImportAnswerSchema = z.object({
@@ -134,7 +140,7 @@ function isClaimKind(kind: string): kind is ClaimEventKind {
 /**
  * The coordination server, as the mirror and the importer reach it: its event
  * log, its members, its items, and the import of the board's work; and, for the
- * job that ends finished claims, the claims of the member its token speaks for.
+ * job that lets claims go, the claims of the member its token speaks for.
  *
  * Its answers are a foreign model and stop here: an event's payload is read into
  * the claim events the mirror understands, member ids become handles, and every
@@ -209,9 +215,9 @@ export class DibsHttpClient implements ClaimFeed, WorkImport, OwnClaims {
   }
 
   /**
-   * The member's claimed items carry the board status the importer last reported;
-   * each claim's moment and state is read from its item, and an item whose claim
-   * changed hands in between is left out.
+   * The member's claimed items carry the board status the importer last reported
+   * and whether the tracker closed them; each claim's moment, state and areas are
+   * read from its item, and an item whose claim changed hands in between is left out.
    */
   async held(holder: string): Promise<HeldClaim[]> {
     const subject = `the claims of ${holder}`;
@@ -234,10 +240,22 @@ export class DibsHttpClient implements ClaimFeed, WorkImport, OwnClaims {
         ref: item.ref,
         claimedAt: claim.claimed_at,
         boardStatus: item.source_status ?? null,
+        closed: item.closed,
+        areas: claim.areas,
         inReview: claim.state === 'in_review',
       });
     }
     return held;
+  }
+
+  async giveUpAreas(item: number, areas: readonly string[]): Promise<boolean> {
+    const subject = `the narrowing of the claim on the work item ${String(item)}`;
+    const answer = await this.#http.call('POST', `/v1/items/${String(item)}/claim/narrow`, subject, { areas: [...areas] });
+    if (answer.code !== null && NO_LONGER_HELD.has(answer.code)) {
+      return false;
+    }
+    this.#http.ok(answer, subject);
+    return true;
   }
 
   async complete(item: number): Promise<boolean> {

@@ -236,7 +236,7 @@ switches the scheduled pass off (it is on by default); `board-queue audit` still
 
 A [dibs](https://github.com/hryvinskyi/dibs) server knows who is working on what: people claim work items there,
 and its event log records every claim. The `dibs` section of the configuration keeps a set of repositories in
-step with one of its projects, in both directions — claims move rows, and rows moved on to QA end claims:
+step with one of its projects, in both directions — claims move rows, and rows moved on to QA or done let claims go:
 
 ```json
 "dibs": {
@@ -251,7 +251,7 @@ step with one of its projects, in both directions — claims move rows, and rows
     "status": { "claimed": "In Progress", "released": "Todo", "review": "In Review" },
     "assignees": true
   },
-  "finish": { "enabled": true, "statuses": ["Ready for QA", "Done"] },
+  "finish": { "enabled": true, "handOn": ["Ready for QA"], "complete": ["Done"] },
   "importer": { "enabled": true, "modules": { "Checkout": ["checkout"] } }
 }
 ```
@@ -353,28 +353,34 @@ backstop against filing one state twice. Each item's reference is asked once and
 cannot be read is passed over, counted in `status`, and the page goes on. A server that cannot be reached is
 recorded in `status` and the queue is drained regardless.
 
-**Finished claims** (board → server) end the claims whose work the board calls finished. A claim holds its areas
+**Letting claims go** (board → server) frees the areas of work the board has moved on. A claim holds its areas
 until it ends, and a merge of a pull request recorded on it is the only thing that ends it on its own: work pushed
 without one — or one whose ticket simply moved on to QA — keeps everybody else out of those files until its holder
-remembers to complete it. With `finish` on, every person's worker does that for its own person:
+remembers to let them go. With `finish` on, every person's worker does that for its own person, in two steps:
 
 ```json
-"finish": { "enabled": true, "statuses": ["Ready for QA", "Done"] }
+"finish": { "enabled": true, "handOn": ["Ready for QA"], "complete": ["Done"] }
 ```
+
+A move into a `handOn` status means the code is written: the claim gives up all its areas
+(`POST /v1/items/{id}/claim/narrow`) and **keeps its item**, so the files are free and the holder can take the
+areas up again — claim the item once more, which renews the claim — when QA sends the work back. A move into a
+`complete` status, or the issue's close, means nothing more will be written: the claim is completed
+(`POST /v1/items/{id}/done`). Completing is for good — a completed item can never be claimed again — so `complete`
+names only statuses no work comes back from.
 
 Each tick, after the mirror, the worker asks the server who its token speaks for (`GET /v1/me`), lists that
 member's claimed items (`GET /v1/items?status=claimed&holder=…`) with the board status the importer last reported
-for each, reads each claim (`GET /v1/items/{id}`), and completes (`POST /v1/items/{id}/done`) every claim whose issue
-**moved** into one of `statuses` since the previous tick saw it. A move counts, not a status: a claim first seen on
-an issue that already shows a finished status is work taken up again after QA sent it back, and it stays held until
-its holder ends it. Each claim is told from an earlier one on the same item by the moment it was taken, so a claim
-taken again starts with no history. A claim in review is left to the merge of its pull request. What each tick saw
-is kept in the worker's own queue; a completion the server could not answer is tried again at the next tick, and
-one the member no longer held is counted and forgotten. It runs in every worker, does not wait for `mirrorOwner`,
-and asks GitHub nothing; a token that speaks for an integration rather than a person ends nothing and says so.
-The board status is only as fresh as the last import (every `everyMinutes`, in the owner's worker), so a claim ends
-within one import and one tick of its issue's move. `status` says what the last run ended (`finished claims … — 3
-held by alice, ended gh:example-org/example-repo#41`).
+and whether the issue is closed, and reads each claim (`GET /v1/items/{id}`). A **move** counts, not a status: a
+claim first seen on an issue that already waits for QA is work taken up again after QA sent it back, and it keeps
+its areas until its holder lets them go. Each claim is told from an earlier one on the same item by the moment it
+was taken, so a claim taken again starts with no history. A claim in review is left to the merge of its pull
+request. What each tick saw is kept in the worker's own queue; a call the server could not answer is made again at
+the next tick, and a claim the member no longer held is counted and forgotten. It runs in every worker, does not
+wait for `mirrorOwner`, and asks GitHub nothing; a token that speaks for an integration rather than a person lets
+nothing go and says so. The board status is only as fresh as the last import (every `everyMinutes`, in the owner's
+worker), so a claim is let go within one import and one tick of its issue's move. `status` says what the last run
+did (`claims let go … — 3 held by alice, gave their areas up gh:example-org/example-repo#42, none completed`).
 
 **The importer** (board → server) runs after the queue is drained, at most every `everyMinutes` (15) and only
 while the GraphQL allowance is above `minRemaining` (1000). It walks each board that carries a repository kept

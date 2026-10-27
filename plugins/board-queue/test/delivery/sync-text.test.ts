@@ -22,7 +22,7 @@ const VIEW: SyncView = {
   owner: 'alice',
   ownerJobs: ['mirror'],
   mirror: { enabled: true, scope: 'all', lastRun: null },
-  finish: { enabled: false, statuses: [], lastRun: null },
+  finish: { enabled: false, handOn: [], complete: [], lastRun: null },
   importer: { enabled: false, lastRun: null },
   forge: { enabled: false, lastRun: null },
   refused: null,
@@ -52,39 +52,44 @@ const FINISH_RUN = {
   at: '2026-03-02T09:00:00.000Z',
   holder: 'alice',
   held: 3,
+  handedOn: ['gh:example-org/first-repo#42'],
   completed: ['gh:example-org/first-repo#41'],
   gone: 1,
   declined: null,
   error: null,
 };
 
-describe('ending finished claims on a terminal', () => {
-  it('says at which statuses claims end, what the last run ended, and what one tick ended', () => {
+describe('letting claims go on a terminal', () => {
+  it('says at which statuses claims let go, what the last run let go, and what one tick did', () => {
     const lines = syncStatusLines({
       ...VIEW,
-      finish: { enabled: true, statuses: ['Ready for QA', 'Done'], lastRun: FINISH_RUN },
+      finish: { enabled: true, handOn: ['Ready for QA'], complete: ['Done'], lastRun: FINISH_RUN },
     });
 
     assert.deepEqual(lines, [
-      'in step with https://dibs.example.com (widgets): mirror on · finished claims ended at Ready for QA / Done '
-        + '· importer off · forge off · only in alice\'s worker',
-      'finished claims 2026-03-02T09:00:00.000Z — 3 held by alice, ended gh:example-org/first-repo#41, 1 no longer held',
+      'in step with https://dibs.example.com (widgets): mirror on · claims let go (areas given up at Ready for QA, '
+        + 'completed at Done) · importer off · forge off · only in alice\'s worker',
+      'claims let go 2026-03-02T09:00:00.000Z — 3 held by alice, gave their areas up gh:example-org/first-repo#42, '
+        + 'completed gh:example-org/first-repo#41, 1 no longer held',
     ]);
     const tick: WorkerReport = { ...QUIET_TICK, sync: { finish: FINISH_RUN } };
-    assert.ok(tickLines(tick).includes('finished claims: 1 ended'));
+    assert.ok(tickLines(tick).includes('claims let go: 1 gave their areas up · 1 completed'));
   });
 
-  it('says why a worker whose token speaks for an integration ends nothing', () => {
+  it('says why a worker whose token speaks for an integration lets nothing go', () => {
     const lines = syncStatusLines({
       ...VIEW,
       finish: {
         enabled: true,
-        statuses: ['Done'],
-        lastRun: { ...FINISH_RUN, holder: null, held: 0, completed: [], gone: 0, declined: 'the token speaks for an integration' },
+        handOn: [],
+        complete: ['Done'],
+        lastRun: { ...FINISH_RUN, holder: null, held: 0, handedOn: [], completed: [], gone: 0,
+          declined: 'the token speaks for an integration' },
       },
     });
 
-    assert.equal(lines[1], 'finished claims 2026-03-02T09:00:00.000Z — ends nothing here: the token speaks for an integration');
+    assert.equal(lines[0]?.includes('claims let go (completed at Done)'), true);
+    assert.equal(lines[1], 'claims let go 2026-03-02T09:00:00.000Z — nothing here: the token speaks for an integration');
   });
 });
 

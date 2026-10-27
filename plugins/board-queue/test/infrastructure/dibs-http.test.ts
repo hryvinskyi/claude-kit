@@ -251,20 +251,24 @@ describe('the claims of the member the token speaks for', () => {
   it('reads each claimed item\'s board status and its claim, and leaves out one that changed hands', async () => {
     const { dibs, fetcher } = client([
       { body: { items: [
-        { id: 41, ref: 'gh:acme/widgets#7', title: 'Refunds', status: 'claimed', source_status: 'Ready for QA' },
-        { id: 42, ref: null, title: 'Local', status: 'claimed', source_status: null },
+        { id: 41, ref: 'gh:acme/widgets#7', title: 'Refunds', status: 'claimed', source_status: 'Ready for QA', closed: false },
+        { id: 42, ref: null, title: 'Local', status: 'claimed', source_status: null, closed: true },
         { id: 43, ref: 'gh:acme/widgets#9', title: 'Taken over', status: 'claimed' },
         { id: 44, ref: 'gh:acme/widgets#10', title: 'Gone', status: 'claimed' },
       ] } },
-      { body: { item: { id: 41 }, claim: { holder: 'alice', claimed_at: '2026-03-02T08:00:00Z', state: 'working' } } },
+      { body: { item: { id: 41 }, claim: {
+        holder: 'alice', claimed_at: '2026-03-02T08:00:00Z', state: 'working', areas: ['web:billing'],
+      } } },
       { body: { item: { id: 42 }, claim: { holder: 'alice', claimed_at: '2026-03-02T08:10:00Z', state: 'in_review' } } },
       { body: { item: { id: 43 }, claim: { holder: 'bob', claimed_at: '2026-03-02T08:20:00Z', state: 'working' } } },
       { status: 404, body: { error: { code: 'not_found', message: 'No such item.' } } },
     ]);
 
     assert.deepEqual(await dibs.held('alice'), [
-      { item: 41, ref: 'gh:acme/widgets#7', claimedAt: '2026-03-02T08:00:00Z', boardStatus: 'Ready for QA', inReview: false },
-      { item: 42, ref: null, claimedAt: '2026-03-02T08:10:00Z', boardStatus: null, inReview: true },
+      { item: 41, ref: 'gh:acme/widgets#7', claimedAt: '2026-03-02T08:00:00Z', boardStatus: 'Ready for QA',
+        closed: false, areas: ['web:billing'], inReview: false },
+      { item: 42, ref: null, claimedAt: '2026-03-02T08:10:00Z', boardStatus: null, closed: true, areas: [],
+        inReview: true },
     ]);
     assert.equal(fetcher.calls[0]?.url, `${SERVER}/v1/items?status=claimed&holder=alice`);
     assert.equal(fetcher.calls[1]?.url, `${SERVER}/v1/items/41`);
@@ -285,6 +289,19 @@ describe('the claims of the member the token speaks for', () => {
       error instanceof TransientFailure && /403 \(forbidden\)/.test(error.describe()));
     assert.equal(fetcher.calls[0]?.method, 'POST');
     assert.equal(fetcher.calls[0]?.url, `${SERVER}/v1/items/41/done`);
+  });
+
+  it('gives up a claim\'s areas with the item kept, and answers that none was held when the member holds none', async () => {
+    const { dibs, fetcher } = client([
+      { body: { claim: { item: 41, holder: 'alice', areas: [] }, item: { id: 41 }, areas: ['web:billing'], handed_over: [] } },
+      { status: 409, body: { error: { code: 'no_claim', message: 'You hold no claim on it.' } } },
+    ]);
+
+    assert.equal(await dibs.giveUpAreas(41, ['web:billing']), true);
+    assert.equal(await dibs.giveUpAreas(41, ['web:billing']), false);
+    assert.equal(fetcher.calls[0]?.method, 'POST');
+    assert.equal(fetcher.calls[0]?.url, `${SERVER}/v1/items/41/claim/narrow`);
+    assert.deepEqual(fetcher.calls[0]?.body, { areas: ['web:billing'] });
   });
 });
 

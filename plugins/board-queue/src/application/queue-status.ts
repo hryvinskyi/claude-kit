@@ -78,8 +78,8 @@ export type SyncView = {
   /** The jobs switched on that run only in the owner's worker. */
   ownerJobs: OwnerJob[];
   mirror: { enabled: boolean; scope: MirrorScope; lastRun: MirrorRun | null };
-  /** Ending this worker's own person's claims whose work the board calls finished. */
-  finish: { enabled: boolean; statuses: string[]; lastRun: FinishRun | null };
+  /** Letting this worker's own person's claims go as the board moves their work on. */
+  finish: { enabled: boolean; handOn: string[]; complete: string[]; lastRun: FinishRun | null };
   importer: { enabled: boolean; lastRun: ImportRun | null };
   forge: { enabled: boolean; lastRun: ForgeRun | null };
   refused: SyncRefusal | null;
@@ -203,7 +203,8 @@ export class QueueStatus {
       mirror: { enabled: sync.mirror?.enabled === true, scope: sync.mirror?.scope ?? 'all', lastRun: mirrorRun },
       finish: {
         enabled: sync.finish?.enabled === true,
-        statuses: [...(sync.finish?.statuses ?? [])],
+        handOn: [...(sync.finish?.handOn ?? [])],
+        complete: [...(sync.finish?.complete ?? [])],
         lastRun: finishRun,
       },
       importer: { enabled: sync.importer.enabled, lastRun: importRun },

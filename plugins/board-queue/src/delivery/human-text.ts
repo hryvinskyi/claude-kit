@@ -146,18 +146,27 @@ export function syncStatusLines(sync: SyncView): string[] {
   return lines;
 }
 
-/** What the last run that ends finished claims did, when there was one. */
+/** What the last run that lets claims go did, when there was one. */
 function finishLines(run: FinishRun | null): string[] {
   if (run === null) {
     return [];
   }
   if (run.declined !== null) {
-    return [`finished claims ${run.at} — ends nothing here: ${run.declined}`];
+    return [`claims let go ${run.at} — nothing here: ${run.declined}`];
   }
-  const ended = run.completed.length === 0 ? 'none ended' : `ended ${run.completed.join(', ')}`;
-  return [`finished claims ${run.at} — ${String(run.held)} held by ${run.holder ?? 'nobody'}, ${ended}`
+  const named = (claims: readonly string[], what: string): string =>
+    (claims.length === 0 ? `none ${what}` : `${what} ${claims.join(', ')}`);
+  return [`claims let go ${run.at} — ${String(run.held)} held by ${run.holder ?? 'nobody'}, `
+    + `${named(run.handedOn, 'gave their areas up')}, ${named(run.completed, 'completed')}`
     + (run.gone > 0 ? `, ${String(run.gone)} no longer held` : '')
     + (run.error === null ? '' : ` — stopped: ${run.error}`)];
+}
+
+/** At which statuses claims give their areas up, and at which they are completed. */
+function finishWords(finish: SyncView['finish']): string {
+  const at = (statuses: readonly string[], what: string): string[] =>
+    (statuses.length === 0 ? [] : [`${what} at ${statuses.join(' / ')}`]);
+  return [...at(finish.handOn, 'areas given up'), ...at(finish.complete, 'completed')].join(', ');
 }
 
 /** What a mirror of one person's moves did with the moves that were not that person's. */
@@ -180,7 +189,7 @@ function jobsLine(sync: SyncView): string {
   const on = (enabled: boolean): string => (enabled ? 'on' : 'off');
   const ownMoves = sync.mirror.enabled && sync.mirror.scope === 'own';
   const mirror = ownMoves ? 'on, each person\'s own moves' : on(sync.mirror.enabled);
-  const finish = sync.finish.enabled ? ` · finished claims ended at ${sync.finish.statuses.join(' / ')}` : '';
+  const finish = sync.finish.enabled ? ` · claims let go (${finishWords(sync.finish)})` : '';
   const jobs = `mirror ${mirror}${finish} · importer ${on(sync.importer.enabled)} · forge ${on(sync.forge.enabled)}`;
   if (!ownMoves) {
     return `${jobs} · only in ${sync.owner}'s worker`;
@@ -278,9 +287,9 @@ function syncTickLines(sync: SyncTickReport): string[] {
   const finish = sync.finish;
   if (finish !== undefined) {
     lines.push('skipped' in finish
-      ? `finished claims: skipped — ${finish.skipped}`
-      : `finished claims: ${String(finish.completed.length)} ended`
-        + (finish.declined === null ? '' : ` · ends nothing here: ${finish.declined}`)
+      ? `claims let go: skipped — ${finish.skipped}`
+      : `claims let go: ${String(finish.handedOn.length)} gave their areas up · ${String(finish.completed.length)} completed`
+        + (finish.declined === null ? '' : ` · nothing here: ${finish.declined}`)
         + (finish.error === null ? '' : ` · stopped: ${finish.error}`));
   }
   const imported = sync.import;

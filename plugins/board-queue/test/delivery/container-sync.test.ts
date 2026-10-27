@@ -160,14 +160,21 @@ describe('a worker that keeps the board in step, on a real queue file', () => {
     assert.match(status.sync?.refused?.reason ?? '', /runs as bob/);
   });
 
-  it('ends its own person\'s claims whose issues moved on to QA, on a worker that is not the owner', async (t) => {
+  it('gives up its own person\'s areas when the issue moves on to QA, on a worker that is not the owner', async (t) => {
     const it_ = world('bob-gh');
     it_.coordination.tokenHolder = 'bob';
-    const held = { item: 45, ref: 'gh:example-org/first-repo#13', claimedAt: '2026-03-02T08:00:00Z', inReview: false };
+    const held = {
+      item: 45,
+      ref: 'gh:example-org/first-repo#13',
+      claimedAt: '2026-03-02T08:00:00Z',
+      closed: false,
+      areas: ['web:checkout'],
+      inReview: false,
+    };
     it_.coordination.heldBy('bob', { ...held, boardStatus: 'In Progress' });
     const config = ConfigSchema.parse({
       ...syncConfig,
-      dibs: { ...syncConfig.dibs, finish: { enabled: true, statuses: ['Ready for QA'] } },
+      dibs: { ...syncConfig.dibs, finish: { enabled: true, handOn: ['Ready for QA'], complete: ['Done'] } },
     });
     const container = containerFor(t, config, it_.overrides);
 
@@ -177,9 +184,10 @@ describe('a worker that keeps the board in step, on a real queue file', () => {
     const status = await container.status.execute();
 
     assert.equal(report.sync?.refusal, 'not-the-owner', 'the owner\'s jobs are left to alice\'s worker');
-    assert.deepEqual(it_.coordination.completed, [45]);
-    assert.deepEqual(status.sync?.finish.lastRun?.completed, ['gh:example-org/first-repo#13']);
-    assert.ok(statusLines(status).some((line) => line.includes('finished claims ended at Ready for QA')));
+    assert.deepEqual(it_.coordination.givenUp, [[45, ['web:checkout']]]);
+    assert.deepEqual(it_.coordination.completed, [], 'the item stays held, so QA can send the work back');
+    assert.deepEqual(status.sync?.finish.lastRun?.handedOn, ['gh:example-org/first-repo#13']);
+    assert.ok(statusLines(status).some((line) => line.includes('claims let go (areas given up at Ready for QA')));
   });
 
   it('builds nothing that reaches the server while both directions are off', async (t) => {
