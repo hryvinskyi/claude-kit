@@ -36,9 +36,12 @@ Rules (each has cases in tests.sh):
          `gh issue|pr|project|search ...`, `gh repo view`, `gh release list`
          and `gh api graphql`, which bill the GraphQL allowance the whole
          account shares; the refusal names the REST form
-  mysql  mysql, mariadb, `ddev mysql`, `ddev exec mysql` executing (via -e or
+  sql    mysql, mariadb, mysqlsh, psql, `ddev mysql|psql`, `ddev exec <client>`
+         (also `ddev exec "<client> ..."`) executing (via -e / -c / --command or
          an earlier segment of the same pipeline) DROP DATABASE/SCHEMA/TABLE,
-         TRUNCATE, or DELETE FROM without WHERE
+         TRUNCATE, or DELETE FROM without WHERE; a DROP DATABASE of a name
+         ending in _test or _test<digits> is a rebuildable scratch database
+         and is let through
   ddev   `ddev delete` with --omit-snapshot / -O (drops the DB, no snapshot)
   curl   curl/wget sending a request body or upload (-d/--data*/--json/-F/-T/
          --upload-file, spaced, `=`-joined or attached as in `-d@f`/`-sd@f`;
@@ -613,34 +616,104 @@ def git_danger(argv, cwd):
     return None
 
 
-def is_mysql(argv):
+SQL_CLIENTS = ("mysql", "mariadb", "mysqlsh", "psql")
+DDEV_EXEC_VALUE_OPTIONS = ("-s", "--service", "-d", "--dir")
+PSQL_VALUE_OPTIONS = "dhUpfFoPRTvL"
+# A scratch database named *_test or *_test<digits> is rebuilt from migrations on every stack.
+TEST_DATABASE_DROP = re.compile(
+    r"\bDROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?[\"`]?\w*_test\d*[\"`]?"
+    r"(?:\s+(?:WITH\s*)?\(\s*FORCE\s*\))?\s*(?=;|$)",
+    re.I,
+)
+
+
+def sql_client(argv):
+    """Return (client, its argv) when the segment runs a SQL client, else None.
+
+    The client is one of mysql, mariadb, mysqlsh, psql, called directly, through
+    `ddev <client>`, or through `ddev exec` (program as separate words, or the whole
+    program line as one quoted string).
+    """
     name = os.path.basename(argv[0])
-    if name in ("mysql", "mariadb", "mysqlsh"):
-        return True
-    if name == "ddev" and len(argv) >= 2 and argv[1] == "mysql":
-        return True
-    if name == "ddev" and len(argv) >= 3 and argv[1] == "exec" and os.path.basename(argv[2]) in ("mysql", "mariadb"):
-        return True
-    return False
+    if name in SQL_CLIENTS:
+        return name, argv
+    if name != "ddev" or len(argv) < 2:
+        return None
+    if argv[1] in ("mysql", "psql"):
+        return argv[1], argv[1:]
+    if argv[1] != "exec":
+        return None
+    rest = argv[2:]
+    k = 0
+    while k < len(rest) and rest[k].startswith("-"):
+        k += 2 if rest[k] in DDEV_EXEC_VALUE_OPTIONS else 1
+    rest = rest[k:]
+    if len(rest) == 1:
+        try:
+            rest = shlex.split(rest[0])
+        except ValueError:
+            rest = rest[0].split()
+    if rest and os.path.basename(rest[0]) in SQL_CLIENTS:
+        return os.path.basename(rest[0]), rest
+    return None
 
 
-def mysql_danger(pipeline):
+def mysql_statements(argv):
+    sql = []
+    for j, a in enumerate(argv):
+        if a in ("-e", "--execute") and j + 1 < len(argv):
+            sql.append(argv[j + 1])
+        elif a.startswith("--execute="):
+            sql.append(a.split("=", 1)[1])
+        elif a.startswith("-e") and len(a) > 2 and not a.startswith("--"):
+            sql.append(a[2:])
+    return sql
+
+
+def psql_statements(argv):
+    """Collect the text of every -c / --command, including `-Atc SQL` and `-cSQL`.
+
+    A short group is read left to right as getopt does: `c` takes the rest of the group
+    (or the next word) as its value, and a value-taking option swallows the rest.
+    """
+    sql = []
+    j = 1
+    while j < len(argv):
+        a = argv[j]
+        if a == "--command" and j + 1 < len(argv):
+            sql.append(argv[j + 1])
+            j += 1
+        elif a.startswith("--command="):
+            sql.append(a.split("=", 1)[1])
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            for i, ch in enumerate(a[1:], start=1):
+                if ch == "c":
+                    if a[i + 1:]:
+                        sql.append(a[i + 1:])
+                    elif j + 1 < len(argv):
+                        sql.append(argv[j + 1])
+                        j += 1
+                    break
+                if ch in PSQL_VALUE_OPTIONS:
+                    if not a[i + 1:]:
+                        j += 1
+                    break
+        j += 1
+    return sql
+
+
+def sql_danger(pipeline):
     for k, argv in enumerate(pipeline):
-        if not is_mysql(argv):
+        found = sql_client(argv)
+        if found is None:
             continue
-        sql = []
-        for j, a in enumerate(argv):
-            if a in ("-e", "--execute") and j + 1 < len(argv):
-                sql.append(argv[j + 1])
-            elif a.startswith("--execute="):
-                sql.append(a.split("=", 1)[1])
-            elif a.startswith("-e") and len(a) > 2 and not a.startswith("--"):
-                sql.append(a[2:])
+        client, client_argv = found
+        sql = psql_statements(client_argv) if client == "psql" else mysql_statements(client_argv)
         for prev in pipeline[:k]:
             sql.extend(prev[1:])
         for s in sql:
-            if DANGEROUS_SQL.search(s):
-                return "destructive SQL (DROP DATABASE/TABLE, TRUNCATE, or DELETE without WHERE) sent to MySQL. Take a snapshot/backup and ask the user."
+            if DANGEROUS_SQL.search(TEST_DATABASE_DROP.sub("", s)):
+                return "destructive SQL (DROP DATABASE/TABLE, TRUNCATE, or DELETE without WHERE) sent to a database. Take a snapshot/backup and ask the user."
     return None
 
 
@@ -906,7 +979,7 @@ def check(cmd, cwd, transcript_path=""):
                 why = baseline_danger(argv, cwd)
             if why:
                 return why
-        why = mysql_danger(segments)
+        why = sql_danger(segments)
         if why:
             return why
     return write_danger(cmd, start, transcript_path)
