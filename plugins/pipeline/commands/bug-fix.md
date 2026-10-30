@@ -44,6 +44,7 @@ With `--dry-run`, report Phase 1 and stop.
 - The regression test passes. **Revert the fix once and confirm the test goes red again** when the fix was more than a line or two — a test that passes with and without the fix guards nothing.
 - **Discover and run the project's gates** — `composer.json`/`package.json` scripts, Makefile, CI workflow, DDEV/Docker wrapper — targeted first (the touched tests, static analysis on the touched files at the project's level), then the full set the project requires before a push, run the way the project says to run it. A gate that does not exist is reported as absent, not as green.
 - When the symptom was visible in a browser or an API response, look at it there too (`/run`, the browser tools, `curl`). A green suite is not the same as a symptom that is gone.
+- **The review.** Run `/pipeline:review` on the fix (the Skill tool: `pipeline:review`), with the issue's expected behaviour and the Phase 1 mechanism paragraph as its claims. A fix is a change like any other, and the fixes that came back from human review were the ones whose twin input stayed unbounded, whose test pinned nothing, whose message was rewritten on one screen and not the next, or whose listener ran before the commit that held the lock. Fix what it confirms before Phase 5; a finding it moves to a ticket is named in the report.
 
 ## Phase 5 — Close the loop
 

@@ -24,7 +24,7 @@
     {
       "name": "pipeline",
       "source": "./plugins/pipeline",
-      "description": "Plan, review and implement features: the feature and bug-fix commands, the devils-advocate reviewer, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents."
+      "description": "Plan, review and implement features: the feature, review and bug-fix commands, the devils-advocate plan reviewer, the fresh-context code-reviewer, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents."
     },
     {
       "name": "qa",
