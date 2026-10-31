@@ -8,7 +8,7 @@ rules (`CLAUDE.md`/`AGENTS.md`, its gates, its layout) and follows them.
 |---|---|---|
 | `architecture` | Clean Architecture, onion-at-module-altitude, SOLID and DDD rubrics, with review and plan formats, an implementer's cut and detection recipes, in words that name no framework | skills `architecture:clean-architecture-php` (PHP), `architecture:clean-architecture-js` (JavaScript, TypeScript, React, Node, and the browser code a server-rendered application ships) |
 | stack plugins: `symfony`, `magento2` | The same rubrics in one framework's idiom: where each piece goes, how the container wires it, what its templates hand the browser, detection recipes in its spelling. Install the one your project runs on | skills `<stack>:<stack>-architecture-php` and `<stack>:<stack>-architecture-frontend`, loaded beside the core ones; see each plugin's README |
-| `pipeline` | A feature pipeline that plans and verifies on the main model and delegates each task to an implementer, an adversarial plan reviewer, a code review that sizes its passes to the change (fresh-context reviewers by lens, every finding verified, one fix batch, a delta pass over the fixes; the project's rules from its `REVIEW.md`), a bug-fix loop that starts from a failing test, and an eval harness that regression-tests the agents | commands `/pipeline:feature`, `/pipeline:review`, `/pipeline:bug-fix`, `/pipeline:explain`, `/pipeline:learn`, `/pipeline:update-codemaps`, `/pipeline:agent-evals`; agents `pipeline:devils-advocate`, `pipeline:code-reviewer`, `pipeline:feature-implementer`, `pipeline:feature-contract-writer` |
+| `pipeline` | A feature pipeline sized to the change (S, M or L decides the plan, the reviewers, the models and the effort) that plans and verifies on the main model and delegates each task to an implementer, an adversarial plan reviewer, a code review that sizes its passes to the change (fresh-context reviewers by lens, every finding verified, one fix batch, a delta pass over the fixes; the project's rules from its `REVIEW.md`), a bug-fix loop that starts from a failing test, and an eval harness that regression-tests the agents | commands `/pipeline:feature`, `/pipeline:review`, `/pipeline:bug-fix`, `/pipeline:explain`, `/pipeline:learn`, `/pipeline:update-codemaps`, `/pipeline:agent-evals`; agents `pipeline:devils-advocate`, `pipeline:code-reviewer`, `pipeline:feature-implementer`, `pipeline:feature-contract-writer`; `pipeline-decide` on the Bash path |
 | `qa` | A text tightener | skill `qa:tighten` |
 | `guards` | Hooks that refuse catastrophic shell commands, PHP and JS/TS source or plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and hand edits inside generated regions, and lint each edited PHP file | hooks only: `PreToolUse` on `Edit\|Write` and `Bash`, `PostToolUse` on `Edit\|Write`; see [plugins/guards/README.md](plugins/guards/README.md) |
 | `vault` | A project knowledge vault beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index, git merge drivers for its busiest files | commands `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync`; agent `vault:wiki-updater`; hooks on `SessionStart`, `SessionEnd`, `Stop`; `find-vault`, `vault-check`, `vault-capture`, `vault-search`, `vault-merge` on the Bash path |
@@ -99,10 +99,42 @@ picks up a new version.
 A scheduled job, a git hook or a project's script cannot see a plugin's `bin/`, and a path into the
 plugin cache moves on every update. `bin/install-shims.sh [CLONE]` writes small shims into
 `~/.local/bin` (or `$SHIM_DIR`) — `board-queue`, `board-queue-mcp`, `find-vault`, `vault-check`,
-`vault-capture`, `vault-search`, `vault-merge` — each running the copy in the clone. It is idempotent,
+`vault-capture`, `vault-search`, `vault-merge`, `pipeline-decide` — each running the copy in the clone. It is idempotent,
 re-points the shims when run from another clone, never replaces a file or a link it did not write,
 and `--check` reports without writing. `--plugins vault,…` limits it to the shims of those plugins. Callers outside Claude Code use those paths; git's merge-driver
 configuration names the `vault-merge` shim.
+
+## The decision model
+
+`pipeline-decide` asks a decision model — an endpoint serving the systemone API, which answers typed
+questions with probabilities instead of prose — three things for the pipeline: the size of a change
+before `/pipeline:feature` plans it, the project's `REVIEW.md` items over a diff beside the
+`/pipeline:review` wave, and whether the test and gate output supports the claims of a finished report. Its
+answers are proposals and leads; the session settles every uncertain one by reading the code, and
+answers the same questions itself when the model is off. It is off until you name an endpoint, in the
+`env` of your Claude Code settings:
+
+```json
+{ "env": { "CLAUDE_KIT_DECISION_URL": "https://jev-ai.pro/api" } }
+```
+
+A project switches it off for itself by setting the variable to `""` in its own
+`.claude/settings.json`, and `CLAUDE_KIT_DECISION_KINDS` narrows what may be asked (`size`, `rules`,
+`done`; `size` alone sends no code). `CLAUDE_KIT_DECISION_MODEL` picks the model (`jev-latest` by
+default). The key goes in `~/.claude/secrets/decision-model.env` (mode 600), never in a settings file,
+beside the base it belongs to:
+
+```sh
+DECISION_MODEL_URL=https://jev-ai.pro/api
+DECISION_MODEL_API_KEY=sk_jev-ai_…
+```
+
+The key is sent only to that base, so an endpoint a project's settings name never receives it; an
+endpoint on this machine needs none and is reached without a proxy. A hosted endpoint is paid for by
+whoever holds the key, and receives what is asked: the session's summary of the request and its facts,
+the change's diff, the claims and their evidence (test and gate output, `git diff --stat`). Before sending, the diff loses the files whose name or
+content looks like a credential, and every other text but the review files' own items has the values
+of secret-looking lines withheld — a net, not a guarantee. `pipeline-decide status` says what is set and whether the key would be sent.
 
 ## Agent evals
 
@@ -166,6 +198,7 @@ sections inline (every rule would load twice) or imports a standards file from a
 ```sh
 python3 -m unittest discover -s tests       # the installer, in a fake home with stand-ins for claude, npm and node
 python3 -m unittest discover -s bin/tests   # the command shims
+python3 -m unittest discover -s plugins/pipeline/tests   # pipeline-decide, against a fake endpoint
 plugins/vault/tests/tests.sh                # the vault plugin, its merge drivers and their wiring
 plugins/guards/hooks/tests.sh               # the guard hooks
 npm --prefix plugins/board-queue test       # the board queue (after npm ci)

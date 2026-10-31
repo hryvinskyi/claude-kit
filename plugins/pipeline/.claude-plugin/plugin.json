@@ -1,7 +1,7 @@
 {
   "name": "pipeline",
-  "version": "0.2.0",
-  "description": "Plan, review and implement features: the feature, review and bug-fix commands, the devils-advocate plan reviewer, the fresh-context code-reviewer, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents.",
+  "version": "0.3.0",
+  "description": "Plan, review and implement features: the feature pipeline sized to the change, the review and bug-fix commands, pipeline-decide for an optional decision model, the devils-advocate plan reviewer, the fresh-context code-reviewer, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents.",
   "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
   "repository": "https://github.com/hryvinskyi/claude-kit",
   "license": "MIT",

@@ -21,7 +21,8 @@ from pathlib import Path
 KIT = Path(__file__).resolve().parent.parent.parent
 QUEUE_SHIMS = ("board-queue", "board-queue-mcp")
 VAULT_SHIMS = ("find-vault", "vault-check", "vault-capture", "vault-search", "vault-merge")
-SHIMS = QUEUE_SHIMS + VAULT_SHIMS
+PIPELINE_SHIMS = ("pipeline-decide",)
+SHIMS = QUEUE_SHIMS + VAULT_SHIMS + PIPELINE_SHIMS
 
 
 def fake_clone(where: Path) -> Path:
@@ -31,6 +32,7 @@ def fake_clone(where: Path) -> Path:
     for name in ("install-shims.sh", "shim.sh.template"):
         shutil.copy2(KIT / "bin" / name, clone / "bin" / name)
     shutil.copytree(KIT / "plugins" / "vault" / "bin", clone / "plugins" / "vault" / "bin")
+    shutil.copytree(KIT / "plugins" / "pipeline" / "bin", clone / "plugins" / "pipeline" / "bin")
     for part in ("bin", "lib"):
         shutil.copytree(KIT / "plugins" / "board-queue" / part, clone / "plugins" / "board-queue" / part)
     (clone / "plugins" / "board-queue" / "node_modules").mkdir()
@@ -86,6 +88,9 @@ class InstallShimsTests(unittest.TestCase):
         merged = self.run_shim("vault-merge", "selfcheck", str(board))
         self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
         self.assertIn("identical", merged.stdout)
+        listed = self.run_shim("pipeline-decide", "questions", "size")
+        self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+        self.assertIn('"seam"', listed.stdout)
 
     def test_the_queue_shims_reach_the_queue_entry_points_in_the_clone(self) -> None:
         self.install()

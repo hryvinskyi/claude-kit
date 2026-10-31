@@ -26,7 +26,8 @@ PLUGINS = ["architecture", "pipeline", "qa", "guards", "vault", "board-queue"]
 STACK_PLUGINS = ["symfony", "magento2"]
 QUEUE_SHIMS = ["board-queue", "board-queue-mcp"]
 VAULT_SHIMS = ["find-vault", "vault-check", "vault-capture", "vault-search", "vault-merge"]
-SHIMS = QUEUE_SHIMS + VAULT_SHIMS
+PIPELINE_SHIMS = ["pipeline-decide"]
+SHIMS = QUEUE_SHIMS + VAULT_SHIMS + PIPELINE_SHIMS
 
 NPM = """#!/bin/sh
 # npm ci --prefix DIR …: leaves the hidden lockfile a real install writes, and logs the call.
@@ -332,7 +333,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         for name in VAULT_SHIMS:
             self.assertTrue(os.access(self.home / ".local" / "bin" / name, os.X_OK), name)
-        for name in QUEUE_SHIMS:
+        for name in QUEUE_SHIMS + PIPELINE_SHIMS:
             self.assertFalse(os.path.lexists(self.home / ".local" / "bin" / name), name)
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
         self.assertIn("RESULT: everything is installed.", checked.stdout)

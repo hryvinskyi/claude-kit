@@ -55,6 +55,7 @@ SHIMS=(
   "vault-capture:plugins/vault/bin/vault-capture"
   "vault-search:plugins/vault/bin/vault-search"
   "vault-merge:plugins/vault/bin/vault-merge"
+  "pipeline-decide:plugins/pipeline/bin/pipeline-decide"
 )
 
 FAILED=0
