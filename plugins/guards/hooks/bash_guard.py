@@ -9,10 +9,13 @@ The command is parsed, not pattern-matched. It is split into pipelines on
 `;`, `&&`, `||`, `&` and newlines, each pipeline into segments on `|`, and
 each segment into argv with shlex. Redirections are taken out of argv --
 the operator, an fd number glued to it and its target -- so `2>&1` or
-`> log` is never read as an argument. Rules look at argv[0] and its arguments,
-so a commit message or an `echo` that merely mentions a dangerous command
-passes. `cd` segments are tracked so relative targets and bare pushes are
-judged from the directory the command will actually run in.
+`> log` is never read as an argument. Leading VAR=val assignments and wrappers
+(sudo, doas, env, nohup, time, nice, command, exec, and flock <options>
+<lockfile>, whose `-c '<line>'` is read as `sh -c`) are taken off first.
+Rules look at argv[0] and its arguments, so a commit message or an `echo`
+that merely mentions a dangerous command passes. `cd` segments are tracked so
+relative targets and bare pushes are judged from the directory the command
+will actually run in.
 
 Rules (each has cases in tests.sh):
   rm     recursive + force whose target resolves to /, $HOME, a /Volumes
@@ -36,10 +39,15 @@ Rules (each has cases in tests.sh):
          `gh issue|pr|project|search ...`, `gh repo view`, `gh release list`
          and `gh api graphql`, which bill the GraphQL allowance the whole
          account shares; the refusal names the REST form
-  sql    mysql, mariadb, mysqlsh, psql, `ddev mysql|psql`, `ddev exec <client>`
-         (also `ddev exec "<client> ..."`) executing (via -e / -c / --command or
-         an earlier segment of the same pipeline) DROP DATABASE/SCHEMA/TABLE,
-         TRUNCATE, or DELETE FROM without WHERE; a DROP DATABASE of a name
+  sql    mysql, mariadb, mysqlsh, psql or `ddev mysql|psql` executing (via -e /
+         -c / --command, or the stdin an earlier segment of the pipeline feeds
+         it) DROP DATABASE/SCHEMA/TABLE, TRUNCATE, or DELETE FROM without WHERE.
+         A command line a segment hands to a shell is read the same way, with
+         its own pipelines, assignments and wrappers, down to four lines deep:
+         the words of `ddev exec [-s|-d <value>] ...` (joined, as ddev joins
+         them for the container's shell, so `ddev exec "cd x && psql ..."` and
+         `ddev exec "echo ... | psql"` count; and as given), and the text of
+         `sh|bash|zsh|dash [options] -c '<line>'`. A DROP DATABASE of a name
          ending in _test or _test<digits> is a rebuildable scratch database
          and is let through
   ddev   `ddev delete` with --omit-snapshot / -O (drops the DB, no snapshot)
@@ -83,12 +91,39 @@ import re
 import shlex
 import subprocess
 import sys
+from typing import NamedTuple
 from urllib.parse import urlparse
+
+
+class Wrapper(NamedTuple):
+    """How a command that runs another program reaches it."""
+
+    value_options: frozenset  # its options that take the next word as their value
+    operands: int = 0  # the words it reads after its options and before the program
+    shell_options: frozenset = frozenset()  # an option here, after the operands, runs the rest with `sh -c`
+
 
 PROTECTED = {"main", "master", "develop", "production"}
 LOCAL_BRANCH_PROTECTED = {"main", "master"}
-WRAPPERS = {"sudo", "doas", "command", "exec", "nohup", "time", "nice", "env"}
-WRAPPER_FLAGS_WITH_VALUE = {"-u", "-g", "-n", "-C", "-h", "-p"}
+WRAPPERS = {
+    # sudo's -h takes only an attached host (`-hhost`); alone it is --help
+    "sudo": Wrapper(frozenset({
+        "-a", "--auth-type", "-C", "--close-from", "-c", "--login-class", "-D", "--chdir",
+        "-g", "--group", "-p", "--prompt", "-R", "--chroot", "-r", "--role", "-T",
+        "--command-timeout", "-t", "--type", "-U", "--other-user", "-u", "--user",
+    })),
+    "doas": Wrapper(frozenset({"-a", "-C", "-u"})),
+    "command": Wrapper(frozenset()),
+    "exec": Wrapper(frozenset({"-a"})),
+    "nohup": Wrapper(frozenset()),
+    "time": Wrapper(frozenset({"-f", "--format", "-o", "--output"})),
+    "nice": Wrapper(frozenset({"-n", "--adjustment"})),
+    "env": Wrapper(frozenset({
+        "-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-a", "--argv0", "-P",
+    })),
+    "flock": Wrapper(frozenset({"-w", "--timeout", "--wait", "-E", "--conflict-exit-code"}), 1,
+                     frozenset({"-c", "--command"})),
+}
 PIPELINE_SEPARATORS = {";", "&&", "||", "&", "(", ")", ";;"}
 SEGMENT_SEPARATORS = {"|", "|&"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -289,20 +324,43 @@ def pipelines(cmd):
     return result
 
 
+def option_words(word, value_options):
+    """How many words an option takes, its value included, read as getopt reads it.
+
+    A long option takes the next word when it is a value option written without `=`. In a
+    short group (`-Eu`, `-nw`) the first letter that takes a value takes the rest of the
+    group (`-upostgres`), or the next word when it ends the group.
+    """
+    if word.startswith("--"):
+        return 2 if word in value_options else 1
+    for k, letter in enumerate(word[1:], start=1):
+        if "-" + letter in value_options:
+            return 1 if word[k + 1:] else 2
+    return 1
+
+
 def strip_wrappers(argv):
-    """Drop leading VAR=val assignments and sudo/env/nohup-style wrappers."""
+    """Drop leading VAR=val assignments and wrappers (sudo, env, nohup, flock <options> <lockfile>, ...).
+
+    A wrapper's own options are skipped, each value option with its value, then its operands.
+    When one of its shell options follows (`flock <lockfile> -c '<line>'`), the program that
+    runs is a shell reading that line, and `sh -c '<line>'` is returned.
+    """
     i = 0
     while i < len(argv):
         tok = argv[i]
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
             i += 1
             continue
-        if os.path.basename(tok) in WRAPPERS:
-            i += 1
-            while i < len(argv) and argv[i].startswith("-"):
-                i += 2 if argv[i] in WRAPPER_FLAGS_WITH_VALUE else 1
-            continue
-        break
+        wrapper = WRAPPERS.get(os.path.basename(tok))
+        if wrapper is None:
+            break
+        i += 1
+        while i < len(argv) and argv[i].startswith("-"):
+            i += option_words(argv[i], wrapper.value_options)
+        i += wrapper.operands
+        if i < len(argv) and argv[i] in wrapper.shell_options:
+            return ["sh", "-c", *argv[i + 1:]]
     return argv[i:]
 
 
@@ -616,9 +674,13 @@ def git_danger(argv, cwd):
     return None
 
 
-SQL_CLIENTS = ("mysql", "mariadb", "mysqlsh", "psql")
 DDEV_EXEC_VALUE_OPTIONS = ("-s", "--service", "-d", "--dir")
 PSQL_VALUE_OPTIONS = "dhUpfFoPRTvL"
+SHELLS = ("sh", "bash", "zsh", "dash")
+# Shell options whose value is the next word: `-o pipefail`, `+O extglob`, `--rcfile <file>`
+SHELL_OPTIONS_WITH_VALUE = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+# How deep the SQL rule reads command lines nested inside command lines; a deeper one is not read
+SHELL_NESTING_LIMIT = 4
 # A scratch database named *_test or *_test<digits> is rebuilt from migrations on every stack.
 TEST_DATABASE_DROP = re.compile(
     r"\bDROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?[\"`]?\w*_test\d*[\"`]?"
@@ -630,32 +692,58 @@ TEST_DATABASE_DROP = re.compile(
 def sql_client(argv):
     """Return (client, its argv) when the segment runs a SQL client, else None.
 
-    The client is one of mysql, mariadb, mysqlsh, psql, called directly, through
-    `ddev <client>`, or through `ddev exec` (program as separate words, or the whole
-    program line as one quoted string).
+    The client is one of mysql, mariadb, mysqlsh, psql, called directly or through
+    `ddev mysql|psql`.
     """
     name = os.path.basename(argv[0])
-    if name in SQL_CLIENTS:
+    if name in SQL_STATEMENTS:
         return name, argv
-    if name != "ddev" or len(argv) < 2:
-        return None
-    if argv[1] in ("mysql", "psql"):
+    if name == "ddev" and len(argv) > 1 and argv[1] in ("mysql", "psql"):
         return argv[1], argv[1:]
-    if argv[1] != "exec":
-        return None
-    rest = argv[2:]
-    k = 0
-    while k < len(rest) and rest[k].startswith("-"):
-        k += 2 if rest[k] in DDEV_EXEC_VALUE_OPTIONS else 1
-    rest = rest[k:]
-    if len(rest) == 1:
-        try:
-            rest = shlex.split(rest[0])
-        except ValueError:
-            rest = rest[0].split()
-    if rest and os.path.basename(rest[0]) in SQL_CLIENTS:
-        return os.path.basename(rest[0]), rest
     return None
+
+
+def shell_command_lines(argv):
+    """The pipelines of `sh|bash|zsh|dash [options] -c '<text>'`; none when the shell runs a script or stdin.
+
+    `-c` may sit in a group of short options (`-lc`, `-ec`); the text is the first word
+    after the options.
+    """
+    command, j = False, 1
+    while j < len(argv):
+        a = argv[j]
+        if a in SHELL_OPTIONS_WITH_VALUE:
+            j += 2
+        elif len(a) > 1 and a[0] in "-+":
+            command = command or (a[0] == "-" and not a.startswith("--") and "c" in a[1:])
+            j += 1
+        else:
+            return pipelines(a) if command else []
+    return []
+
+
+def ddev_exec_lines(argv):
+    """The command lines `ddev exec [its options] <words>` runs in the container; none for another ddev command.
+
+    ddev joins the words with spaces and hands them to the container's shell, so the joined
+    text is read as a command line: a quoted `ddev exec "cd x && psql ..."` is the pipelines
+    it holds. Words given separately are read a second time as one command with their
+    quoting intact, the form the person meant.
+    """
+    if len(argv) < 2 or argv[1] != "exec":
+        return []
+    words, k = argv[2:], 0
+    while k < len(words) and words[k].startswith("-"):
+        k += 2 if words[k] in DDEV_EXEC_VALUE_OPTIONS else 1
+    words = words[k:]
+    if not words:
+        return []
+    lines = pipelines(" ".join(words))
+    return lines + [[words]] if len(words) > 1 else lines
+
+
+# The command lines a program hands to a shell, by program name: argv -> list of pipelines
+NESTED_LINES = {**{shell: shell_command_lines for shell in SHELLS}, "ddev": ddev_exec_lines}
 
 
 def mysql_statements(argv):
@@ -702,16 +790,40 @@ def psql_statements(argv):
     return sql
 
 
-def sql_danger(pipeline):
+# Each SQL client and the reader of the statements its arguments execute
+SQL_STATEMENTS = {
+    "mysql": mysql_statements,
+    "mariadb": mysql_statements,
+    "mysqlsh": mysql_statements,
+    "psql": psql_statements,
+}
+
+
+def sql_danger(pipeline, fed=(), depth=0):
+    """Block destructive SQL sent to a database client, in the pipeline or in a command line it runs.
+
+    A client executes its -e/-c text and what reaches its stdin: the words of the earlier
+    segments, and `fed`, the words an enclosing pipeline sends into this one. A command line
+    a segment hands to a shell (`ddev exec`, `sh -c`) is read the same way, its commands'
+    assignments and wrappers taken off, while `depth` is under the nesting limit.
+
+    @param pipeline argv segments, wrappers already taken off
+    @param fed      words an enclosing pipeline feeds into this one
+    @param depth    how many command lines enclose this one
+    """
     for k, argv in enumerate(pipeline):
+        piped = [*fed, *(word for prev in pipeline[:k] for word in prev[1:])]
+        nested = NESTED_LINES.get(os.path.basename(argv[0]))
+        if nested is not None and depth < SHELL_NESTING_LIMIT:
+            for line in nested(argv):
+                why = sql_danger([s for s in map(strip_wrappers, line) if s], piped, depth + 1)
+                if why:
+                    return why
         found = sql_client(argv)
         if found is None:
             continue
         client, client_argv = found
-        sql = psql_statements(client_argv) if client == "psql" else mysql_statements(client_argv)
-        for prev in pipeline[:k]:
-            sql.extend(prev[1:])
-        for s in sql:
+        for s in SQL_STATEMENTS[client](client_argv) + piped:
             if DANGEROUS_SQL.search(TEST_DATABASE_DROP.sub("", s)):
                 return "destructive SQL (DROP DATABASE/TABLE, TRUNCATE, or DELETE without WHERE) sent to a database. Take a snapshot/backup and ask the user."
     return None
