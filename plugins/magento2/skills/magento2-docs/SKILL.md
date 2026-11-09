@@ -99,9 +99,13 @@ The words Magento's own documentation uses, so the guide matches the screens the
   User Guide gives the task: **System** > **Tools** > **Cache Management**, select the invalidated
   types, choose **Refresh** in the actions list and submit. Never tell a store admin to run a
   command.
-- **Access for a colleague.** **System** > **Permissions** > **User Roles**, open the role,
-  **Role Resources**, set **Resource Access** to **Custom**, select the module's resources by their
-  titles from `acl.xml`, **Save Role**.
+- **Access for a colleague.** **System** > **Permissions** > **User Roles**, open the colleague's
+  role, **Role Resources**, select the module's resources by their titles from `acl.xml` (a role at
+  **Resource Access** **All** has them already), then **Role Info** > **Your Password**, and
+  **Save Role**. Saving a role or an integration asks for the admin's password, so a step list
+  that leaves it out fails at its last step. An admin account has one role: moving a colleague to
+  a new role takes the old role's permissions away, and **Role Users** appears only once a role is
+  saved.
 - **Commands** (technical documents only). Always `bin/magento`, never `php bin/magento` or
   `magento`; run from the Magento root, stated once in the block's title; no prompt; full option
   names; production-only commands marked with a trailing comment. The install sequence:
@@ -114,6 +118,11 @@ The words Magento's own documentation uses, so the guide matches the screens the
   bin/magento setup:static-content:deploy -f  # production mode only
   bin/magento cache:flush
   ```
+
+  `module:enable` also names every module the module requires that is not part of Magento (its
+  `module.xml` `<sequence>`, and the `composer.json` packages that are modules). Magento refuses
+  to enable a module while one it requires is disabled, and on a fresh install a new dependency
+  is not enabled yet.
 
 - **Configuration paths** (technical only): `section/group/field` exactly as in `system.xml`, after
   the label: **Label Position** (`catalog_labels/general/position`). `bin/magento config:set` takes
@@ -163,7 +172,9 @@ On top of the core skill's conditions:
   or Developer Guide.
 - **Installation Guide:** every cron job, queue consumer, indexer and cache type the module relies
   on is named with how to check it runs; uninstall lists the tables of `db_schema.xml`, the
-  configuration paths and any data the patches wrote; the requirements match `composer.json`.
+  configuration paths and any data the patches wrote, and every store-wide setting the setup
+  changed; the requirements match `composer.json`, and `module:enable` names the module's
+  dependencies that are not part of Magento.
 - **Developer Guide:** every `@api` interface, `webapi.xml` route, GraphQL operation, CLI command and
   event the module dispatches is in the reference; every extension point has a recipe showing its
   `di.xml` registration.
