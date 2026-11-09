@@ -79,9 +79,15 @@ is. A reader who cannot see the image still has the words.
 
 - One screenshot per screen the reader must find their way around, not one per step.
 - Taken from a real instance with realistic but invented data. Never a screenshot holding real
-  customer data, an e-mail address, an order of a real person, a key or a password.
-- A fixed browser width for the whole guide, cropped to the part that matters; the same theme and
-  language as the guide.
+  customer data, an e-mail address, an order of a real person, a key or a password: blur a key or a
+  token the screen shows, and say so in the caption.
+- **Mostly the whole screen**, at one window size for the whole guide (for example 1440 × 900), so
+  the reader sees at a glance where the section sits: the menu, the page title, the tabs around it.
+  Scroll the part the step needs into view rather than cropping to it. Crop only for a detail too
+  small to read on a full screen, and then the caption says where on the page it is.
+- The same theme and language as the guide. Hide what another module adds that the reader will not
+  have (a button, a column of a module the product does not need); never hide or change anything
+  the product itself shows.
 - Each image has a caption that says what it shows ("The Product Labels settings, with Enable
   Labels set to Yes"), which is also its alternative text.
 - Mark a control on the image only when the screen is crowded; the words still name it.

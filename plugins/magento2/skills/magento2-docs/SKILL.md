@@ -88,9 +88,10 @@ The words Magento's own documentation uses, so the guide matches the screens the
   **Save Config**.
 - **Menu paths** as bold labels joined by ` > `: **Stores** > **Settings** > **Configuration** >
   **Catalog** > **Product Labels**. Before a procedure, give the path once on its own line.
-- **Scopes.** The admin shows `[GLOBAL]`, `[WEBSITE]` or `[STORE VIEW]` beside each setting. In a
-  User Guide explain this once, in plain words ("a setting marked [STORE VIEW] can differ for each
-  store view"), and give the task of setting a value for one store: choose the store view in the
+- **Scopes.** The admin shows `[global]`, `[website]` or `[store view]` under each setting's label
+  (the source strings are upper case; the admin theme lowers them). In a User Guide explain this
+  once, in plain words ("a setting marked [store view] can differ for each store view"), and give
+  the task of setting a value for one store: choose the store view in the
   **Scope** switcher at the top of the page (its first entry is **Default Config**), clear the
   **Use Website** or **Use Default Value** checkbox beside the setting, change it, and click
   **Save Config**. At **Default Config** the checkbox reads **Use system value**.
