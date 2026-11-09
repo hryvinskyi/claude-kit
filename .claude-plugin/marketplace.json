@@ -4,7 +4,7 @@
     "name": "Volodymyr Hryvinskyi",
     "url": "https://github.com/hryvinskyi"
   },
-  "description": "Project-agnostic Claude Code plugins: architecture rubrics with a stack plugin per framework, a plan-review-implement pipeline with agent evals, QA skills, guard hooks, a project knowledge vault, and a paced queue for GitHub Projects boards.",
+  "description": "Project-agnostic Claude Code plugins: architecture rubrics with a stack plugin per framework, a plan-review-implement pipeline with agent evals, QA skills, documentation skills, guard hooks, a project knowledge vault, and a paced queue for GitHub Projects boards.",
   "plugins": [
     {
       "name": "architecture",
@@ -30,6 +30,11 @@
       "name": "qa",
       "source": "./plugins/qa",
       "description": "Quality skills: tighten shortens text without losing meaning."
+    },
+    {
+      "name": "docs",
+      "source": "./plugins/docs",
+      "description": "Documentation skills: an end-user guide for non-technical readers and technical documentation for developers and operators, written from the product, reviewed in a fresh context against a quality bar, updated by a staleness sweep."
     },
     {
       "name": "guards",

@@ -1,0 +1,9 @@
+{
+  "name": "docs",
+  "version": "0.1.0",
+  "description": "Documentation skills: an end-user guide for non-technical readers and technical documentation for developers and operators, each written from the product itself, reviewed in a fresh context against its own quality bar, and updated by a staleness sweep; a stack plugin adds where its framework keeps the facts.",
+  "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
+  "repository": "https://github.com/hryvinskyi/claude-kit",
+  "license": "MIT",
+  "keywords": ["documentation", "user-guide", "technical-writing", "diataxis"]
+}

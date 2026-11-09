@@ -10,6 +10,7 @@ rules (`CLAUDE.md`/`AGENTS.md`, its gates, its layout) and follows them.
 | stack plugins: `symfony`, `magento2` | The same rubrics in one framework's idiom: where each piece goes, how the container wires it, what its templates hand the browser, detection recipes in its spelling. Install the one your project runs on | skills `<stack>:<stack>-architecture-php` and `<stack>:<stack>-architecture-frontend`, loaded beside the core ones; see each plugin's README |
 | `pipeline` | A feature pipeline sized to the change (S, M or L decides the plan, the reviewers, the models and the effort) that plans and verifies on the main model and delegates each task to an implementer, an adversarial plan reviewer, a code review that sizes its passes to the change (fresh-context reviewers by lens, every finding verified, one fix batch, a delta pass over the fixes; the project's rules from its `REVIEW.md`), a bug-fix loop that starts from a failing test, and an eval harness that regression-tests the agents | commands `/pipeline:feature`, `/pipeline:review`, `/pipeline:bug-fix`, `/pipeline:explain`, `/pipeline:learn`, `/pipeline:update-codemaps`, `/pipeline:agent-evals`; agents `pipeline:devils-advocate`, `pipeline:code-reviewer`, `pipeline:feature-implementer`, `pipeline:feature-contract-writer`; `pipeline-decide` on the Bash path |
 | `qa` | A text tightener | skill `qa:tighten` |
+| `docs` | Documentation written from the product: an end-user guide in plain language for non-technical readers, and technical documentation (installation guide, developer guide, reference, migration notes) for developers and operators. Each frames the reader, builds a fact list from the code, proposes an outline, checks itself against its quality bar, is reviewed by a fresh agent, and is updated by a staleness sweep; a stack plugin adds where its framework keeps the facts | skills `docs:user-guide`, `docs:technical-guide`; see [plugins/docs/README.md](plugins/docs/README.md) |
 | `guards` | Hooks that refuse catastrophic shell commands, PHP and JS/TS source or plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and hand edits inside generated regions, and lint each edited PHP file | hooks only: `PreToolUse` on `Edit\|Write` and `Bash`, `PostToolUse` on `Edit\|Write`; see [plugins/guards/README.md](plugins/guards/README.md) |
 | `vault` | A project knowledge vault beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index, git merge drivers for its busiest files | commands `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync`; agent `vault:wiki-updater`; hooks on `SessionStart`, `SessionEnd`, `Stop`; `find-vault`, `vault-check`, `vault-capture`, `vault-search`, `vault-merge` on the Bash path |
 | `board-queue` | A durable queue and paced single writer for shared GitHub Projects boards, with a scheduled worker per person | MCP server `plugin:board-queue:board-queue` (tools `board_enqueue`, `board_queue`, `board_status`, `board_release`, `board_cancel`, `board_retry`, `board_show`); `board-queue` on the Bash path. Needs `npm ci` in the clone; see its README |
@@ -20,7 +21,9 @@ enables `architecture` along with any of them. A stack plugin does not depend on
 it, the stack's skills load but nothing is gated. The other way round, `guards` with no stack plugin
 gates by the core rules alone and cannot tell a server-rendered PHP application from a React app: on a
 Symfony project whose `package.json` depends on React, every JS/TS file needs `react.md`, a Stimulus
-controller included. Enable the project's stack plugin as well to get its rules.
+controller included. Enable the project's stack plugin as well to get its rules. A stack plugin
+that ships a docs skill (`magento2`) also depends on `docs`, whose core skills that docs skill
+extends.
 
 ## Install
 
@@ -60,6 +63,7 @@ claude plugin marketplace add hryvinskyi/claude-kit
 claude plugin install architecture@claude-kit
 claude plugin install pipeline@claude-kit
 claude plugin install qa@claude-kit
+claude plugin install docs@claude-kit
 claude plugin install guards@claude-kit
 claude plugin install symfony@claude-kit      # the stack plugin of your project, if there is one
 ```

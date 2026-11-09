@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 
 KIT = Path(__file__).resolve().parent.parent
 FAKES = Path(__file__).resolve().parent / "fakes"
-PLUGINS = ["architecture", "pipeline", "qa", "guards", "vault", "board-queue"]
+PLUGINS = ["architecture", "pipeline", "qa", "docs", "guards", "vault", "board-queue"]
 STACK_PLUGINS = ["symfony", "magento2"]
 QUEUE_SHIMS = ["board-queue", "board-queue-mcp"]
 VAULT_SHIMS = ["find-vault", "vault-check", "vault-capture", "vault-search", "vault-merge"]
