@@ -15,6 +15,25 @@ hook must never wedge a session.
 
 A refusal exits 2, so its message goes back to the model, which fixes the cause and retries.
 
+## What the shell guard reads
+
+`bash_guard.py` reads a command line the way the shell does and judges every simple command it
+runs, not the first word of the line:
+
+- quotes, backslash escapes and a backslash-newline continuation (the lines are joined); `#` starts a
+  comment only where a word starts, so `${#files[@]}` or a URL's `#fragment` hides nothing after it;
+- reserved words and grouping in front of a command (`if … then`, `for … do`, `while`, `case`, `!`,
+  `{ …; }`, a function body) and wrappers with their options (`sudo`, `env`, `nice`, `nohup`, `time`,
+  `timeout`/`gtimeout`, `xargs`, `stdbuf`, `caffeinate`, `noglob`, `flock`, …) are taken off;
+- every command line a command runs is judged by every rule, down to four lines deep: `$(…)`,
+  backticks and `<(…)` (bare, inside double quotes, in an assignment such as `N="$(…)"`, or in an
+  unquoted here-document), `sh|bash|zsh|dash -c '…'`, `eval …`, `ddev exec …`, and what a shell
+  reads from a here-document or here-string;
+- a here-document body is taken out of the command before anything else is read, and judged only
+  as what it is fed to: SQL to a database client (`psql <<'SQL'`, `mysql <<< "…"`), commands to a
+  shell (`bash <<'EOF'`, `sh -s <<EOF`), written text to a file. Fed to anything else (`cat > notes.md`,
+  `git commit -F -`, `gh api … -F body=@-`) it is text, whatever commands it names.
+
 ## Stack plugins
 
 The rubric gate names no framework. A stack plugin teaches it one: it ships a `stack.json` and a
@@ -69,7 +88,7 @@ forbid_assistant_commit_trailers = true
 | Policy | Default | When `true` |
 |---|---|---|
 | `forbid_assistant_commit_trailers` | `false` | `bash_guard.py` refuses a `git commit` whose message carries a `Co-Authored-By:` or `Claude-Session:` trailer, wherever the message comes from: `-m`, `-F`/`--file`, `--trailer` or a heredoc. It matches every `Co-Authored-By:` line, a human co-author's included |
-| `github_rest_only` | `false` | `bash_guard.py` refuses the `gh` commands that run on GitHub's GraphQL API, whose rate-limit allowance the whole account shares: `gh issue`, `gh pr`, `gh project` and `gh search` (any action), `gh repo view`, `gh release list` and `gh api graphql`, also when reached as `command gh`, `env … gh`, an absolute path, after `&&`/`;`/`|` or inside `$(…)`, and with `-R`/`--repo`/`--hostname` before the subcommand. The refusal names the REST form (`gh api --method POST repos/OWNER/REPO/issues …`) or, for `gh project`, the board queue. `gh api repos/…`, `gh auth`, `gh run`, `gh repo clone` and `gh release create` are never refused |
+| `github_rest_only` | `false` | `bash_guard.py` refuses the `gh` commands that run on GitHub's GraphQL API, whose rate-limit allowance the whole account shares: `gh issue`, `gh pr`, `gh project` and `gh search` (any action), `gh repo view`, `gh release list` and `gh api graphql`, also when reached as `command gh`, `env … gh`, an absolute path, after `&&`/`;`/`|`, inside `$(…)` or backticks (in an assignment or a double-quoted word too) or in a command line handed to a shell, and with `-R`/`--repo`/`--hostname` before the subcommand. The refusal names the REST form (`gh api --method POST repos/OWNER/REPO/issues …`) or, for `gh project`, the board queue. `gh api repos/…`, `gh auth`, `gh run`, `gh repo clone` and `gh release create` are never refused |
 
 The file is read line by line, the same way on every Python: each top-level `name = true` or
 `name = false` line (a trailing `# comment` allowed) sets that policy, a `[table]` header ends the

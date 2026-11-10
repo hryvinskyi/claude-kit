@@ -5,17 +5,38 @@ Deliberately narrow: a tripwire for irreversible damage, not a policy engine.
 Project-specific rules (test-suite discipline, container prefixes) belong in
 each project's own .claude/settings.json hook.
 
-The command is parsed, not pattern-matched. It is split into pipelines on
-`;`, `&&`, `||`, `&` and newlines, each pipeline into segments on `|`, and
-each segment into argv with shlex. Redirections are taken out of argv --
-the operator, an fd number glued to it and its target -- so `2>&1` or
-`> log` is never read as an argument. Leading VAR=val assignments and wrappers
-(sudo, doas, env, nohup, time, nice, command, exec, and flock <options>
-<lockfile>, whose `-c '<line>'` is read as `sh -c`) are taken off first.
+The command is parsed, not pattern-matched. One scanner reads it as the shell
+does: quotes, backslash escapes, a backslash-newline continuation (joined),
+`#` comments (only where a word starts), `${…}`, `$((…))`, and the bodies of
+here-documents, which are taken out of the command text before anything else
+is read, so a body is never mistaken for commands. It is split into pipelines
+on `;`, `&&`, `||`, `&`, parentheses and newlines (a newline after `|`, `&&`
+or `||` continues the pipeline), and each pipeline into simple commands on
+`|`. Redirections are taken out of argv -- the operator, an fd number glued
+to it and its target -- so `2>&1` or `> log` is never read as an argument; a
+here-document body and a `<<<` here-string are kept as the command's stdin.
+Reserved words and grouping in front (`if`, `then`, `do`, `while`, `!`, `{`,
+…; a `for`/`select`/`case` header is no command), leading VAR=val
+assignments and wrappers (sudo, doas, env, nohup, time, nice, command, exec,
+timeout, xargs, stdbuf, caffeinate, noglob, …, and flock <options>
+<lockfile>, whose `-c '<line>'` is read as `sh -c`) are taken off before a
+rule sees the program.
+
+Every command line a command runs is judged by every rule, down to four
+lines deep: a `$(…)`, backtick or `<(…)` substitution (unquoted, inside
+double quotes, in an assignment, or in an unquoted here-document); the text
+of `sh|bash|zsh|dash [options] -c '<line>'`; what such a shell reads from a
+here-document or here-string when it has no script operand (or `-s`); the
+words of `eval`; and the words of `ddev exec [-s|-d <value>] ...` (joined, as
+ddev joins them for the container's shell, and as given). A here-document is
+judged only as what it is fed to: SQL to a database client, commands to a
+shell, written text to a file (see `writes`); to anything else it is text.
+
 Rules look at argv[0] and its arguments, so a commit message or an `echo`
 that merely mentions a dangerous command passes. `cd` segments are tracked so
 relative targets and bare pushes are judged from the directory the command
-will actually run in.
+will actually run in; a nested command line starts from the directory its
+command runs in, and its `cd` stays inside it.
 
 Rules (each has cases in tests.sh):
   rm     recursive + force whose target resolves to /, $HOME, a /Volumes
@@ -39,17 +60,13 @@ Rules (each has cases in tests.sh):
          `gh issue|pr|project|search ...`, `gh repo view`, `gh release list`
          and `gh api graphql`, which bill the GraphQL allowance the whole
          account shares; the refusal names the REST form
-  sql    mysql, mariadb, mysqlsh, psql or `ddev mysql|psql` executing (via -e /
-         -c / --command, or the stdin an earlier segment of the pipeline feeds
-         it) DROP DATABASE/SCHEMA/TABLE, TRUNCATE, or DELETE FROM without WHERE.
-         A command line a segment hands to a shell is read the same way, with
-         its own pipelines, assignments and wrappers, down to four lines deep:
-         the words of `ddev exec [-s|-d <value>] ...` (joined, as ddev joins
-         them for the container's shell, so `ddev exec "cd x && psql ..."` and
-         `ddev exec "echo ... | psql"` count; and as given), and the text of
-         `sh|bash|zsh|dash [options] -c '<line>'`. A DROP DATABASE of a name
-         ending in _test or _test<digits> is a rebuildable scratch database
-         and is let through
+  sql    mysql, mariadb, mysqlsh, psql or `ddev mysql|mariadb|psql` executing
+         (via -e / -c / --command, also inside a short-option group such as
+         `-Ne`, or its stdin: a here-document, a here-string, or what an
+         earlier segment of the pipeline -- or of an enclosing one -- feeds it)
+         a statement that is DROP DATABASE/SCHEMA/TABLE, TRUNCATE, or DELETE
+         FROM without WHERE. A DROP DATABASE of a name ending in _test or
+         _test<digits> is a rebuildable scratch database and is let through
   ddev   `ddev delete` with --omit-snapshot / -O (drops the DB, no snapshot)
   curl   curl/wget sending a request body or upload (-d/--data*/--json/-F/-T/
          --upload-file, spaced, `=`-joined or attached as in `-d@f`/`-sd@f`;
@@ -74,9 +91,10 @@ Rules (each has cases in tests.sh):
              file the rubric of each language it orders — with the references
              the target needs and the skills of the stacks registered for the
              session — loaded first;
-           - debt_guard.py: the written text (heredoc body, echo/printf
-             arguments, a sed `s///` replacement) may not carry a deferral
-             marker or a static-analysis suppression into a source file.
+           - debt_guard.py: the written text (here-document body or
+             here-string, echo/printf arguments, a sed `s///` replacement)
+             may not carry a deferral marker or a static-analysis suppression
+             into a source file.
          Scripted writes (python/php/node one-liners) are not seen; the rule
          in the engineering standards still binds them.
 
@@ -123,9 +141,29 @@ WRAPPERS = {
     })),
     "flock": Wrapper(frozenset({"-w", "--timeout", "--wait", "-E", "--conflict-exit-code"}), 1,
                      frozenset({"-c", "--command"})),
+    "timeout": Wrapper(frozenset({"-s", "--signal", "-k", "--kill-after"}), 1),
+    "gtimeout": Wrapper(frozenset({"-s", "--signal", "-k", "--kill-after"}), 1),
+    # GNU's -i/-e/-l take only an attached value; BSD's -J/-R/-S take the next word
+    "xargs": Wrapper(frozenset({
+        "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "-E", "-d", "-a", "--arg-file",
+        "--delimiter", "--max-args", "--max-procs", "--max-chars", "--max-lines", "--eof",
+        "--process-slot-var",
+    })),
+    "stdbuf": Wrapper(frozenset({"-i", "--input", "-o", "--output", "-e", "--error"})),
+    "gstdbuf": Wrapper(frozenset({"-i", "--input", "-o", "--output", "-e", "--error"})),
+    "caffeinate": Wrapper(frozenset({"-t", "-w"})),
+    "noglob": Wrapper(frozenset()),
+    "nocorrect": Wrapper(frozenset()),
+    "builtin": Wrapper(frozenset()),
 }
-PIPELINE_SEPARATORS = {";", "&&", "||", "&", "(", ")", ";;"}
+# Reserved words that may stand in front of a simple command and run it
+RESERVED_PREFIXES = {"!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "esac"}
+# Reserved words that open a header which is not a command: `for x in …`, `select x in …`, `case w in`
+RESERVED_HEADERS = {"for", "select", "case"}
+PIPELINE_SEPARATORS = {";", "&&", "||", "&", "(", ")", ";;", ";&", ";;&", "\n"}
 SEGMENT_SEPARATORS = {"|", "|&"}
+# Operators after which a newline does not end the command line
+CONTINUING = {"|", "|&", "&&", "||"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 LOCAL_HOST_SUFFIXES = (".ddev.site", ".test", ".local", ".localhost")
 CURL_BODY_FLAGS = {
@@ -161,16 +199,20 @@ GH_REST_FORMS = {
 }
 GH_PROJECT_FORM = "the board queue (`board_enqueue`): the board is written only by its worker"
 ATTRIBUTION_TRAILER = re.compile(r"(?i)\bco-authored-by\s*[:=]|\bclaude-session\s*:")
-DANGEROUS_SQL = re.compile(
-    r"\bDROP\s+(?:DATABASE|SCHEMA|TABLE)\b|\bTRUNCATE\b|\bDELETE\s+FROM\s+\S+\s*(?:;|$)",
-    re.I,
-)
+DANGEROUS_SQL = re.compile(r"\bDROP\s+(?:DATABASE|SCHEMA|TABLE)\b|\bTRUNCATE\b", re.I)
+SQL_DELETE = re.compile(r"\bDELETE\s+FROM\b", re.I)
+SQL_WHERE = re.compile(r"\bWHERE\b", re.I)
+SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
 HOME = os.path.realpath(os.path.expanduser("~"))
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
 # Every shell operator a run of operator characters can hold, longest first
-OPERATORS = ("&>>", "<<<", ";;", "&&", "||", "|&", "&>", ">>", ">&", "<&", ">|", "<>", "<<",
-             ";", "&", "|", "(", ")", "<", ">")
-REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<", "<<", "<<<", "<>", "<&"}
+OPERATORS = ("&>>", "<<<", "<<-", ";;&", ";;", ";&", "&&", "||", "|&", "&>", ">>", ">&", "<&", ">|",
+             "<>", "<<", ";", "&", "|", "(", ")", "<", ">")
+OPERATOR_CHARS = set(";&|()<>")
+HEREDOC_OPERATORS = {"<<", "<<-"}
+REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<", "<<", "<<-", "<<<", "<>", "<&"}
+FD_WORD = re.compile(r"^(?:\d+|\{\w+\})$")
+# What a backslash escape in $'…' stands for; any other escaped character stands for itself
+ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b", "f": "\f", "v": "\v"}
 REDIRECT_OUT = {">", ">>", "&>", "&>>", ">|", "<>"}
 COPY_TOOLS = {"cp", "mv", "install"}
 
@@ -192,136 +234,315 @@ STANDARDS = "the engineering standards (CLAUDE.standards.md"
 
 # ---------------------------------------------------------------- parsing
 
-def logical_lines(cmd):
-    """Yield shell lines, joining continuations and multi-line quoted strings."""
-    buf = ""
-    for line in cmd.split("\n"):
-        buf = f"{buf}\n{line}" if buf else line
-        if buf.endswith("\\"):
-            continue
-        try:
-            shlex.split(buf)
-        except ValueError:
-            continue  # unbalanced quote so far: keep accumulating
-        yield buf
-        buf = ""
-    if buf:
-        yield buf
-
-
 class Token(str):
-    """A shell word, knowing whether it is an unquoted operator and whether blank space came before it."""
+    """A shell word or operator, as the shell reads it.
 
-    def __new__(cls, text, op=False, spaced=True):
+    `op` marks an unquoted operator and `spaced` blank space before it; `quoted` marks a word
+    with a quoted or escaped part, which is never a reserved word or an fd number; `subs` holds
+    the command lines its command substitutions run. On a here-document operator, `body` is
+    the text it feeds to the command and `subs` the substitutions an unquoted body runs.
+    """
+
+    def __new__(cls, text, op=False, spaced=True, quoted=False, subs=()):
         token = super().__new__(cls, text)
-        token.op, token.spaced = op, spaced
+        token.op, token.spaced, token.quoted, token.subs = op, spaced, quoted, list(subs)
+        token.body = None
         return token
 
 
-class Lexer(shlex.shlex):
-    """shlex in punctuation mode, returning Tokens.
+class WordBuilder:
+    """The parts of the word a scan is reading, and the substitutions inside it."""
 
-    An operator token is one whose first character is an unquoted operator
-    character, so `">"` stays a word. A word ends either on blank space, which
-    shlex consumes, or on an operator character, which it pushes back: that
-    pushback tells a glued `2>` from a spaced `2 >`.
+    def __init__(self):
+        self.parts, self.subs, self.quoted, self.started = [], [], False, False
+
+    def add(self, text, quoted=False):
+        """Append text to the word; an empty quoted part (`''`) still makes a word."""
+        self.parts.append(text)
+        self.started = True
+        self.quoted = self.quoted or quoted
+
+    def token(self):
+        """The finished word as a Token."""
+        return Token("".join(self.parts), False, True, self.quoted, self.subs)
+
+
+class Scanner:
+    """Read a command line into Tokens, one pass, the way the shell reads it.
+
+    Single and double quotes, backslash escapes and a backslash-newline continuation (which
+    joins the lines) are resolved; `#` starts a comment only where a word starts. `$(…)`,
+    backticks and `<(…)`/`>(…)` stay in their word as written and their text is recorded on it;
+    `${…}`, `$((…))` and `$'…'` are read as one piece. At each newline that ends a command line,
+    the bodies of the here-documents opened on it are taken out of the text and set on their
+    operators, so no body is ever read as commands.
     """
 
-    def __init__(self, line):
-        super().__init__(line, posix=True, punctuation_chars=True)
-        self.whitespace_split = True
+    def __init__(self, text):
+        self.text, self.pos, self.pending, self.closed = text, 0, [], False
 
-    def read_token(self):
-        spaced = not self._pushback_chars
-        while True:
-            c = self._pushback_chars.pop() if self._pushback_chars else self.instream.read(1)
-            if not c or c not in self.whitespace:
+    def scan(self, closing=False):
+        """Read Tokens to the end of the text or, with `closing`, to the `)` that closes a substitution."""
+        text, out = self.text, []
+        word, delimiter_of, depth, blank = WordBuilder(), None, 0, True
+
+        def finish():
+            nonlocal word, delimiter_of
+            if word.started:
+                token = word.token()
+                if delimiter_of is not None:
+                    self.pending.append((delimiter_of, token))
+                    delimiter_of = None
+                out.append(token)
+            word = WordBuilder()
+
+        while self.pos < len(text):
+            c = text[self.pos]
+            if c == "\\":
+                if not text.startswith("\n", self.pos + 1):
+                    word.add(text[self.pos + 1:self.pos + 2], True)
+                self.pos += 2
+            elif c == "'":
+                end = text.find("'", self.pos + 1)
+                end = len(text) if end < 0 else end
+                word.add(text[self.pos + 1:end], True)
+                self.pos = end + 1
+            elif c == '"':
+                self.pos += 1
+                word.add(self.double_quoted(word, '"'), True)
+            elif c == "$" and self.dollar(word, False):
+                pass
+            elif c == "`":
+                self.backtick(word)
+            elif c == "#" and not word.started:
+                end = text.find("\n", self.pos)
+                self.pos = len(text) if end < 0 else end
+                continue
+            elif c in " \t":
+                finish()
+                self.pos += 1
+                blank = True
+                continue
+            elif c == "\n":
+                finish()
+                if not (out and out[-1].op and out[-1] in CONTINUING):
+                    out.append(Token("\n", True))
+                self.pos += 1
+                self.read_heredocs()
+                blank = True
+                continue
+            elif c in "<>" and text.startswith("(", self.pos + 1):
+                self.pos += 2
+                word.add(c + "(" + self.substitution(word) + ")")
+            elif c in OPERATOR_CHARS:
+                if c == ")" and closing and depth == 0:
+                    finish()
+                    self.pos += 1
+                    self.closed = True
+                    return out
+                finish()
+                op = next(o for o in OPERATORS if text.startswith(o, self.pos))
+                depth += (op == "(") - (op == ")")
+                token = Token(op, True, blank)
+                out.append(token)
+                self.pos += len(op)
+                if op in HEREDOC_OPERATORS:
+                    delimiter_of = token
+            else:
+                word.add(c)
+                self.pos += 1
+            blank = False
+        finish()
+        return out
+
+    def substitution(self, word):
+        """Read a `$(…)` body up to its closing parenthesis, record its text on the word and return it."""
+        start = self.pos
+        self.closed = False
+        self.scan(closing=True)
+        inner = self.text[start:self.pos - 1 if self.closed else self.pos]
+        self.closed = False
+        word.subs.append(inner)
+        return inner
+
+    def dollar(self, word, in_quotes):
+        """Read the `$` construct at the cursor into the word; False when it is a plain `$`."""
+        text, start = self.text, self.pos
+        nxt = text[start + 1:start + 2]
+        if text.startswith("$((", start):
+            end, depth = start + 3, 2
+            while end < len(text) and depth:
+                depth += (text[end] == "(") - (text[end] == ")")
+                end += 1
+            word.add(text[start:end])
+            self.pos = end
+        elif nxt == "(":
+            self.pos += 2
+            word.add("$(" + self.substitution(word) + ")")
+        elif nxt == "{":
+            end, depth = start + 2, 1
+            while end < len(text) and depth:
+                ch = text[end]
+                if ch == "\\":
+                    end += 2
+                    continue
+                if ch in "'\"":
+                    close = text.find(ch, end + 1)
+                    end = len(text) if close < 0 else close + 1
+                    continue
+                depth += (ch == "{") - (ch == "}")
+                end += 1
+            word.add(text[start:end])
+            self.pos = end
+        elif nxt == "'" and not in_quotes:
+            end, parts = start + 2, []
+            while end < len(text) and text[end] != "'":
+                if text[end] == "\\" and end + 1 < len(text):
+                    parts.append(ANSI_C_ESCAPES.get(text[end + 1], text[end + 1]))
+                    end += 2
+                else:
+                    parts.append(text[end])
+                    end += 1
+            word.add("".join(parts), True)
+            self.pos = end + 1
+        elif nxt == '"' and not in_quotes:
+            self.pos += 2
+            word.add(self.double_quoted(word, '"'), True)
+        else:
+            return False
+        return True
+
+    def backtick(self, word):
+        """Read a backtick substitution into the word and record the command line it runs."""
+        text, end, parts = self.text, self.pos + 1, []
+        while end < len(text) and text[end] != "`":
+            if text[end] == "\\" and text[end + 1:end + 2] in ("`", "$", "\\"):
+                parts.append(text[end + 1])
+                end += 2
+            else:
+                parts.append(text[end])
+                end += 1
+        word.subs.append("".join(parts))
+        word.add(text[self.pos:end + 1])
+        self.pos = end + 1
+
+    def double_quoted(self, word, terminator):
+        """Read double-quoted text up to `terminator` (None: to the end), recording its substitutions on the word."""
+        text, parts = self.text, []
+        while self.pos < len(text):
+            c = text[self.pos]
+            if c == terminator:
+                self.pos += 1
                 break
-            spaced = True
-        if c:
-            self._pushback_chars.append(c)
-        raw = super().read_token()
-        if raw is None:
-            return None
-        return Token(raw, bool(c) and c in self.punctuation_chars, spaced)
+            if c == "\\" and self.pos + 1 < len(text):
+                nxt = text[self.pos + 1]
+                if nxt != "\n":
+                    parts.append(nxt if nxt in '$`"\\' else "\\" + nxt)
+                self.pos += 2
+                continue
+            if c == "$" or c == "`":
+                inner = WordBuilder()
+                if c == "`":
+                    self.backtick(inner)
+                elif not self.dollar(inner, True):
+                    inner.add(c)
+                    self.pos += 1
+                parts.extend(inner.parts)
+                word.subs.extend(inner.subs)
+                continue
+            parts.append(c)
+            self.pos += 1
+        return "".join(parts)
+
+    def read_heredocs(self):
+        """Take the bodies of the pending here-documents out of the text, from the cursor on.
+
+        A body ends at a line that is its delimiter (leading or trailing tabs allowed, as `<<-`
+        allows them), or at the end of the text. An unquoted delimiter leaves the body open to
+        expansion, so its substitutions are recorded on the operator.
+        """
+        text, pending, self.pending = self.text, self.pending, []
+        for operator, delimiter in pending:
+            lines = []
+            while self.pos < len(text):
+                end = text.find("\n", self.pos)
+                end = len(text) if end < 0 else end
+                line = text[self.pos:end]
+                self.pos = min(end + 1, len(text))
+                if line.strip("\t") == delimiter:
+                    break
+                lines.append(line)
+            operator.body = "\n".join(lines)
+            if not delimiter.quoted:
+                reader, sink = Scanner(operator.body), WordBuilder()
+                reader.double_quoted(sink, None)
+                operator.subs = sink.subs
 
 
-def split_operators(token):
-    """Split a run of operator characters (`;)>`, `2>&1|`'s `>&`) into the operators it is made of."""
-    out, i = [], 0
-    while i < len(token):
-        op = next((o for o in OPERATORS if token.startswith(o, i)), token[i])
-        out.append(Token(op, True, token.spaced and i == 0))
-        i += len(op)
-    return out
+class Segment:
+    """One simple command of a pipeline.
 
-
-def tokenize(line):
-    """Tokenize one logical line into Tokens; degrade gracefully on unbalanced quotes."""
-    try:
-        tokens = list(Lexer(line))
-    except ValueError:
-        tokens = []
-        for physical in line.split("\n"):
-            try:
-                tokens.extend(list(Lexer(physical)))
-            except ValueError:
-                words = physical.replace("'", " ").replace('"', " ").split()
-                tokens.extend(Token(w, all(c in "();<>|&" for c in w)) for w in words)
-            tokens.append(Token(";", True))
-    out = []
-    for tok in tokens:
-        out.extend(split_operators(tok) if tok.op else [tok])
-    return out
-
-
-def line_segments(line):
-    """Split one logical line into pipelines of (argv, written files) segments.
-
-    A redirection never reaches argv: its operator, the fd number glued to it
-    (`2>`, `{fd}>`) and its target are taken out, and the targets it writes
-    (`>`, `>>`, `>|`, `&>`, `&>>`, `<>`, and `>&` to a name that is not an fd)
-    are returned beside argv.
+    `argv` holds its words with every redirection taken out; `written` the files its
+    redirections write; `stdin` the here-document bodies and here-strings fed to it; `nested`
+    the command lines its substitutions run.
     """
-    result, pipeline, argv, written = [], [], [], []
-    toks = tokenize(line) + [Token(";", True)]
+
+    def __init__(self):
+        self.argv, self.written, self.stdin, self.nested = [], [], [], []
+
+    def empty(self):
+        """Report whether the segment holds nothing at all."""
+        return not (self.argv or self.written or self.stdin or self.nested)
+
+
+def parse(cmd):
+    """Read a command line into lines, each a list of pipelines, each a list of Segments.
+
+    A redirection never reaches argv: its operator, the fd number glued to it (`2>`, `{fd}>`)
+    and its target are taken out. The targets it writes (`>`, `>>`, `>|`, `&>`, `&>>`, `<>`, and
+    `>&` to a name that is not an fd) go to `written`; a here-document body and a here-string
+    go to `stdin`.
+    """
+    tokens = Scanner(cmd).scan() + [Token("\n", True)]
+    lines, line, pipeline, segment = [], [], [], Segment()
     i = 0
-    while i < len(toks):
-        tok = toks[i]
+    while i < len(tokens):
+        tok = tokens[i]
         i += 1
-        if tok in PIPELINE_SEPARATORS or tok in SEGMENT_SEPARATORS:
-            if argv or written:
-                pipeline.append((argv, written))
-            argv, written = [], []
+        if tok.op and (tok in PIPELINE_SEPARATORS or tok in SEGMENT_SEPARATORS):
+            if not segment.empty():
+                pipeline.append(segment)
+            segment = Segment()
             if tok in PIPELINE_SEPARATORS:
                 if pipeline:
-                    result.append(pipeline)
+                    line.append(pipeline)
                 pipeline = []
+            if tok == "\n" and line:
+                lines.append(line)
+                line = []
         elif tok.op and tok in REDIRECTS:
-            prev = toks[i - 2] if i >= 2 else None
-            if (not tok.spaced and argv and argv[-1] is prev and not prev.op
-                    and re.match(r"^(?:\d+|\{\w+\})$", prev)):
-                argv.pop()  # the fd number of `2>`
-            target = toks[i] if i < len(toks) and not toks[i].op else None
+            prev = tokens[i - 2] if i >= 2 else None
+            if (not tok.spaced and segment.argv and segment.argv[-1] is prev
+                    and not prev.quoted and FD_WORD.match(prev)):
+                segment.argv.pop()  # the fd number of `2>`
+            segment.nested.extend(tok.subs)
+            if tok.body is not None:
+                segment.stdin.append(tok.body)
+            target = tokens[i] if i < len(tokens) and not tokens[i].op else None
             if target is None:
                 continue
             i += 1
-            if tok in REDIRECT_OUT or (tok == ">&" and not re.match(r"^(?:\d+|-)$", target)):
-                written.append(target)
+            if tok in HEREDOC_OPERATORS:
+                continue  # the target is the delimiter
+            segment.nested.extend(target.subs)
+            if tok == "<<<":
+                segment.stdin.append(target)
+            elif tok in REDIRECT_OUT or (tok == ">&" and not re.match(r"^(?:\d+|-)$", target)):
+                segment.written.append(target)
         else:
-            argv.append(tok)
-    return result
-
-
-def pipelines(cmd):
-    """Split a command into pipelines, each a list of argv segments, redirections taken out."""
-    result = []
-    for line in logical_lines(cmd):
-        for pipeline in line_segments(line):
-            argvs = [argv for argv, _ in pipeline if argv]
-            if argvs:
-                result.append(argvs)
-    return result
+            segment.argv.append(tok)
+            segment.nested.extend(tok.subs)
+    return lines
 
 
 def option_words(word, value_options):
@@ -362,6 +583,26 @@ def strip_wrappers(argv):
         if i < len(argv) and argv[i] in wrapper.shell_options:
             return ["sh", "-c", *argv[i + 1:]]
     return argv[i:]
+
+
+def command_words(argv):
+    """The program a simple command runs and its arguments.
+
+    Unquoted reserved words in front (`if`, `then`, `do`, `while`, `!`, `{`, `}`, …) are taken
+    off; a `for`, `select` or `case` header names no program and gives an empty list; then the
+    assignments and wrappers go (strip_wrappers).
+    """
+    i = 0
+    while i < len(argv) and not getattr(argv[i], "quoted", False):
+        if argv[i] in RESERVED_HEADERS:
+            return []
+        if argv[i] == "function":
+            i += 1 if argv[i + 1:i + 2] == ["{"] else 2  # `function name`, or zsh's anonymous `function {`
+            continue
+        if argv[i] not in RESERVED_PREFIXES:
+            break
+        i += 1
+    return strip_wrappers(argv[i:])
 
 
 def cd_target(argv, cwd):
@@ -675,16 +916,18 @@ def git_danger(argv, cwd):
 
 
 DDEV_EXEC_VALUE_OPTIONS = ("-s", "--service", "-d", "--dir")
+DDEV_SQL_CLIENTS = ("mysql", "mariadb", "psql")
 PSQL_VALUE_OPTIONS = "dhUpfFoPRTvL"
+# mysql's short options whose value is the rest of the group or the next word (-e is read on its own)
+MYSQL_VALUE_OPTIONS = "DhPSu"
 SHELLS = ("sh", "bash", "zsh", "dash")
 # Shell options whose value is the next word: `-o pipefail`, `+O extglob`, `--rcfile <file>`
 SHELL_OPTIONS_WITH_VALUE = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
-# How deep the SQL rule reads command lines nested inside command lines; a deeper one is not read
+# How deep the rules read command lines nested inside command lines; a deeper one is not read
 SHELL_NESTING_LIMIT = 4
 # A scratch database named *_test or *_test<digits> is rebuilt from migrations on every stack.
 TEST_DATABASE_DROP = re.compile(
-    r"\bDROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?[\"`]?\w*_test\d*[\"`]?"
-    r"(?:\s+(?:WITH\s*)?\(\s*FORCE\s*\))?\s*(?=;|$)",
+    r"DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?[\"`]?\w*_test\d*[\"`]?(?:\s+(?:WITH\s*)?\(\s*FORCE\s*\))?",
     re.I,
 )
 
@@ -693,36 +936,48 @@ def sql_client(argv):
     """Return (client, its argv) when the segment runs a SQL client, else None.
 
     The client is one of mysql, mariadb, mysqlsh, psql, called directly or through
-    `ddev mysql|psql`.
+    `ddev mysql|mariadb|psql`.
     """
     name = os.path.basename(argv[0])
     if name in SQL_STATEMENTS:
         return name, argv
-    if name == "ddev" and len(argv) > 1 and argv[1] in ("mysql", "psql"):
+    if name == "ddev" and len(argv) > 1 and argv[1] in DDEV_SQL_CLIENTS:
         return argv[1], argv[1:]
     return None
 
 
-def shell_command_lines(argv):
-    """The pipelines of `sh|bash|zsh|dash [options] -c '<text>'`; none when the shell runs a script or stdin.
+def shell_lines(argv, stdin):
+    """The command lines `sh|bash|zsh|dash [options]` runs: the text of `-c`, or what it reads from stdin.
 
-    `-c` may sit in a group of short options (`-lc`, `-ec`); the text is the first word
-    after the options.
+    `-c` may sit in a group of short options (`-lc`, `-ec`); the text is the first word after
+    the options. Without `-c` the shell runs a script named by its first operand, unless there
+    is none, it is `-`, or `-s` was given: then it reads its commands from stdin, and a
+    here-document or here-string fed to it is a command line.
     """
-    command, j = False, 1
+    command = from_stdin = False
+    j = 1
     while j < len(argv):
         a = argv[j]
         if a in SHELL_OPTIONS_WITH_VALUE:
             j += 2
         elif len(a) > 1 and a[0] in "-+":
-            command = command or (a[0] == "-" and not a.startswith("--") and "c" in a[1:])
+            if a[0] == "-" and not a.startswith("--"):
+                command = command or "c" in a[1:]
+                from_stdin = from_stdin or "s" in a[1:]
             j += 1
+        elif command:
+            return [a]
         else:
-            return pipelines(a) if command else []
-    return []
+            return list(stdin) if from_stdin or a == "-" else []
+    return [] if command else list(stdin)
 
 
-def ddev_exec_lines(argv):
+def eval_lines(argv, stdin):
+    """The command line `eval` runs: its words joined with spaces."""
+    return [" ".join(argv[1:])] if len(argv) > 1 else []
+
+
+def ddev_exec_lines(argv, stdin):
     """The command lines `ddev exec [its options] <words>` runs in the container; none for another ddev command.
 
     ddev joins the words with spaces and hands them to the container's shell, so the joined
@@ -738,23 +993,46 @@ def ddev_exec_lines(argv):
     words = words[k:]
     if not words:
         return []
-    lines = pipelines(" ".join(words))
-    return lines + [[words]] if len(words) > 1 else lines
+    joined = " ".join(words)
+    return [joined, " ".join(shlex.quote(w) for w in words)] if len(words) > 1 else [joined]
 
 
-# The command lines a program hands to a shell, by program name: argv -> list of pipelines
-NESTED_LINES = {**{shell: shell_command_lines for shell in SHELLS}, "ddev": ddev_exec_lines}
+# The command lines a program runs as shell input, by program name: (argv, stdin texts) -> texts
+NESTED_LINES = {**{shell: shell_lines for shell in SHELLS}, "eval": eval_lines, "ddev": ddev_exec_lines}
 
 
 def mysql_statements(argv):
-    sql = []
-    for j, a in enumerate(argv):
-        if a in ("-e", "--execute") and j + 1 < len(argv):
+    """Collect the text of every -e / --execute, including `-Ne SQL` and `-eSQL`.
+
+    A short group is read left to right as getopt does: `e` takes the rest of the group (or
+    the next word) as its value, `p` takes only the rest of the group, and another
+    value-taking option swallows the rest of the group or the next word.
+    """
+    sql, j = [], 1
+    while j < len(argv):
+        a = argv[j]
+        if a == "--execute" and j + 1 < len(argv):
             sql.append(argv[j + 1])
+            j += 1
         elif a.startswith("--execute="):
             sql.append(a.split("=", 1)[1])
-        elif a.startswith("-e") and len(a) > 2 and not a.startswith("--"):
-            sql.append(a[2:])
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            for i, ch in enumerate(a[1:], start=1):
+                rest = a[i + 1:]
+                if ch == "e":
+                    if rest:
+                        sql.append(rest)
+                    elif j + 1 < len(argv):
+                        sql.append(argv[j + 1])
+                        j += 1
+                    break
+                if ch == "p":
+                    break
+                if ch in MYSQL_VALUE_OPTIONS:
+                    if not rest:
+                        j += 1
+                    break
+        j += 1
     return sql
 
 
@@ -799,33 +1077,37 @@ SQL_STATEMENTS = {
 }
 
 
-def sql_danger(pipeline, fed=(), depth=0):
-    """Block destructive SQL sent to a database client, in the pipeline or in a command line it runs.
+def destructive_sql(text):
+    """Report whether a statement of the SQL text drops a database, schema or table, truncates, or deletes every row.
 
-    A client executes its -e/-c text and what reaches its stdin: the words of the earlier
-    segments, and `fed`, the words an enclosing pipeline sends into this one. A command line
-    a segment hands to a shell (`ddev exec`, `sh -c`) is read the same way, its commands'
-    assignments and wrappers taken off, while `depth` is under the nesting limit.
-
-    @param pipeline argv segments, wrappers already taken off
-    @param fed      words an enclosing pipeline feeds into this one
-    @param depth    how many command lines enclose this one
+    The text is split into statements on `;`. A DELETE FROM is destructive when its statement
+    has no WHERE outside a comment; a statement that, without its comments, only drops a
+    scratch `*_test` database is not. The other words are searched for in the whole statement,
+    comments included, so a `--` inside a string literal hides nothing.
     """
-    for k, argv in enumerate(pipeline):
-        piped = [*fed, *(word for prev in pipeline[:k] for word in prev[1:])]
-        nested = NESTED_LINES.get(os.path.basename(argv[0]))
-        if nested is not None and depth < SHELL_NESTING_LIMIT:
-            for line in nested(argv):
-                why = sql_danger([s for s in map(strip_wrappers, line) if s], piped, depth + 1)
-                if why:
-                    return why
-        found = sql_client(argv)
-        if found is None:
+    for statement in text.split(";"):
+        code = SQL_COMMENT.sub(" ", statement).strip()
+        if TEST_DATABASE_DROP.fullmatch(code):
             continue
-        client, client_argv = found
-        for s in SQL_STATEMENTS[client](client_argv) + piped:
-            if DANGEROUS_SQL.search(TEST_DATABASE_DROP.sub("", s)):
-                return "destructive SQL (DROP DATABASE/TABLE, TRUNCATE, or DELETE without WHERE) sent to a database. Take a snapshot/backup and ask the user."
+        if DANGEROUS_SQL.search(statement) or (SQL_DELETE.search(statement) and not SQL_WHERE.search(code)):
+            return True
+    return False
+
+
+def sql_danger(argv, stdin):
+    """Block destructive SQL sent to a database client, in its arguments or on its stdin.
+
+    @param argv  the client's command, wrappers already taken off
+    @param stdin what reaches its stdin: here-documents, here-strings and the words of the
+                 earlier segments of its pipeline and of every enclosing one
+    """
+    found = sql_client(argv)
+    if found is None:
+        return None
+    client, client_argv = found
+    if any(destructive_sql(s) for s in [*SQL_STATEMENTS[client](client_argv), *stdin]):
+        return ("destructive SQL (DROP DATABASE/TABLE, TRUNCATE, or DELETE without WHERE) sent to a "
+                "database. Take a snapshot/backup and ask the user.")
     return None
 
 
@@ -932,24 +1214,6 @@ def eslint_suppressions_danger(argv, cwd):
 
 # ------------------------------------------------------------ shell writes
 
-def heredoc_bodies(cmd):
-    """Map each command line index to the heredoc bodies that line opens."""
-    lines = cmd.split("\n")
-    bodies, i = {}, 0
-    while i < len(lines):
-        markers = HEREDOC.findall(lines[i])
-        opener = i
-        i += 1
-        for _quote, word in markers:
-            body = []
-            while i < len(lines) and lines[i].rstrip("\t").strip("\t") != word and lines[i] != word:
-                body.append(lines[i])
-                i += 1
-            i += 1  # the terminator line
-            bodies.setdefault(opener, []).append("\n".join(body))
-    return bodies
-
-
 def sed_replacements(expressions):
     """The text a sed script inserts: the replacement of every `s` command, else the whole expression."""
     out = []
@@ -966,85 +1230,84 @@ def sed_replacements(expressions):
     return out
 
 
-def written_files(cmd, cwd):
-    """Files the command writes and the text it writes into them.
+def line_text(line, commands):
+    """The text a command line can write: its here-documents and here-strings, and what echo/printf print.
 
-    @param cwd The directory the command starts in; each `cd` moves it once, from where it stands.
-    @return List of (absolute path, text or None, the cwd of the writing segment) -- the text is
-            None when the content is not visible in the command (cp/mv/install, sed without an
-            `s` command).
+    @param line     the line's pipelines of Segments
+    @param commands the program words of each of those Segments, in the same shape
+    @return the text, or None when the line shows none
     """
-    found = []
-    bodies = heredoc_bodies(cmd)
-    line_no = 0
-    for line in logical_lines(cmd):
-        line_text = "\n".join(bodies.get(line_no, []))
-        line_no += line.count("\n") + 1
-        segments = [segment for pipeline in line_segments(line) for segment in pipeline]
-        produced = [line_text] if line_text else []
-        for argv, _ in segments:
-            argv = strip_wrappers(argv)
+    produced = [text for pipeline in line for segment in pipeline for text in segment.stdin]
+    for argvs in commands:
+        for argv in argvs:
             if argv and os.path.basename(argv[0]) in ("echo", "printf"):
                 produced.append(" ".join(a for a in argv[1:] if not a.startswith("-")))
-        text = "\n".join(produced) or None
-        for argv, targets in segments:
-            argv = strip_wrappers(argv)
-            name = os.path.basename(argv[0]) if argv else ""
-            moved = cd_target(argv, cwd)
-            if moved is not None:
-                cwd = moved
+    return "\n".join(produced) or None
+
+
+def command_writes(argv, cwd, text):
+    """The files a command writes by its arguments: tee, sed -i, perl -i, and the destination of cp/mv/install.
+
+    @param argv the program words, wrappers taken off
+    @param cwd  the directory the command runs in
+    @param text the text its line writes (line_text)
+    @return List of (absolute path, text or None, cwd) -- the text is None when the content is
+            not visible in the command (cp/mv/install, sed without an `s` command).
+    """
+    found = []
+    name = os.path.basename(argv[0])
+    if name == "tee":
+        for t in (a for a in argv[1:] if not a.startswith("-")):
+            found.append((resolve(cwd, t), text, cwd))
+    elif name == "sed" and any(a == "-i" or a.startswith("-i") or a.startswith("--in-place") for a in argv[1:]):
+        exprs, files, take_expr = [], [], False
+        for a in argv[1:]:
+            if take_expr:
+                exprs.append(a)
+                take_expr = False
+            elif a in ("-e", "--expression"):
+                take_expr = True
+            elif a.startswith("--expression="):
+                exprs.append(a.split("=", 1)[1])
+            elif a.startswith("-") or a == "":
+                continue  # a flag, or BSD sed's empty backup suffix after -i
+            elif not exprs:
+                exprs.append(a)
+            else:
+                files.append(a)
+        sed_text = "\n".join(sed_replacements(exprs)) or None
+        for f in files:
+            found.append((resolve(cwd, f), sed_text, cwd))
+    elif name == "perl" and any(a.startswith("-") and "i" in a[1:] and not a.startswith("--") for a in argv[1:]):
+        code, files, take = [], [], False
+        for a in argv[1:]:
+            if take:
+                code.append(a)
+                take = False
+            elif a == "-e":
+                take = True
+            elif a.startswith("-"):
                 continue
-            for t in targets:
-                found.append((resolve(cwd, t), text, cwd))
-            if name == "tee":
-                for t in (a for a in argv[1:] if not a.startswith("-")):
-                    found.append((resolve(cwd, t), text, cwd))
-            elif name == "sed" and any(a == "-i" or a.startswith("-i") or a.startswith("--in-place") for a in argv[1:]):
-                exprs, files, take_expr = [], [], False
-                for a in argv[1:]:
-                    if take_expr:
-                        exprs.append(a)
-                        take_expr = False
-                    elif a in ("-e", "--expression"):
-                        take_expr = True
-                    elif a.startswith("--expression="):
-                        exprs.append(a.split("=", 1)[1])
-                    elif a.startswith("-") or a == "":
-                        continue  # a flag, or BSD sed's empty backup suffix after -i
-                    elif not exprs:
-                        exprs.append(a)
-                    else:
-                        files.append(a)
-                sed_text = "\n".join(sed_replacements(exprs)) or None
-                for f in files:
-                    found.append((resolve(cwd, f), sed_text, cwd))
-            elif name == "perl" and any(a.startswith("-") and "i" in a[1:] and not a.startswith("--") for a in argv[1:]):
-                code, files, take = [], [], False
-                for a in argv[1:]:
-                    if take:
-                        code.append(a)
-                        take = False
-                    elif a == "-e":
-                        take = True
-                    elif a.startswith("-"):
-                        continue
-                    else:
-                        files.append(a)
-                perl_text = "\n".join(sed_replacements(code)) or None
-                for f in files:
-                    found.append((resolve(cwd, f), perl_text, cwd))
-            elif name in COPY_TOOLS:
-                positional = [a for a in argv[1:] if not a.startswith("-")]
-                if len(positional) >= 2:
-                    found.append((resolve(cwd, positional[-1]), None, cwd))
+            else:
+                files.append(a)
+        perl_text = "\n".join(sed_replacements(code)) or None
+        for f in files:
+            found.append((resolve(cwd, f), perl_text, cwd))
+    elif name in COPY_TOOLS:
+        positional = [a for a in argv[1:] if not a.startswith("-")]
+        if len(positional) >= 2:
+            found.append((resolve(cwd, positional[-1]), None, cwd))
     return found
 
 
-def write_danger(cmd, cwd, transcript_path):
-    """Apply the rubric gate and the debt guard to files the command writes through the shell."""
+def write_danger(writes, transcript_path):
+    """Apply the rubric gate and the debt guard to files written through the shell.
+
+    @param writes (absolute path, text or None, the cwd of the writing command) for each write
+    """
     if rubric is None or debt is None:
         return None
-    for path, text, segment_cwd in written_files(cmd, cwd):
+    for path, text, segment_cwd in writes:
         if not os.environ.get("CLAUDE_NO_PLAN_SKILL_GATE"):
             verdict = rubric.missing_for(segment_cwd, path, transcript_path, text)
             if verdict is not None:
@@ -1075,26 +1338,63 @@ SEGMENT_RULES = {
 }
 
 
+def command_danger(argv, cwd, cmd, stdin):
+    """The reason one command is refused by its own rule, the baseline rule or the SQL rule, else None."""
+    rule = SEGMENT_RULES.get(os.path.basename(argv[0]))
+    return (rule(argv, cwd, cmd) if rule else None) or baseline_danger(argv, cwd) or sql_danger(argv, stdin)
+
+
+def judge(text, cwd, cmd, writes, depth=0, fed=()):
+    """Return why the first refused command of a command line is refused, else None.
+
+    Each simple command is judged with its reserved words, assignments and wrappers taken off;
+    a `cd` moves `cwd` for the commands after it. Every command line a command runs -- its
+    substitutions, and what it hands to a shell (NESTED_LINES) -- is judged the same way from
+    the directory the command runs in, while `depth` is under the nesting limit. The files a
+    command writes are collected in `writes`, to be judged once every command has passed.
+
+    @param text   the command line
+    @param cwd    the directory it starts in
+    @param cmd    the whole command the hook was given
+    @param writes collects (absolute path, text or None, cwd) for each file written
+    @param depth  how many command lines enclose this one
+    @param fed    what an enclosing pipeline feeds to this line's stdin
+    """
+    deeper = depth < SHELL_NESTING_LIMIT
+    for line in parse(text):
+        commands = [[command_words(segment.argv) for segment in pipeline] for pipeline in line]
+        written = line_text(line, commands)
+        for pipeline, argvs in zip(line, commands):
+            for k, (segment, argv) in enumerate(zip(pipeline, argvs)):
+                for inner in segment.nested if deeper else []:
+                    why = judge(inner, cwd, cmd, writes, depth + 1)
+                    if why:
+                        return why
+                writes.extend((resolve(cwd, t), written, cwd) for t in segment.written)
+                if not argv:
+                    continue
+                moved = cd_target(argv, cwd)
+                if moved is not None:
+                    cwd = moved
+                    continue
+                writes.extend(command_writes(argv, cwd, written))
+                stdin = [*fed, *(word for prev, prev_argv in zip(pipeline[:k], argvs[:k])
+                                 for word in [*prev_argv[1:], *prev.stdin]), *segment.stdin]
+                why = command_danger(argv, cwd, cmd, stdin)
+                if why:
+                    return why
+                reader = NESTED_LINES.get(os.path.basename(argv[0])) if deeper else None
+                for inner in reader(argv, segment.stdin) if reader else []:
+                    why = judge(inner, cwd, cmd, writes, depth + 1, stdin)
+                    if why:
+                        return why
+    return None
+
+
 def check(cmd, cwd, transcript_path=""):
-    start = cwd  # the shell-write pass walks the same `cd`s itself
-    for pipeline in pipelines(cmd):
-        segments = [s for s in (strip_wrappers(a) for a in pipeline) if s]
-        for argv in segments:
-            name = os.path.basename(argv[0])
-            moved = cd_target(argv, cwd)
-            if moved is not None:
-                cwd = moved
-                continue
-            rule = SEGMENT_RULES.get(name)
-            why = rule(argv, cwd, cmd) if rule else None
-            if why is None:
-                why = baseline_danger(argv, cwd)
-            if why:
-                return why
-        why = sql_danger(segments)
-        if why:
-            return why
-    return write_danger(cmd, start, transcript_path)
+    """Return why the command is refused, else None: its commands first, then the files it writes."""
+    writes = []
+    return judge(cmd, cwd, cmd, writes) or write_danger(writes, transcript_path)
 
 
 def main() -> int:
