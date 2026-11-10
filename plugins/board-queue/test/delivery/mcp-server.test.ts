@@ -49,6 +49,19 @@ const Status = z.object({
   blocked: z.array(z.object({ id: z.string(), lastError: z.string().nullable() })),
 });
 
+const Stopped = z.object({
+  stopped: z.array(z.object({
+    ref: z.string().nullable(),
+    front: z.object({ id: z.string(), kind: z.string(), state: z.string(), lastError: z.string().nullable() }),
+    waiting: z.array(z.object({ id: z.string(), kind: z.string(), state: z.string() })),
+  })),
+});
+
+const WaitingListed = z.array(z.object({
+  id: z.string(),
+  waitingBehind: z.object({ id: z.string(), state: z.string() }).nullable(),
+}));
+
 const Moved = z.object({ id: z.string(), state: z.string(), attempts: z.number() });
 
 const Row = z.object({
@@ -377,6 +390,34 @@ describe('the queue as a session sees it', () => {
       assert.deepEqual(status.held.map((action) => action.id), [held.id]);
       assert.equal(status.held[0]?.ageDays, 3);
       assert.equal(status.held[0]?.origin, 'a session waiting for a deploy');
+    });
+  });
+
+  it('shows an issue stuck behind a failed comment, in the status and in the listing', async () => {
+    await withHarness(async ({ client, container, clock }) => {
+      const comment = Filed.parse(bodyOf(await call(client, 'board_enqueue', {
+        kind: 'issue.comment',
+        payload: { repo: FIRST, issue: 12, body: 'the fix is live' },
+      })));
+      const close = Filed.parse(bodyOf(await call(client, 'board_enqueue', {
+        kind: 'issue.close',
+        payload: { repo: FIRST, issue: 12, reason: 'completed' },
+      })));
+      const action = await container.repository.get(comment.id);
+      assert.ok(action !== null);
+      action.start(clock.now());
+      action.failTransient(clock.now(), 'the API answered 502', 1, 30);
+      await container.repository.update(action);
+
+      const status = Stopped.parse(bodyOf(await call(client, 'board_status')));
+      assert.deepEqual(status.stopped, [{
+        ref: `${FIRST}#12`,
+        front: { id: comment.id, kind: 'issue.comment', state: 'failed', lastError: 'the API answered 502' },
+        waiting: [{ id: close.id, kind: 'issue.close', state: 'queued' }],
+      }]);
+
+      const listed = WaitingListed.parse(bodyOf(await call(client, 'board_queue', { states: ['queued'] })));
+      assert.deepEqual(listed, [{ id: close.id, waitingBehind: { id: comment.id, state: 'failed' } }]);
     });
   });
 

@@ -1,4 +1,5 @@
 import type { Action, ActionState } from '../domain/action.ts';
+import { stoppedIssues } from '../domain/issue-order.ts';
 import type { ActionFilter, ActionRepository } from './ports.ts';
 
 /**
@@ -38,6 +39,21 @@ export function actionView(action: Action): ActionView {
   };
 }
 
+/** The failed or blocked action another one waits behind on the same issue. */
+export type FrontView = {
+  id: string;
+  state: ActionState;
+};
+
+/**
+ * An action as a listing shows it: what it is, and, when it is waiting behind a
+ * failed or blocked action on its issue, which one. Such an action will not run
+ * until that one is retried or cancelled, however long the queue is left alone.
+ */
+export type ListedActionView = ActionView & {
+  waitingBehind: FrontView | null;
+};
+
 /** The queue, filtered, oldest first. */
 export class ListActions {
   readonly #repository: ActionRepository;
@@ -46,8 +62,32 @@ export class ListActions {
     this.#repository = repository;
   }
 
-  async execute(filter: ActionFilter = {}): Promise<ActionView[]> {
+  async execute(filter: ActionFilter = {}): Promise<ListedActionView[]> {
     const actions = await this.#repository.list(filter);
-    return actions.map(actionView);
+    const fronts = await this.#frontsOf(actions, filter);
+    return actions.map((action) => ({ ...actionView(action), waitingBehind: fronts.get(action.id) ?? null }));
+  }
+
+  /**
+   * Which stopped action each listed one waits behind. The issue's whole line is
+   * read, not only the listed actions, because the action in front need not match
+   * the filter: a listing of queued work still has to say what holds it.
+   */
+  async #frontsOf(listed: readonly Action[], filter: ActionFilter): Promise<Map<string, FrontView>> {
+    const fronts = new Map<string, FrontView>();
+    if (!listed.some((action) => action.state === 'queued' || action.state === 'held')) {
+      return fronts;
+    }
+    const open = await this.#repository.list({
+      states: ['blocked', 'failed', 'held', 'queued'],
+      repo: filter.repo,
+      issue: filter.issue,
+    });
+    for (const stopped of stoppedIssues(open)) {
+      for (const waiting of stopped.waiting) {
+        fronts.set(waiting.id, { id: stopped.front.id, state: stopped.front.state });
+      }
+    }
+    return fronts;
   }
 }

@@ -82,7 +82,9 @@ export interface ActionRepository {
    * Takes the next action a worker may run and marks it running in the same
    * transaction, so two ticks cannot take the same one. Actions on one issue run
    * in the order they were filed: an action is not claimable while an older
-   * action on the same issue is queued or running.
+   * action on the same issue is queued, running, failed or blocked. A failed or
+   * blocked action keeps holding its issue until it is retried (and so queued
+   * again) or cancelled; a held action holds nothing until it is released.
    */
   claimNextRunnable(now: Date): Promise<Action | null>;
 

@@ -1,4 +1,6 @@
-import type { Action } from '../domain/action.ts';
+import type { Action, ActionState } from '../domain/action.ts';
+import { stoppedIssues } from '../domain/issue-order.ts';
+import type { StoppedIssue } from '../domain/issue-order.ts';
 import { ownerJobsOf } from '../domain/sync-config.ts';
 import type { MirrorScope, OwnerJob, SyncConfig } from '../domain/sync-config.ts';
 import { readLastAudit, readLastBudget, readLastTickAt } from './queue-meta.ts';
@@ -65,6 +67,30 @@ export type HeldActionView = {
   ageDays: number;
 };
 
+/** An action waiting its turn behind a stopped one on the same issue. */
+export type WaitingActionView = {
+  id: string;
+  kind: string;
+  state: ActionState;
+};
+
+/**
+ * An issue whose actions stopped moving: the failed or blocked action in front,
+ * and what was filed after it and will not run until somebody retries or cancels
+ * that one. A failed comment and the close waiting behind it read here as one
+ * issue that is stuck, not as one failure and one action about to happen.
+ */
+export type StoppedIssueView = {
+  ref: string | null;
+  front: {
+    id: string;
+    kind: string;
+    state: ActionState;
+    lastError: string | null;
+  };
+  waiting: WaitingActionView[];
+};
+
 /**
  * Keeping the boards in step with a coordination server, as this worker does it:
  * which directions are on, what each did last, and why this worker declined when
@@ -95,6 +121,8 @@ export type QueueStatusView = {
   failed: StuckActionView[];
   held: HeldActionView[];
   delayed: DelayedActionView[];
+  /** The issues held up behind a failed or blocked action, oldest front first. */
+  stopped: StoppedIssueView[];
   /** Null when this deployment keeps nothing in step. */
   sync: SyncView | null;
 };
@@ -105,7 +133,9 @@ export type QueueStatusView = {
  * Held actions are reported with their age, oldest first, rather than as a
  * number: a move somebody held for a deploy and never released is a ticket that
  * never reaches anyone, and it only looks wrong once you can see how long it has
- * been sitting there.
+ * been sitting there. An issue held up behind a failed or blocked action is
+ * reported with what waits behind it, for the same reason: the close that never
+ * happens is invisible in a count of queued work.
  */
 export class QueueStatus {
   readonly #repository: ActionRepository;
@@ -120,17 +150,19 @@ export class QueueStatus {
 
   async execute(): Promise<QueueStatusView> {
     const now = this.#clock.now();
-    const [counts, pause, lastTickAt, lastBudget, lastAudit, blocked, failed, held, queued] = await Promise.all([
+    const [counts, pause, lastTickAt, lastBudget, lastAudit, open] = await Promise.all([
       this.#repository.counts(),
       this.#repository.getPause(),
       readLastTickAt(this.#repository),
       readLastBudget(this.#repository),
       readLastAudit(this.#repository),
-      this.#repository.list({ states: ['blocked'] }),
-      this.#repository.list({ states: ['failed'] }),
-      this.#repository.list({ states: ['held'] }),
-      this.#repository.list({ states: ['queued'] }),
+      this.#repository.list({ states: ['blocked', 'failed', 'held', 'queued'] }),
     ]);
+    const inState = (state: ActionState): Action[] => open.filter((action) => action.state === state);
+    const blocked = inState('blocked');
+    const failed = inState('failed');
+    const held = inState('held');
+    const queued = inState('queued');
 
     return {
       counts,
@@ -179,6 +211,7 @@ export class QueueStatus {
           };
         })
         .sort((one, other) => one.runnableAt.localeCompare(other.runnableAt)),
+      stopped: stoppedIssues(open).map(stoppedIssueView),
       sync: await this.#syncView(),
     };
   }
@@ -226,6 +259,15 @@ function stuck(action: Action): StuckActionView {
     kind: action.kind,
     ref: action.issueRef === null ? null : action.issueRef.toString(),
     lastError: action.lastError,
+  };
+}
+
+function stoppedIssueView(stopped: StoppedIssue): StoppedIssueView {
+  const front = stopped.front;
+  return {
+    ref: front.issueRef === null ? null : front.issueRef.toString(),
+    front: { id: front.id, kind: front.kind, state: front.state, lastError: front.lastError },
+    waiting: stopped.waiting.map((action) => ({ id: action.id, kind: action.kind, state: action.state })),
   };
 }
 

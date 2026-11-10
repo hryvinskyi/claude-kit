@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { CancelAction } from '../../src/application/cancel-action.ts';
+import { RetryAction } from '../../src/application/retry-action.ts';
 import { readSecondaryHits } from '../../src/application/queue-meta.ts';
 import {
   CredentialRejected,
+  IssueNotFound,
   PrimaryRateLimited,
   SecondaryRateLimited,
   TransientFailure,
@@ -12,6 +15,7 @@ import { marker } from '../../src/domain/kinds/posts.ts';
 import { QueuePause } from '../../src/domain/queue-pause.ts';
 import { seedItem } from '../fakes/fake-board-gateway.ts';
 import { FIRST, RESET, graphqlBudget, setFields, tickFixture } from './tick-fixture.ts';
+import type { TickFixture } from './tick-fixture.ts';
 
 const twelve = IssueRef.of(FIRST, 12);
 const thirteen = IssueRef.of(FIRST, 13);
@@ -500,6 +504,67 @@ describe('DrainQueue and the issues', () => {
       assert.ok(tick.issues.calls.indexOf('comment') < tick.issues.calls.indexOf('close'));
     });
 
+  it('leaves the close queued, tick after tick, behind an evidence comment that failed', async () => {
+    const tick = await commentThenClose();
+    await failTheComment(tick);
+
+    const comment = await tick.stored('c-1');
+    assert.equal(comment.state, 'failed');
+    assert.equal(comment.attempts, 5);
+    for (let more = 0; more < 3; more += 1) {
+      tick.clock.advanceMinutes(60);
+      const report = await tick.drain.run();
+      assert.equal(report.executed, 0, 'nothing on the issue runs past the failed comment');
+    }
+    assert.equal((await tick.stored('c-2')).state, 'queued');
+    assert.equal(tick.issues.stateOf(twelve), 'open');
+    assert.equal(tick.issues.commentsOn(twelve).length, 0);
+    assert.deepEqual(tick.issues.closed, []);
+  });
+
+  it('posts the comment and then closes the issue once the failed comment is retried', async () => {
+    const tick = await commentThenClose();
+    await failTheComment(tick);
+
+    await new RetryAction(tick.repository, tick.clock).execute('c-1');
+    const report = await tick.drain.run();
+
+    assert.equal(report.done, 2);
+    assert.equal((await tick.stored('c-1')).state, 'done');
+    assert.equal((await tick.stored('c-2')).state, 'done');
+    assert.equal(tick.issues.commentsOn(twelve).length, 1);
+    assert.equal(tick.issues.stateOf(twelve), 'closed');
+    assert.ok(tick.issues.calls.lastIndexOf('comment') < tick.issues.calls.lastIndexOf('close'));
+  });
+
+  it('closes the issue once the failed comment in front of it is cancelled', async () => {
+    const tick = await commentThenClose();
+    await failTheComment(tick);
+
+    await new CancelAction(tick.repository, tick.clock).execute('c-1');
+    const report = await tick.drain.run();
+
+    assert.equal(report.done, 1);
+    assert.equal((await tick.stored('c-2')).state, 'done');
+    assert.equal(tick.issues.stateOf(twelve), 'closed');
+    assert.equal(tick.issues.commentsOn(twelve).length, 0);
+  });
+
+  it('leaves the close queued behind an evidence comment that is blocked', async () => {
+    const tick = await commentThenClose();
+    tick.issues.fail('comment', new IssueNotFound(twelve.toString()));
+
+    const first = await tick.drain.run();
+
+    assert.equal(first.blocked, 1);
+    assert.equal(first.executed, 1);
+    assert.equal((await tick.stored('c-1')).state, 'blocked');
+    tick.clock.advanceMinutes(60);
+    assert.equal((await tick.drain.run()).executed, 0);
+    assert.equal((await tick.stored('c-2')).state, 'queued');
+    assert.equal(tick.issues.stateOf(twelve), 'open');
+  });
+
   it('adopts the comment a failed run had already posted instead of posting it again', async () => {
     const tick = tickFixture({ issues: [{ ref: twelve }] });
     const filed = tick.clock.now();
@@ -547,3 +612,26 @@ describe('DrainQueue and the issues', () => {
     assert.deepEqual(tick.sleeper.slept, [1500]);
   });
 });
+
+/** An open issue with an evidence comment filed on it and the close filed after it. */
+async function commentThenClose(): Promise<TickFixture> {
+  const tick = tickFixture({ issues: [{ ref: twelve }] });
+  await tick.file({ id: 'c-1', kind: 'issue.comment', payload: { repo: FIRST, issue: 12, body: 'the fix is live' } });
+  await tick.file({
+    id: 'c-2',
+    kind: 'issue.close',
+    payload: { repo: FIRST, issue: 12, reason: 'completed' },
+    createdAt: new Date(tick.clock.now().getTime() + 1000),
+  });
+  return tick;
+}
+
+/** Refuses the comment on every attempt it has, a tick per attempt, until it fails for good. */
+async function failTheComment(tick: TickFixture): Promise<void> {
+  for (let attempt = 1; attempt <= tick.config.worker.maxAttempts; attempt += 1) {
+    tick.issues.fail('comment', new TransientFailure('the API answered 502'));
+    const report = await tick.drain.run();
+    assert.equal(report.executed, 1, `only the comment runs on attempt ${String(attempt)}`);
+    tick.clock.advanceMinutes(60);
+  }
+}

@@ -14,9 +14,9 @@ import { buildContainer } from './container.ts';
 import type { Container } from './container.ts';
 import { sentenceOf } from './failure-text.ts';
 import {
-  actionLine,
   boardItemLines,
   enqueueLines,
+  listedLine,
   movedLine,
   statusLines,
   tickLines,
@@ -187,7 +187,7 @@ const list: Command = {
   },
   run: async (context) => {
     const actions = await context.container().list.execute(filterFrom(context));
-    printed(context, actions, () => actions.map(actionLine));
+    printed(context, actions, () => actions.map(listedLine));
   },
 };
 

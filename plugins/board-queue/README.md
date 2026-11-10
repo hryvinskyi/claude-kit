@@ -148,14 +148,23 @@ and nothing new is filed. A request with a key never merges with another.
    enqueue ──────────────→ queued ──claim──→ running ──→ done
                              ↑  ↑               │
              backoff ────────┘  └── requeue ────┤   (a refusal that was not this action's fault)
-                                                ├──→ blocked ──retry──→ queued
-                                                ├──→ failed  ──retry──→ queued
+                                                ├──→ blocked ──retry──→ queued   (holds its issue until then)
+                                                ├──→ failed  ──retry──→ queued   (holds its issue until then)
                                                 └──→ skipped   (a condition it carried did not hold)
    queued | held | blocked | failed ──cancel──→ cancelled
 ```
 
 - Actions on the same issue run in the order they were filed, so a comment filed before a close is posted
-  before the issue closes. No dependency has to be declared for that.
+  before the issue closes. No dependency has to be declared for that. An action holds its issue while it
+  is queued or running, and also once it has **failed** or is **blocked**: nothing filed after it on that
+  issue runs until it is retried and gets through, or is cancelled. A close filed behind an evidence comment
+  that failed therefore stays queued, tick after tick, rather than closing the issue without its evidence.
+  `status` (and `board_status`) lists each such issue under `stopped`, with the action in front and what
+  waits behind it, and `list` (and `board_queue`) marks every waiting action with the one it waits behind:
+  `retry` the one in front once its cause is fixed, or `cancel` it to let the rest go. Done, skipped and
+  cancelled actions hold nothing.
+- A **held** action does not hold its issue: work filed after it runs as usual while it waits for its
+  release, and once released it is queued and takes its place in the line from then on.
 - A write is done only once reading it back agrees with it; a mismatch is a failure carrying both values.
 - An action a run died holding — the machine went down, the process was killed — is put back at the start
   of the next run, with the attempt it was charged returned. Nothing else would free it: `cancel` and

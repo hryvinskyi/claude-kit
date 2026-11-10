@@ -57,7 +57,10 @@ export function createMcpServer(container: Container): McpServer {
       description: [
         'List what is in the queue, oldest first, with each action\'s state, its payload as it was filed, how',
         'often it has been attempted and the error that stopped it. Filters narrow it; with none, the whole',
-        'queue comes back. This reads the queue only and costs no API allowance.',
+        'queue comes back. Actions on one issue run in the order they were filed, and a failed or blocked action',
+        'holds every action filed after it on its issue: such an action carries waitingBehind, the id and state',
+        'of the one in front, and runs only once that one is retried (board_retry) or cancelled (board_cancel).',
+        'This reads the queue only and costs no API allowance.',
       ].join(' '),
       inputSchema: {
         states: z.array(choiceOf(ACTION_STATES, 'an action state')).optional()
@@ -78,7 +81,10 @@ export function createMcpServer(container: Container): McpServer {
         'What the queue is doing: how many actions are in each state, whether it is waiting out a rate limit,',
         'when the worker last ran, what the last answer said was left of the allowance, the blocked actions',
         'with the error that stopped each one, and the held actions with how many days each has been waiting.',
-        'A held action nobody released is the thing to look for here. Where the deployment keeps the boards in',
+        'A held action nobody released is the thing to look for here. So is an issue under stopped: a failed or',
+        'blocked action holds every action filed after it on its issue, so a close waiting behind a failed',
+        'comment never runs on its own; retry the one in front once its cause is fixed (board_retry), or cancel',
+        'it (board_cancel), and the rest runs. Where the deployment keeps the boards in',
         'step with a coordination server, it also says whether the mirror and the importer are on, what each did',
         'last, and why this worker declined when it is not the one that runs them. This reads the queue only and',
         'costs no API allowance.',
@@ -106,7 +112,8 @@ export function createMcpServer(container: Container): McpServer {
       description: [
         'Take an action off the queue for good. An action the worker is running at this moment is not',
         'cancelled: it is out at the API, and a row that read "cancelled" while the write landed would be a',
-        'lie about the board.',
+        'lie about the board. Cancelling a failed or blocked action lets the actions filed after it on the same',
+        'issue run.',
       ].join(' '),
       inputSchema: { id: z.string().min(1).describe('the action id') },
     },
@@ -119,7 +126,8 @@ export function createMcpServer(container: Container): McpServer {
       description: [
         'Put a blocked or failed action back on the queue with its attempts reset. Use it once you have fixed',
         'what the action reported — added the option to the board, found the issue that was missing. Nothing',
-        'retries itself: an action is blocked because something outside this queue has to change first.',
+        'retries itself: an action is blocked because something outside this queue has to change first. Until',
+        'it is retried or cancelled, nothing filed after it on the same issue runs.',
       ].join(' '),
       inputSchema: { id: z.string().min(1).describe('the action id') },
     },

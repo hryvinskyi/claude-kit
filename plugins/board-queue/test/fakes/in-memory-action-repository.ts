@@ -5,6 +5,7 @@ import type { ActionProps } from '../../src/domain/action.ts';
 import type { BoardKey } from '../../src/domain/board-directory.ts';
 import type { CachedCatalog, FieldCatalog } from '../../src/domain/catalog.ts';
 import { StaleAction } from '../../src/domain/errors.ts';
+import { holdsItsIssue } from '../../src/domain/issue-order.ts';
 import type { IssueRef } from '../../src/domain/issue-ref.ts';
 import type { QueuePause } from '../../src/domain/queue-pause.ts';
 
@@ -201,7 +202,7 @@ export class InMemoryActionRepository implements ActionRepository {
       && isPast(candidate.props.notBefore, now)
       && !ordered.some((earlier) => earlier.props.id !== candidate.props.id
         && refKey(earlier.props) === refKey(candidate.props)
-        && (earlier.props.state === 'queued' || earlier.props.state === 'running')
+        && holdsItsIssue(earlier.props.state)
         && isEarlier(earlier, candidate)));
     if (next === undefined) {
       return Promise.resolve(null);

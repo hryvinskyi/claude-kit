@@ -2,8 +2,8 @@ import { ACTION_STATES } from '../application/action-states.ts';
 import type { TickReport } from '../application/drain-queue.ts';
 import type { SyncTickReport, WorkerReport } from '../application/run-tick.ts';
 import type { EnqueueOutcome } from '../application/enqueue-action.ts';
-import type { ActionView } from '../application/list-actions.ts';
-import type { QueueStatusView, SyncView } from '../application/queue-status.ts';
+import type { ActionView, ListedActionView } from '../application/list-actions.ts';
+import type { QueueStatusView, StoppedIssueView, SyncView } from '../application/queue-status.ts';
 import type { FinishRun, ForgeRepositoryRun, ForgeRun } from '../application/sync-meta.ts';
 import type { BoardItemView } from '../application/show-board-item.ts';
 import type { MirrorReport } from '../application/mirror-claims.ts';
@@ -49,6 +49,17 @@ export function actionLine(action: ActionView): string {
   return note === null ? line : `${line} — ${oneLine(note)}`;
 }
 
+/**
+ * One action as a listing shows it: its line, and, when it waits behind a failed
+ * or blocked action on its issue, which one and what lets it run.
+ */
+export function listedLine(action: ListedActionView): string {
+  const front = action.waitingBehind;
+  return front === null
+    ? actionLine(action)
+    : `${actionLine(action)} — waits behind ${front.state} ${front.id}; retry or cancel ${front.id} to let it run`;
+}
+
 /** One action that just changed, named by what happened to it. */
 export function movedLine(verb: string, action: ActionView): string {
   return `${verb} ${action.id} → ${action.state}`;
@@ -90,10 +101,22 @@ export function statusLines(status: QueueStatusView): string[] {
   for (const action of status.failed) {
     lines.push(`failed ${action.id} ${action.kind} ${action.ref ?? NO_ISSUE} — ${oneLine(action.lastError)}`);
   }
+  for (const issue of status.stopped) {
+    lines.push(stoppedIssueLine(issue));
+  }
   if (status.sync !== null) {
     lines.push(...syncStatusLines(status.sync));
   }
   return lines;
+}
+
+/** An issue held up behind a stopped action: what waits, and what lets it move. */
+function stoppedIssueLine(issue: StoppedIssueView): string {
+  const front = issue.front;
+  const waiting = issue.waiting.map((action) => `${action.id} ${action.kind}`
+    + (action.state === 'queued' ? '' : ` (${action.state})`)).join(', ');
+  return `stopped ${issue.ref ?? NO_ISSUE} behind ${front.state} ${front.id} ${front.kind} — `
+    + `${String(issue.waiting.length)} waiting: ${waiting}; retry or cancel ${front.id} to let them run`;
 }
 
 /** What keeping in step with the coordination server looks like from this worker. */

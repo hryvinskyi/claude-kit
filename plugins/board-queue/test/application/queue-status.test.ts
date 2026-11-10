@@ -110,6 +110,52 @@ describe('what the queue is doing', () => {
     assert.match(status.failed[0]?.lastError ?? '', /unreachable/);
   });
 
+  it('names each issue held up behind a failed or blocked action, with what waits behind it', async () => {
+    const { repository, clock, file } = fixture();
+    const at = (hour: number): Date => new Date(Date.UTC(2026, 0, 9, hour));
+    await file({ id: 'comment', state: 'failed', kind: 'issue.comment', issue: 12, createdAt: at(1) });
+    await file({ id: 'close', state: 'queued', kind: 'issue.close', issue: 12, createdAt: at(2) });
+    await file({ id: 'move', state: 'held', issue: 12, createdAt: at(3) });
+    await file({ id: 'fields', state: 'blocked', issue: 13, createdAt: at(4) });
+    await file({ id: 'after-fields', state: 'queued', issue: 13, createdAt: at(5) });
+    await file({ id: 'alone', state: 'failed', issue: 14, createdAt: at(6) });
+    await file({ id: 'free', state: 'queued', issue: 15, createdAt: at(7) });
+
+    const status = await new QueueStatus(repository, clock).execute();
+
+    assert.deepEqual(status.stopped, [
+      {
+        ref: 'example-org/first-repo#12',
+        front: { id: 'comment', kind: 'issue.comment', state: 'failed', lastError: 'the API was unreachable' },
+        waiting: [
+          { id: 'close', kind: 'issue.close', state: 'queued' },
+          { id: 'move', kind: 'board.set-fields', state: 'held' },
+        ],
+      },
+      {
+        ref: 'example-org/first-repo#13',
+        front: {
+          id: 'fields',
+          kind: 'board.set-fields',
+          state: 'blocked',
+          lastError: 'Severity has no option matching "urgent"; it accepts: S1 · blocking, S2 · broken',
+        },
+        waiting: [{ id: 'after-fields', kind: 'board.set-fields', state: 'queued' }],
+      },
+    ]);
+  });
+
+  it('names no stopped issue when nothing was filed after the stopped action, or it was filed before', async () => {
+    const { repository, clock, file } = fixture();
+    await file({ id: 'earlier', state: 'queued', issue: 12, createdAt: new Date(0) });
+    await file({ id: 'failed', state: 'failed', issue: 12, createdAt: new Date(1000) });
+
+    const status = await new QueueStatus(repository, clock).execute();
+
+    assert.deepEqual(status.stopped, []);
+    assert.deepEqual(status.failed.map((action) => action.id), ['failed']);
+  });
+
   it('reports the pause, the last tick, the last allowance and the last audit', async () => {
     const { repository, clock } = fixture();
     await repository.setPause(new QueuePause({

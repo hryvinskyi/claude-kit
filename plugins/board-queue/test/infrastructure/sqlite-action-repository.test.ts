@@ -75,6 +75,22 @@ function anAction(options: ActionOptions): Action {
   });
 }
 
+/**
+ * Takes the oldest action on the queue and stops it the way a run does: failed
+ * once it has used its attempts, or blocked on something a person has to fix.
+ */
+async function stopFirst(repository: SqliteActionRepository, stop: 'failed' | 'blocked', now: Date): Promise<void> {
+  const first = await repository.claimNextRunnable(now);
+  assert.ok(first !== null, 'something should be runnable');
+  if (stop === 'failed') {
+    first.failTransient(now, 'the API answered 502', 1, 30);
+  } else {
+    first.block(now, new OptionNotFound('Severity', 'urgent', ['S2 · broken']));
+  }
+  await repository.update(first);
+  assert.equal((await stored(repository, first.id)).state, stop);
+}
+
 async function stored(repository: SqliteActionRepository, id: string): Promise<Action> {
   const action = await repository.get(id);
   assert.ok(action !== null, `the queue should hold ${id}`);
@@ -371,26 +387,96 @@ describe('the queue on disk', () => {
     assert.equal((await repository.claimNextRunnable(at(7)))?.id, 'close');
   });
 
-  it('lets the next action on an issue run once the one before it has stopped', async (t) => {
-    for (const ending of ['blocked', 'cancelled'] as const) {
+  it('keeps an issue held behind a failed action, whenever it is asked', async (t) => {
+    const repository = databaseIn(t)();
+    await repository.insert(anAction({ id: 'comment', kind: 'issue.comment', createdAt: at(0) }));
+    await repository.insert(anAction({ id: 'close', kind: 'issue.close', createdAt: at(1) }));
+    await repository.insert(anAction({ id: 'elsewhere', issue: 99, createdAt: at(2) }));
+
+    await stopFirst(repository, 'failed', at(2));
+
+    assert.equal((await stored(repository, 'comment')).state, 'failed');
+    assert.equal((await repository.claimNextRunnable(at(3)))?.id, 'elsewhere', 'another issue is not held up');
+    for (const minutes of [4, 60, 24 * 60]) {
+      assert.equal(await repository.claimNextRunnable(at(minutes)), null, `nothing runs past it at ${String(minutes)}m`);
+    }
+    assert.equal((await stored(repository, 'close')).state, 'queued');
+  });
+
+  it('keeps an issue held behind a blocked action', async (t) => {
+    const repository = databaseIn(t)();
+    await repository.insert(anAction({ id: 'comment', kind: 'issue.comment', createdAt: at(0) }));
+    await repository.insert(anAction({ id: 'close', kind: 'issue.close', createdAt: at(1) }));
+
+    await stopFirst(repository, 'blocked', at(2));
+
+    assert.equal(await repository.claimNextRunnable(at(3)), null);
+    assert.equal(await repository.claimNextRunnable(at(60)), null);
+    assert.equal((await stored(repository, 'close')).state, 'queued');
+  });
+
+  it('runs the stopped action again first once it is retried, and what follows it after', async (t) => {
+    for (const stop of ['failed', 'blocked'] as const) {
+      const repository = databaseIn(t)();
+      await repository.insert(anAction({ id: 'comment', kind: 'issue.comment', createdAt: at(0) }));
+      await repository.insert(anAction({ id: 'close', kind: 'issue.close', createdAt: at(1) }));
+      await stopFirst(repository, stop, at(2));
+
+      const retried = await stored(repository, 'comment');
+      retried.retry(at(3));
+      await repository.update(retried);
+
+      const again = await repository.claimNextRunnable(at(4));
+      assert.equal(again?.id, 'comment', `the ${stop} action goes first again`);
+      assert.equal(await repository.claimNextRunnable(at(4)), null, 'the close waits while the comment runs');
+      assert.ok(again !== null);
+      again.succeed(at(5), 'posted');
+      await repository.update(again);
+
+      assert.equal((await repository.claimNextRunnable(at(6)))?.id, 'close');
+    }
+  });
+
+  it('lets the next action run once the stopped one before it is cancelled', async (t) => {
+    for (const stop of ['failed', 'blocked'] as const) {
+      const repository = databaseIn(t)();
+      await repository.insert(anAction({ id: 'comment', kind: 'issue.comment', createdAt: at(0) }));
+      await repository.insert(anAction({ id: 'close', kind: 'issue.close', createdAt: at(1) }));
+      await stopFirst(repository, stop, at(2));
+
+      const cancelled = await stored(repository, 'comment');
+      cancelled.cancel(at(3));
+      await repository.update(cancelled);
+
+      assert.equal((await repository.claimNextRunnable(at(4)))?.id, 'close', `a cancelled ${stop} action holds nothing`);
+    }
+  });
+
+  it('lets the next action run once the one before it has ended', async (t) => {
+    for (const ending of ['done', 'skipped'] as const) {
       const repository = databaseIn(t)();
       await repository.insert(anAction({ id: 'first', createdAt: at(0) }));
       await repository.insert(anAction({ id: 'second', createdAt: at(1) }));
 
       const first = await repository.claimNextRunnable(at(2));
       assert.ok(first !== null);
-      assert.equal(await repository.claimNextRunnable(at(2)), null, `nothing runs past a ${ending} predecessor`);
-
-      if (ending === 'blocked') {
-        first.block(at(3), new OptionNotFound('Severity', 'urgent', ['S2 · broken']));
+      if (ending === 'done') {
+        first.succeed(at(3), 'written');
       } else {
-        first.requeue(at(3));
-        first.cancel(at(3));
+        first.skip(at(3), 'the condition did not hold');
       }
       await repository.update(first);
 
-      assert.equal((await repository.claimNextRunnable(at(4)))?.id, 'second');
+      assert.equal((await repository.claimNextRunnable(at(4)))?.id, 'second', `a ${ending} action holds nothing`);
     }
+  });
+
+  it('does not hold an issue behind a held action', async (t) => {
+    const repository = databaseIn(t)();
+    await repository.insert(anAction({ id: 'held', createdAt: at(0), hold: true }));
+    await repository.insert(anAction({ id: 'comment', kind: 'issue.comment', createdAt: at(1) }));
+
+    assert.equal((await repository.claimNextRunnable(at(2)))?.id, 'comment');
   });
 
   it('orders actions that name no issue against each other only', async (t) => {

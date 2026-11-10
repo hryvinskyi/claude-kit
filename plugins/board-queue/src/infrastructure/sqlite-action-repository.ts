@@ -8,6 +8,7 @@ import type { BoardKey } from '../domain/board-directory.ts';
 import type { CachedCatalog, CatalogField, CatalogOption, FieldCatalog } from '../domain/catalog.ts';
 import { StaleAction } from '../domain/errors.ts';
 import { IssueRef } from '../domain/issue-ref.ts';
+import { ISSUE_HOLDING_STATES } from '../domain/issue-order.ts';
 import { QueuePause } from '../domain/queue-pause.ts';
 import { randomUUID } from 'node:crypto';
 import { LocalProcessTable, UNKNOWN_START } from './process-table.ts';
@@ -51,13 +52,17 @@ const UPDATE_SQL = 'UPDATE actions SET kind = ?, payload = ?, repo = ?, issue = 
  *
  * Actions on one issue run in the order they were filed — that is what orders a
  * comment before the close that follows it — so an action is passed over while an
- * older one on the same issue is still queued or running. Two actions filed in the
- * same millisecond are ordered by the order they were written, so neither can be
- * mistaken for the other's peer and both become claimable at once. An action that
- * names no issue is ordered against the other issue-less actions of its repository
+ * older one on the same issue is in a state that holds the issue: queued, running,
+ * or stopped as failed or blocked until a person retries or cancels it. Two
+ * actions filed in the same millisecond are ordered by the order they were
+ * written, so neither can be mistaken for the other's peer and both become
+ * claimable at once. Actions that name no issue are ordered against each other
  * only.
+ *
+ * Built when a repository opens rather than when the module loads, because the
+ * holding states are spelled through the stored-state table further down.
  */
-const CLAIM_SQL = `SELECT ${COLUMNS} FROM actions AS a
+const claimSql = (): string => `SELECT ${COLUMNS} FROM actions AS a
 WHERE a.state = 'queued'
   AND (a.not_before IS NULL OR a.not_before <= ?)
   AND NOT EXISTS (
@@ -65,7 +70,7 @@ WHERE a.state = 'queued'
     WHERE earlier.id <> a.id
       AND earlier.repo IS a.repo
       AND earlier.issue IS a.issue
-      AND earlier.state IN ('queued', 'running')
+      AND ${storedIn('earlier', ISSUE_HOLDING_STATES)}
       AND (earlier.created_at < a.created_at
         OR (earlier.created_at = a.created_at AND earlier.rowid < a.rowid))
   )
@@ -150,7 +155,7 @@ export class SqliteActionRepository implements ActionRepository {
     this.#updateStatement = this.#db.prepare(UPDATE_SQL);
     this.#getStatement = this.#db.prepare(`SELECT ${COLUMNS} FROM actions WHERE id = ?`);
     this.#byDedupeKeyStatement = this.#db.prepare(`SELECT ${COLUMNS} FROM actions WHERE dedupe_key = ?`);
-    this.#claimStatement = this.#db.prepare(CLAIM_SQL);
+    this.#claimStatement = this.#db.prepare(claimSql());
     this.#coalescibleStatement = this.#db.prepare(COALESCIBLE_SQL);
     this.#coalesceStatement = this.#db.prepare(COALESCE_SQL);
     this.#countsStatement = this.#db.prepare(
@@ -552,6 +557,20 @@ const STORED_AS: { readonly [S in ActionState]: StoredState } = {
   skipped: { state: 'cancelled', endedAs: 'skipped' },
   cancelled: { state: 'cancelled', endedAs: null },
 };
+
+/**
+ * A condition that a row of the given alias is in one of these states, spelled
+ * as they are stored. The states are this program's own constants, never input,
+ * so they are written into the statement as literals.
+ */
+function storedIn(alias: string, states: readonly ActionState[]): string {
+  const each = states.map((state) => {
+    const stored = STORED_AS[state];
+    const endedAs = stored.endedAs === null ? 'IS NULL' : `= '${stored.endedAs}'`;
+    return `(${alias}.state = '${stored.state}' AND ${alias}.ended_as ${endedAs})`;
+  });
+  return `(${each.join(' OR ')})`;
+}
 
 /** The state a stored row stands for, or null when it stands for none this version knows. */
 function stateOf(state: string, endedAs: string | null): ActionState | null {

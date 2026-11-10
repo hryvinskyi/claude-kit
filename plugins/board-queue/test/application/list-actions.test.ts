@@ -29,6 +29,7 @@ describe('reading the queue', () => {
       lastError: 'Severity has no option matching "urgent"; it accepts: S1 · blocking, S2 · broken',
       result: null,
       payload: { repo: 'example-org/first-repo', issue: 12, fields: { severity: 'S2' } },
+      waitingBehind: null,
     }]);
   });
 
@@ -55,5 +56,48 @@ describe('reading the queue', () => {
       (await list.execute({ repo: 'EXAMPLE-ORG/FIRST-REPO', states: ['queued'] })).map((view) => view.id),
       ['one', 'three'],
     );
+  });
+
+  it('names the failed or blocked action each waiting one is stuck behind, whatever the filter', async () => {
+    const { repository, file } = fixture();
+    const at = (hour: number): Date => new Date(Date.UTC(2026, 0, 9, hour));
+    await file({ id: 'comment', state: 'failed', kind: 'issue.comment', issue: 12, createdAt: at(1) });
+    await file({ id: 'close', state: 'queued', kind: 'issue.close', issue: 12, createdAt: at(2) });
+    await file({ id: 'move', state: 'held', issue: 12, createdAt: at(3) });
+    await file({ id: 'fields', state: 'blocked', issue: 13, createdAt: at(4) });
+    await file({ id: 'after-fields', state: 'queued', issue: 13, createdAt: at(5) });
+    await file({ id: 'before-fields', state: 'queued', issue: 14, createdAt: at(0) });
+    const list = new ListActions(repository);
+
+    const behind = (views: readonly { id: string; waitingBehind: { id: string; state: string } | null }[]) =>
+      Object.fromEntries(views.map((view) => [view.id, view.waitingBehind]));
+
+    assert.deepEqual(behind(await list.execute({})), {
+      'before-fields': null,
+      comment: null,
+      close: { id: 'comment', state: 'failed' },
+      move: { id: 'comment', state: 'failed' },
+      fields: null,
+      'after-fields': { id: 'fields', state: 'blocked' },
+    });
+    assert.deepEqual(
+      behind(await list.execute({ states: ['queued'], issue: 12 })),
+      { close: { id: 'comment', state: 'failed' } },
+      'the action in front is found though the filter leaves it out',
+    );
+  });
+
+  it('names nothing once the action in front is retried', async () => {
+    const { repository, clock, file } = fixture();
+    const failed = await file({ id: 'comment', state: 'failed', kind: 'issue.comment', createdAt: new Date(0) });
+    await file({ id: 'close', state: 'queued', kind: 'issue.close', createdAt: new Date(1000) });
+    const stored = await repository.get(failed.id);
+    assert.ok(stored !== null);
+    stored.retry(clock.now());
+    await repository.update(stored);
+
+    const views = await new ListActions(repository).execute({});
+
+    assert.deepEqual(views.map((view) => view.waitingBehind), [null, null]);
   });
 });
