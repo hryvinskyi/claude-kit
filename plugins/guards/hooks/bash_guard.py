@@ -24,13 +24,25 @@ rule sees the program.
 
 Every command line a command runs is judged by every rule, down to four
 lines deep: a `$(…)`, backtick or `<(…)` substitution (unquoted, inside
-double quotes, in an assignment, or in an unquoted here-document); the text
-of `sh|bash|zsh|dash [options] -c '<line>'`; what such a shell reads from a
-here-document or here-string when it has no script operand (or `-s`); the
-words of `eval`; and the words of `ddev exec [-s|-d <value>] ...` (joined, as
-ddev joins them for the container's shell, and as given). A here-document is
-judged only as what it is fed to: SQL to a database client, commands to a
-shell, written text to a file (see `writes`); to anything else it is text.
+double quotes, inside `${…}`, `$((…))` or `$[…]`, in an assignment, or in an
+unquoted here-document); the text of `sh|bash|zsh|dash [options] -c
+'<line>'`; the words of `eval`; the words of `ddev exec [-s|-d <value>] ...`
+and the remote command of `ssh [options] <host> [options] ...` (joined, as
+each joins them for the shell at the other end, and as given); the command
+of `docker exec` and `kubectl exec`; and the script a program reads from its
+stdin --
+a shell with no script operand, `-`, `-s` or /dev/stdin (/dev/fd/0),
+`source`/`.` of /dev/stdin, `ssh <host>` with no command, and `ddev ssh`.
+What reaches a stdin is a here-document, a here-string, or the words of the
+earlier segments of the pipeline and of every enclosing one (echo/printf
+words also with their escapes decoded); a script read from stdin is not
+also the stdin of the commands in it. A here-document is judged only as
+what it is fed to: SQL to a database client, commands to one of those
+readers, written text to a file (see `writes`); to anything else it is text.
+A command that nests a command line more than four deep is refused, and so
+is one nesting substitutions deeper than the scanner reads. A `$((` is
+arithmetic only when the parenthesis closing its inner group is followed at
+once by another; otherwise it is a substitution running a subshell.
 
 Rules look at argv[0] and its arguments, so a commit message or an `echo`
 that merely mentions a dangerous command passes. `cd` segments are tracked so
@@ -214,6 +226,20 @@ FD_WORD = re.compile(r"^(?:\d+|\{\w+\})$")
 # What a backslash escape in $'…' stands for; any other escaped character stands for itself
 ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b", "f": "\f", "v": "\v"}
 REDIRECT_OUT = {">", ">>", "&>", "&>>", ">|", "<>"}
+
+
+class Expansion(NamedTuple):
+    """A `$` construct read as one piece up to its balanced closing character."""
+
+    opening: str  # the text that opens it, ending in its `opener`
+    opener: str
+    closer: str
+
+
+# `$((` is not among them: it is arithmetic only when its inner group closes with `))` (Scanner.arithmetic)
+EXPANSIONS = (Expansion("${", "{", "}"), Expansion("$[", "[", "]"))
+# How deep substitutions and expansions may nest inside one another before a line is refused unread
+SUBSTITUTION_LIMIT = 64
 COPY_TOOLS = {"cp", "mv", "install"}
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -233,6 +259,10 @@ STANDARDS = "the engineering standards (CLAUDE.standards.md"
 
 
 # ---------------------------------------------------------------- parsing
+
+class NestingTooDeep(Exception):
+    """A command line nests substitutions or expansions deeper than SUBSTITUTION_LIMIT."""
+
 
 class Token(str):
     """A shell word or operator, as the shell reads it.
@@ -273,13 +303,22 @@ class Scanner:
     Single and double quotes, backslash escapes and a backslash-newline continuation (which
     joins the lines) are resolved; `#` starts a comment only where a word starts. `$(…)`,
     backticks and `<(…)`/`>(…)` stay in their word as written and their text is recorded on it;
-    `${…}`, `$((…))` and `$'…'` are read as one piece. At each newline that ends a command line,
-    the bodies of the here-documents opened on it are taken out of the text and set on their
-    operators, so no body is ever read as commands.
+    `${…}`, `$((…))`, `$[…]`, a `(( … ))` arithmetic command and `$'…'` are read as one piece,
+    so a `<<` inside one is no operator, and the substitutions inside them are recorded on the
+    word. At each newline that ends a command line, the bodies of the here-documents opened on
+    it are taken out of the text and set on their operators, so no body is ever read as
+    commands. Nesting deeper than SUBSTITUTION_LIMIT raises NestingTooDeep.
     """
 
-    def __init__(self, text):
-        self.text, self.pos, self.pending, self.closed = text, 0, [], False
+    def __init__(self, text, depth=0):
+        self.text, self.pos, self.pending, self.closed, self.depth = text, 0, [], False, depth
+        self.not_arithmetic = set()  # positions of `((` and `$((` that open no arithmetic
+
+    def enter(self):
+        """Go one substitution or expansion deeper; past SUBSTITUTION_LIMIT the line is not read."""
+        self.depth += 1
+        if self.depth > SUBSTITUTION_LIMIT:
+            raise NestingTooDeep()
 
     def scan(self, closing=False):
         """Read Tokens to the end of the text or, with `closing`, to the `)` that closes a substitution."""
@@ -331,6 +370,8 @@ class Scanner:
                 self.read_heredocs()
                 blank = True
                 continue
+            elif c == "(" and not word.started and text.startswith("((", self.pos) and self.arithmetic(word, "((", True):
+                pass
             elif c in "<>" and text.startswith("(", self.pos + 1):
                 self.pos += 2
                 word.add(c + "(" + self.substitution(word) + ")")
@@ -358,42 +399,85 @@ class Scanner:
     def substitution(self, word):
         """Read a `$(…)` body up to its closing parenthesis, record its text on the word and return it."""
         start = self.pos
+        self.enter()
         self.closed = False
         self.scan(closing=True)
         inner = self.text[start:self.pos - 1 if self.closed else self.pos]
         self.closed = False
+        self.depth -= 1
         word.subs.append(inner)
         return inner
+
+    def balanced(self, sink, depth, opener, closer):
+        """Read from the cursor to the `closer` that brings `depth` to zero, and return the text read.
+
+        Quotes and escapes are skipped as units; a `$` construct and a backtick substitution are
+        read whole, so the command lines they run are recorded on `sink` and their parentheses
+        and braces are not counted.
+        """
+        text, start = self.text, self.pos
+        self.enter()
+        while self.pos < len(text) and depth:
+            c = text[self.pos]
+            if c == "\\":
+                self.pos = min(self.pos + 2, len(text))
+            elif c == "'":
+                close = text.find("'", self.pos + 1)
+                self.pos = len(text) if close < 0 else close + 1
+            elif c == '"':
+                self.pos += 1
+                self.double_quoted(sink, '"')
+            elif c == "`":
+                self.backtick(sink)
+            elif c == "$" and self.dollar(sink, False):
+                pass
+            else:
+                depth += (c == opener) - (c == closer)
+                self.pos += 1
+        self.depth -= 1
+        return text[start:self.pos]
+
+    def arithmetic(self, word, opening, quoted):
+        """Read a `(( … ))` arithmetic command or a `$(( … ))` expansion at the cursor into the word as one piece.
+
+        It is one only when the parenthesis that closes the inner `(` is followed at once by
+        another; otherwise (`((cd x; ls) )`, `$((cd x; ls) )`) it is a subshell inside a subshell
+        or a substitution, the cursor is left where it was and False is returned. A position
+        found not to open one is remembered, so text nesting many of them is read once.
+
+        @param opening `((` or `$((`, the text at the cursor
+        @param quoted  whether the piece is added to the word as quoted text
+        """
+        start, pending = self.pos, list(self.pending)
+        if start in self.not_arithmetic:
+            return False
+        self.pos += len(opening)
+        sink = WordBuilder()
+        self.balanced(sink, 1, "(", ")")
+        if not self.text.startswith(")", self.pos):
+            self.pos, self.pending = start, pending
+            self.not_arithmetic.add(start)
+            return False
+        self.pos += 1
+        word.add(self.text[start:self.pos], quoted)
+        word.subs.extend(sink.subs)
+        return True
 
     def dollar(self, word, in_quotes):
         """Read the `$` construct at the cursor into the word; False when it is a plain `$`."""
         text, start = self.text, self.pos
         nxt = text[start + 1:start + 2]
-        if text.startswith("$((", start):
-            end, depth = start + 3, 2
-            while end < len(text) and depth:
-                depth += (text[end] == "(") - (text[end] == ")")
-                end += 1
-            word.add(text[start:end])
-            self.pos = end
+        enclosed = next((e for e in EXPANSIONS if text.startswith(e.opening, start)), None)
+        if text.startswith("$((", start) and self.arithmetic(word, "$((", False):
+            pass
+        elif enclosed is not None:
+            self.pos += len(enclosed.opening)
+            sink = WordBuilder()
+            word.add(text[start:self.pos] + self.balanced(sink, 1, enclosed.opener, enclosed.closer))
+            word.subs.extend(sink.subs)
         elif nxt == "(":
             self.pos += 2
             word.add("$(" + self.substitution(word) + ")")
-        elif nxt == "{":
-            end, depth = start + 2, 1
-            while end < len(text) and depth:
-                ch = text[end]
-                if ch == "\\":
-                    end += 2
-                    continue
-                if ch in "'\"":
-                    close = text.find(ch, end + 1)
-                    end = len(text) if close < 0 else close + 1
-                    continue
-                depth += (ch == "{") - (ch == "}")
-                end += 1
-            word.add(text[start:end])
-            self.pos = end
         elif nxt == "'" and not in_quotes:
             end, parts = start + 2, []
             while end < len(text) and text[end] != "'":
@@ -457,24 +541,24 @@ class Scanner:
     def read_heredocs(self):
         """Take the bodies of the pending here-documents out of the text, from the cursor on.
 
-        A body ends at a line that is its delimiter (leading or trailing tabs allowed, as `<<-`
-        allows them), or at the end of the text. An unquoted delimiter leaves the body open to
+        A body ends at a line that is exactly its delimiter -- for `<<-`, after its leading tabs
+        are stripped -- or at the end of the text. An unquoted delimiter leaves the body open to
         expansion, so its substitutions are recorded on the operator.
         """
         text, pending, self.pending = self.text, self.pending, []
         for operator, delimiter in pending:
-            lines = []
+            lines, strip_tabs = [], operator == "<<-"
             while self.pos < len(text):
                 end = text.find("\n", self.pos)
                 end = len(text) if end < 0 else end
                 line = text[self.pos:end]
                 self.pos = min(end + 1, len(text))
-                if line.strip("\t") == delimiter:
+                if (line.lstrip("\t") if strip_tabs else line) == delimiter:
                     break
                 lines.append(line)
             operator.body = "\n".join(lines)
             if not delimiter.quoted:
-                reader, sink = Scanner(operator.body), WordBuilder()
+                reader, sink = Scanner(operator.body, self.depth), WordBuilder()
                 reader.double_quoted(sink, None)
                 operator.subs = sink.subs
 
@@ -921,10 +1005,24 @@ PSQL_VALUE_OPTIONS = "dhUpfFoPRTvL"
 # mysql's short options whose value is the rest of the group or the next word (-e is read on its own)
 MYSQL_VALUE_OPTIONS = "DhPSu"
 SHELLS = ("sh", "bash", "zsh", "dash")
+# The names a shell, `source` or `.` can be given for the file it reads, that are its stdin
+STDIN_FILES = {"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
+# ssh's options that take the next word (or the rest of their group) as their value
+SSH_VALUE_OPTIONS = frozenset(f"-{c}" for c in "BbcDEeFIiJLlmOoPpQRSWw")
+DOCKER_VALUE_OPTIONS = frozenset({"-H", "--host", "-c", "--context", "--config", "-l", "--log-level",
+                                  "--tlscacert", "--tlscert", "--tlskey"})
+DOCKER_EXEC_VALUE_OPTIONS = frozenset({"-e", "--env", "--env-file", "-u", "--user", "-w", "--workdir",
+                                       "--detach-keys"})
+KUBECTL_VALUE_OPTIONS = frozenset({"-n", "--namespace", "-c", "--container", "-f", "--filename", "--context",
+                                   "--kubeconfig", "--cluster", "--user", "-s", "--server",
+                                   "--pod-running-timeout"})
 # Shell options whose value is the next word: `-o pipefail`, `+O extglob`, `--rcfile <file>`
 SHELL_OPTIONS_WITH_VALUE = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
-# How deep the rules read command lines nested inside command lines; a deeper one is not read
+# How deep the rules read command lines nested inside command lines; a command nesting one deeper is refused
 SHELL_NESTING_LIMIT = 4
+NESTED_TOO_DEEP = (f"the command nests command lines more than {SHELL_NESTING_LIMIT} deep (substitutions, "
+                   "`bash -c`, `eval`, `ssh` and the like inside one another), so the innermost cannot be "
+                   "checked. Split it into steps: run the inner command on its own.")
 # A scratch database named *_test or *_test<digits> is rebuilt from migrations on every stack.
 TEST_DATABASE_DROP = re.compile(
     r"DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?[\"`]?\w*_test\d*[\"`]?(?:\s+(?:WITH\s*)?\(\s*FORCE\s*\))?",
@@ -946,13 +1044,56 @@ def sql_client(argv):
     return None
 
 
+def script_from_stdin(stdin):
+    """The command lines of a program that reads its script from stdin: each text fed to it, with nothing fed on."""
+    return [(text, ()) for text in stdin]
+
+
+def command_from_words(words, stdin, joined):
+    """The command lines of a program that runs `words` as a command, its stdin passed on to it.
+
+    @param joined True when the words reach a shell joined with spaces (ssh, ddev exec), so the
+                  joined text is read as a command line; the words are also read as one command
+                  with their quoting intact, the form the person meant
+    """
+    if not words:
+        return []
+    quoted = " ".join(shlex.quote(w) for w in words)
+    if not joined:
+        return [(quoted, stdin)]
+    plain = " ".join(words)
+    return [(plain, stdin), (quoted, stdin)] if len(words) > 1 else [(plain, stdin)]
+
+
+def read_options(words, value_options):
+    """Where the options at the start of `words` end: (the index after them, whether a `--` ended them)."""
+    j = 0
+    while j < len(words) and words[j].startswith("-") and len(words[j]) > 1:
+        if words[j] == "--":
+            return j + 1, True
+        j += option_words(words[j], value_options)
+    return j, False
+
+
+def after_options(words, value_options):
+    """The index of the first word of `words` that is not an option or the value of one; `--` ends the options."""
+    return read_options(words, value_options)[0]
+
+
+def subcommand_words(argv, subcommand, value_options):
+    """The words after `<program> [global options] <subcommand>`, or None when its subcommand is another."""
+    j = 1 + after_options(argv[1:], value_options)
+    return argv[j + 1:] if argv[j:j + 1] == [subcommand] else None
+
+
 def shell_lines(argv, stdin):
     """The command lines `sh|bash|zsh|dash [options]` runs: the text of `-c`, or what it reads from stdin.
 
     `-c` may sit in a group of short options (`-lc`, `-ec`); the text is the first word after
-    the options. Without `-c` the shell runs a script named by its first operand, unless there
-    is none, it is `-`, or `-s` was given: then it reads its commands from stdin, and a
-    here-document or here-string fed to it is a command line.
+    the options, and the shell's stdin is passed on to it. Without `-c` the shell runs a script
+    named by its first operand, unless there is none, it is `-` or a name of stdin
+    (STDIN_FILES), or `-s` was given: then it reads its commands from stdin, and what is fed to
+    it is its script rather than the stdin of the commands in it.
     """
     command = from_stdin = False
     j = 1
@@ -966,39 +1107,87 @@ def shell_lines(argv, stdin):
                 from_stdin = from_stdin or "s" in a[1:]
             j += 1
         elif command:
-            return [a]
+            return [(a, stdin)]
         else:
-            return list(stdin) if from_stdin or a == "-" else []
-    return [] if command else list(stdin)
+            return script_from_stdin(stdin) if from_stdin or a == "-" or a in STDIN_FILES else []
+    return [] if command else script_from_stdin(stdin)
+
+
+def source_lines(argv, stdin):
+    """The command lines `source`/`.` runs from stdin, when the file it reads is a name of stdin."""
+    return script_from_stdin(stdin) if argv[1:2] and argv[1] in STDIN_FILES else []
 
 
 def eval_lines(argv, stdin):
-    """The command line `eval` runs: its words joined with spaces."""
-    return [" ".join(argv[1:])] if len(argv) > 1 else []
+    """The command line `eval` runs: its words joined with spaces, its stdin passed on to it."""
+    return [(" ".join(argv[1:]), stdin)] if len(argv) > 1 else []
 
 
-def ddev_exec_lines(argv, stdin):
-    """The command lines `ddev exec [its options] <words>` runs in the container; none for another ddev command.
+def ddev_lines(argv, stdin):
+    """The command lines `ddev exec [its options] <words>` and `ddev ssh` run in the container.
 
-    ddev joins the words with spaces and hands them to the container's shell, so the joined
-    text is read as a command line: a quoted `ddev exec "cd x && psql ..."` is the pipelines
-    it holds. Words given separately are read a second time as one command with their
-    quoting intact, the form the person meant.
+    ddev joins the words of `exec` with spaces and hands them to the container's shell, so the
+    joined text is read as a command line: a quoted `ddev exec "cd x && psql ..."` is the
+    pipelines it holds. `ddev ssh` opens the container's shell, which reads its commands from
+    stdin.
     """
-    if len(argv) < 2 or argv[1] != "exec":
+    if argv[1:2] == ["ssh"]:
+        return script_from_stdin(stdin)
+    if argv[1:2] != ["exec"]:
         return []
-    words, k = argv[2:], 0
-    while k < len(words) and words[k].startswith("-"):
-        k += 2 if words[k] in DDEV_EXEC_VALUE_OPTIONS else 1
-    words = words[k:]
-    if not words:
-        return []
-    joined = " ".join(words)
-    return [joined, " ".join(shlex.quote(w) for w in words)] if len(words) > 1 else [joined]
+    words = argv[2:]
+    return command_from_words(words[after_options(words, DDEV_EXEC_VALUE_OPTIONS):], stdin, True)
 
 
-# The command lines a program runs as shell input, by program name: (argv, stdin texts) -> texts
-NESTED_LINES = {**{shell: shell_lines for shell in SHELLS}, "eval": eval_lines, "ddev": ddev_exec_lines}
+def ssh_lines(argv, stdin):
+    """The command lines `ssh [options] <host> [options] [command]` runs on the host.
+
+    ssh reads options after the host as well as before it, up to a `--`; a `--` before the
+    host ends them for good. It joins the command's words with spaces for the remote shell;
+    without a command the remote shell reads its commands from stdin.
+    """
+    words = argv[1:]
+    j, ended = read_options(words, SSH_VALUE_OPTIONS)
+    if j >= len(words):
+        return []
+    command = words[j + 1:]
+    if not ended:
+        command = command[after_options(command, SSH_VALUE_OPTIONS):]
+    return command_from_words(command, stdin, True) if command else script_from_stdin(stdin)
+
+
+def docker_lines(argv, stdin):
+    """The command `docker [options] exec [its options] <container> <command>` runs, its stdin passed on."""
+    words = subcommand_words(argv, "exec", DOCKER_VALUE_OPTIONS)
+    if words is None:
+        return []
+    j = after_options(words, DOCKER_EXEC_VALUE_OPTIONS)
+    return command_from_words(words[j + 1:], stdin, False)
+
+
+def kubectl_lines(argv, stdin):
+    """The command `kubectl [options] exec [its options] <pod> [--] <command>` runs, its stdin passed on."""
+    words = subcommand_words(argv, "exec", KUBECTL_VALUE_OPTIONS)
+    if words is None:
+        return []
+    if "--" in words:
+        return command_from_words(words[words.index("--") + 1:], stdin, False)
+    j = after_options(words, KUBECTL_VALUE_OPTIONS)
+    return command_from_words(words[j + 1:], stdin, False)
+
+
+# The command lines a program runs as shell input, by program name:
+# (argv, stdin texts) -> [(command line, what is fed to its stdin)]
+NESTED_LINES = {
+    **{shell: shell_lines for shell in SHELLS},
+    "source": source_lines,
+    ".": source_lines,
+    "eval": eval_lines,
+    "ddev": ddev_lines,
+    "ssh": ssh_lines,
+    "docker": docker_lines,
+    "kubectl": kubectl_lines,
+}
 
 
 def mysql_statements(argv):
@@ -1245,6 +1434,23 @@ def line_text(line, commands):
     return "\n".join(produced) or None
 
 
+def decode_escapes(text):
+    """The text with the backslash escapes echo -e and printf print decoded (`\\n`, `\\t`, `\\\\`, …)."""
+    def decoded(match):
+        letter = match.group(1)
+        return ANSI_C_ESCAPES.get(letter, letter if letter == "\\" else match.group(0))
+
+    return re.sub(r"\\(.)", decoded, text, flags=re.S)
+
+
+def piped_words(argv):
+    """What a command is read as writing down its pipe: its arguments, and those of echo/printf decoded as well."""
+    words = list(argv[1:])
+    if argv and os.path.basename(argv[0]) in ("echo", "printf"):
+        words += [decoded for decoded in map(decode_escapes, argv[1:]) if decoded not in words]
+    return words
+
+
 def command_writes(argv, cwd, text):
     """The files a command writes by its arguments: tee, sed -i, perl -i, and the destination of cp/mv/install.
 
@@ -1350,8 +1556,12 @@ def judge(text, cwd, cmd, writes, depth=0, fed=()):
     Each simple command is judged with its reserved words, assignments and wrappers taken off;
     a `cd` moves `cwd` for the commands after it. Every command line a command runs -- its
     substitutions, and what it hands to a shell (NESTED_LINES) -- is judged the same way from
-    the directory the command runs in, while `depth` is under the nesting limit. The files a
-    command writes are collected in `writes`, to be judged once every command has passed.
+    the directory the command runs in, while `depth` is under the nesting limit; a command with
+    a line still to read at the limit is refused, since that line cannot be judged. A command's
+    stdin is what `fed` holds, what the earlier segments of its pipeline write, and its own
+    here-documents and here-strings; a reader passes it on to the line it runs, or, when it
+    read its script from that stdin, feeds that line nothing. The files a command writes are
+    collected in `writes`, to be judged once every command has passed.
 
     @param text   the command line
     @param cwd    the directory it starts in
@@ -1366,7 +1576,9 @@ def judge(text, cwd, cmd, writes, depth=0, fed=()):
         written = line_text(line, commands)
         for pipeline, argvs in zip(line, commands):
             for k, (segment, argv) in enumerate(zip(pipeline, argvs)):
-                for inner in segment.nested if deeper else []:
+                if not deeper and any(inner.strip() for inner in segment.nested):
+                    return NESTED_TOO_DEEP
+                for inner in segment.nested:
                     why = judge(inner, cwd, cmd, writes, depth + 1)
                     if why:
                         return why
@@ -1379,22 +1591,33 @@ def judge(text, cwd, cmd, writes, depth=0, fed=()):
                     continue
                 writes.extend(command_writes(argv, cwd, written))
                 stdin = [*fed, *(word for prev, prev_argv in zip(pipeline[:k], argvs[:k])
-                                 for word in [*prev_argv[1:], *prev.stdin]), *segment.stdin]
+                                 for word in [*piped_words(prev_argv), *prev.stdin]), *segment.stdin]
                 why = command_danger(argv, cwd, cmd, stdin)
                 if why:
                     return why
-                reader = NESTED_LINES.get(os.path.basename(argv[0])) if deeper else None
-                for inner in reader(argv, segment.stdin) if reader else []:
-                    why = judge(inner, cwd, cmd, writes, depth + 1, stdin)
+                reader = NESTED_LINES.get(os.path.basename(argv[0]))
+                nested = reader(argv, stdin) if reader else []
+                if not deeper and any(inner.strip() for inner, _ in nested):
+                    return NESTED_TOO_DEEP
+                for inner, inner_fed in nested:
+                    why = judge(inner, cwd, cmd, writes, depth + 1, inner_fed)
                     if why:
                         return why
     return None
 
 
 def check(cmd, cwd, transcript_path=""):
-    """Return why the command is refused, else None: its commands first, then the files it writes."""
+    """Return why the command is refused, else None: its commands first, then the files it writes.
+
+    A command that nests substitutions past SUBSTITUTION_LIMIT is refused, since what it runs
+    cannot be read.
+    """
     writes = []
-    return judge(cmd, cwd, cmd, writes) or write_danger(writes, transcript_path)
+    try:
+        return judge(cmd, cwd, cmd, writes) or write_danger(writes, transcript_path)
+    except NestingTooDeep:
+        return (f"the command nests substitutions or expansions more than {SUBSTITUTION_LIMIT} deep, "
+                "so what it runs cannot be read. Split it into steps.")
 
 
 def main() -> int:

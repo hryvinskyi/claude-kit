@@ -26,13 +26,24 @@ runs, not the first word of the line:
   `{ …; }`, a function body) and wrappers with their options (`sudo`, `env`, `nice`, `nohup`, `time`,
   `timeout`/`gtimeout`, `xargs`, `stdbuf`, `caffeinate`, `noglob`, `flock`, …) are taken off;
 - every command line a command runs is judged by every rule, down to four lines deep: `$(…)`,
-  backticks and `<(…)` (bare, inside double quotes, in an assignment such as `N="$(…)"`, or in an
-  unquoted here-document), `sh|bash|zsh|dash -c '…'`, `eval …`, `ddev exec …`, and what a shell
-  reads from a here-document or here-string;
+  backticks and `<(…)` (bare, inside double quotes, inside `${…}`, `$((…))` or `$[…]`, in an
+  assignment such as `N="$(…)"`, or in an unquoted here-document), `sh|bash|zsh|dash -c '…'`,
+  `eval …`, `ddev exec …`, `ssh <host> '…'` (with ssh's options before or after the host), `docker
+  exec …`, `kubectl exec … -- …`, and the script a program reads from its stdin. A command that
+  nests a command line more than four deep is refused, since the innermost cannot be read;
+- a `<<` inside `(( … ))`, `$(( … ))` or `$[ … ]` is a shift, not a here-document. `$((` is
+  arithmetic only when the parenthesis closing its inner group is followed at once by another, as
+  the shell reads it; `$((cmd) )` is a substitution running a subshell, and its command is judged;
 - a here-document body is taken out of the command before anything else is read, and judged only
-  as what it is fed to: SQL to a database client (`psql <<'SQL'`, `mysql <<< "…"`), commands to a
-  shell (`bash <<'EOF'`, `sh -s <<EOF`), written text to a file. Fed to anything else (`cat > notes.md`,
-  `git commit -F -`, `gh api … -F body=@-`) it is text, whatever commands it names.
+  as what it is fed to. A here-document, a here-string or what a pipe feeds (`cat <<'EOF' | bash`,
+  `printf '…' | sh`) is SQL to a database client (`psql <<'SQL'`, `mysql <<< "…"`) and commands to
+  a program that reads its script from stdin: a shell with no script operand, `-`, `-s` or
+  `/dev/stdin` (`bash <<'EOF'`, `sh -s <<EOF`, `bash /dev/stdin <<EOF`), `source /dev/stdin` and
+  `. /dev/stdin`, `ssh <host>` with no remote command (`ssh -tt <host> <<'EOF'`), `ddev ssh`, and the
+  shell that `ssh <host> bash -s`, `docker exec -i <container> sh`, `kubectl exec -i <pod> -- sh` or
+  `ddev exec bash` starts. A script read from stdin is not also the stdin of the commands in it. Fed
+  to anything else (`cat > notes.md`, `git commit -F -`, `gh api … -F body=@-`) it is text, whatever
+  commands it names; written to a file it is held to the shell-write rules.
 
 ## Stack plugins
 
