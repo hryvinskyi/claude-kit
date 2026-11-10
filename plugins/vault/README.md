@@ -137,7 +137,7 @@ A vault that is a repository of its own can be cloned by a team. Then:
   rebase and push, the session start's fetch and fast-forward — runs under `vault-commit.lock` in the
   state directory, so several sessions on one machine never work on the clone at once.
 - **Commit, then rebase, then push.** The session end commits what changed, rebases onto the remote
-  (never stashing) and pushes; a refused push is fetched, rebased and retried, three attempts in all,
+  (stashing nothing but held edits, below) and pushes; a refused push is fetched, rebased and retried, three attempts in all,
   with waits of one to four seconds. Fetch and push never wait on a prompt: they run the ssh command
   git would run (`$GIT_SSH_COMMAND`, `core.sshCommand`, `$GIT_SSH`, else `ssh`), and when that is
   OpenSSH they add `-o BatchMode=yes -o ConnectTimeout=N` after its own options.
@@ -145,17 +145,38 @@ A vault that is a repository of its own can be cloned by a team. Then:
   name — `.env` and `.env.*` (not `.env.example`/`.env.dist`/`.env.sample`/`.env.template`), `*.pem`,
   `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.kdbx`, a private `id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`
   key (not its `.pub`), `.netrc`, `.pgpass`, `credentials.json`, a non-Markdown file named with
-  `secret` — or for the lines the commit would add to it: a private-key block, a token of a well-known
-  shape, a JWT, an `Authorization: Bearer` value, a password inside a URI, or a secret-named key
-  (`password`, `pass`, `secret`, `token`, `api_key`, `private_key`, `access_key`, …) set to a literal.
-  Placeholders pass (`changeme`, `<your key>`, `${VAR}`, `***`, `…`, `REDACTED`, `your_…`, `xxx…`,
-  `%s`, anything under eight characters), and so do prose, a lower-case word, a number, an identifier
-  or code after the key, so a note that discusses token formats or shows one truncated is committed.
+  `secret` — or for the lines the commit would add to it: a private-key block (or one base64-encoded,
+  as a kubeconfig's `client-key-data` holds it; a certificate passes), a token of a well-known shape
+  (`ghp_`/`github_pat_`, `glpat-`, `xox?-`, `sk_live_`, `sk-ant-`, `sk-`/`sk-proj-`, `AIza…`, `npm_`,
+  `AKIA…`), a JWT, an `Authorization: Bearer` value, a password inside a URI, a secret-named key
+  (`password`, `secret`, `token`, `api_key`, `private_key`, `access_key`, …, and `pass` as the whole
+  key, `_`-joined or closing a camel-case one: `DB_PASS`, `smtpPass`) set to a literal, or a key named
+  by a last word `key` (`SIGNING_KEY`, `deploy-key`, `deploy key`, `client-key-data`; not a public
+  one) set to generated key material — long, letters and digits mixed in among each other. A key
+  counts only where a key stands: at the start of a line (after a list, quote or heading marker or
+  `export`), after a quote, backtick, bold, bracket or separator, as a query-string parameter, as a
+  `--flag value` or `--flag=value`, or as `KEY=value` with nothing around the `=`; operators are `:`,
+  `=` and `=>`. A label a note writes a credential under counts too: one whose last word is a secret
+  word (`staging db password:`, `**Admin password**:`, `Login: admin / Password:`, `GitHub token =`),
+  or `pass` when its value closes the line or a list of fields (`SSH pass: …`). Any other word
+  mid-sentence before a colon is prose (`in the same pass: …`, `the first pass: <name> was …`).
+  Placeholders pass (`changeme`, `<your key>`, `${VAR}`, `$VAR`, `%VAR%`, `[slot]`, `[[note]]`, `***`,
+  `…`, `REDACTED`, `your_…`, `xxx…`, `%s`, a value saying `example`, anything under eight characters),
+  and so do a quoted phrase of words (`"Required for every login"`), a word (lower-case or capitalised,
+  as in `password: see 1Password`), a number, an identifier, a path, a UUID or code after the key, so a
+  note that discusses token formats or shows one truncated is committed. A quoted value of words with a digit or a symbol
+  among them is a passphrase and is held (`wifi password: "purple monkey dishwasher 42"`). A literal that
+  merely starts with `$`, `%` or `[` is no reference and is held.
   A held file is unstaged and stays in the work tree; the rest is committed and pushed. The brief
   says `[VAULT] not committed: <path> (<reason>) — take the value out, or commit it by hand if it is
   no credential` until it is gone — the path and the reason class only, never the value, and the log
-  records no more. A held edit of a tracked note keeps the clone from rebasing onto a remote that
-  moved, and the brief names it; a held new file does not stop the session start's fast-forward.
+  records no more. A held edit of a tracked note does not stop the other notes from reaching a remote
+  that moved: it is stashed by its exact paths for the rebase and put back after it. When the remote
+  changed the same lines, deleted the note or renamed it, it cannot go back without conflict markers,
+  so each held path is returned on its own to the remote's version — removed where the remote has none
+  — the edits stay in git's stash, and the brief says `[VAULT] held edits of <path>
+  did not go back after the rebase … git -C "<vault>" stash pop stash@{n}` until that stash is gone.
+  A held new file does not stop the session start's fast-forward.
 - **A clone git is not done with** — a merge, rebase, cherry-pick or revert waiting for a person,
   unmerged files, a detached head — is neither committed nor pushed, and the brief says
   `[VAULT] not committed or pushed: …` with the way out until a session end finds it put right.

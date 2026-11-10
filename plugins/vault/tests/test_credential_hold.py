@@ -9,13 +9,16 @@ Pinned, each against the way a shared vault leaks:
 - a placeholder, a truncated token and prose about token formats are committed and pushed as before;
 - a held file never blocks the rest: the other notes of the same pass land;
 - a held edit of a tracked note is committed once the value is taken out, and leaves the brief;
-- a held new file does not stop the session start's fast-forward, and a held tracked edit that stops
-  a rebase is named on the brief.
+- a held new file does not stop the session start's fast-forward, and a held tracked edit does not stop
+  the other notes from rebasing onto a remote that moved: it is set aside for the rebase and put back,
+  or, when the remote changed the same lines, kept in git's stash and named on the brief with the
+  command that brings it back.
 
 Run from the plugin directory: python3 -m unittest discover -s tests
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import importlib
 import io
@@ -55,6 +58,14 @@ BEARER = shaped("", 32, step=19)
 URI_SECRET = "S3cr3t-Passw0rd"
 KEY_BODY = shaped("", 70, ALNUM + "+/", step=23)
 KEY_FILE = "\n".join(["-----BEGIN OPENSSH " + "PRIVATE KEY-----", KEY_BODY, KEY_BODY, "-----END OPENSSH PRIVATE KEY-----"])
+MODEL_PROJECT = shaped("sk-" + "proj-", 40, ALNUM + "_-", step=7)
+MAPS = shaped("AI" + "za", 35, ALNUM + "_-", step=5)
+REGISTRY = shaped("np" + "m_", 36, step=17)
+RANDOM_40 = shaped("", 40, step=29)
+RANDOM_16 = shaped("", 16, ALNUM + "!#@", step=31)
+DOLLAR_LITERAL = "$" + shaped("", 13, ALNUM + "!#@", step=11)
+PEM_IN_BASE64 = base64.b64encode(("-----BEGIN RSA " + "PRIVATE KEY-----\n" + KEY_BODY).encode()).decode()
+CERT_IN_BASE64 = base64.b64encode(("-----BEGIN CERTIFICATE-----\n" + KEY_BODY).encode()).decode()
 VALUES = (HOST_TOKEN, CI_TOKEN, CHAT, PAYMENT, MODEL, CLOUD, SIGNED, BEARER, URI_SECRET, KEY_BODY)
 
 PLACEHOLDERS = "\n".join([
@@ -118,6 +129,92 @@ class FilterTests(unittest.TestCase):
                 "The container's compiler pass: `ResolvesContractsPass` runs last.",
                 "A check at `PassConfig::TYPE_BEFORE_REMOVING` sees every definition."]
         for line in PLACEHOLDERS.splitlines() + PROSE.splitlines() + code:
+            self.assertIsNone(cf.content_reason([line]), line)
+
+    def test_model_cloud_registry_and_key_shapes_are_held(self) -> None:
+        cases = {
+            "OPENAI_KEY=" + MODEL_PROJECT: cf.ACCESS_TOKEN,
+            "OpenAI API key: " + MODEL_PROJECT: cf.ACCESS_TOKEN,
+            "**API key**: " + MODEL_PROJECT: cf.ACCESS_TOKEN,
+            "Google API key: " + MAPS: cf.ACCESS_TOKEN,
+            "GOOGLE_MAPS_KEY: " + MAPS: cf.ACCESS_TOKEN,
+            "publish with " + REGISTRY: cf.ACCESS_TOKEN,
+            "deploy key: " + RANDOM_40: cf.ASSIGNED_SECRET,
+            "SIGNING_KEY=" + RANDOM_40: cf.ASSIGNED_SECRET,
+            "    client-key-data: " + PEM_IN_BASE64: cf.PRIVATE_KEY,
+            "docker login --password " + RANDOM_16 + " registry.internal": cf.ASSIGNED_SECRET,
+            "docker login --password=" + RANDOM_16: cf.ASSIGNED_SECRET,
+            "    'password' => '" + RANDOM_16 + "',": cf.ASSIGNED_SECRET,
+            "DB_PASSWORD=" + DOLLAR_LITERAL: cf.ASSIGNED_SECRET,
+            "DB_PASSWORD=$" + RANDOM_16[:4] + "!" + RANDOM_16[4:8] + "#" + RANDOM_16[8:]: cf.ASSIGNED_SECRET,
+            "DB_PASSWORD=%" + RANDOM_16: cf.ASSIGNED_SECRET,
+            "DB_PASSWORD=[" + RANDOM_16: cf.ASSIGNED_SECRET,
+            "docker run -e DB_PASSWORD=" + RANDOM_16 + " app": cf.ASSIGNED_SECRET,
+            "$password = '" + RANDOM_16 + "';": cf.ASSIGNED_SECRET,
+            "DB_PASS=" + RANDOM_16: cf.ASSIGNED_SECRET,
+        }
+        for line, reason in cases.items():
+            self.assertEqual(cf.content_reason([line]), reason, line)
+
+    def test_note_prose_after_a_secret_word_passes(self) -> None:
+        lines = [
+            '- [ ] **Product-brand pass: "Acme Flow" → "Acme AI" in prose** — the rename covered every identifier',
+            "Unrelated but found in the same pass: `docs/assets/img/admin/crm-attributes.png` and its twin",
+            '— `/admin/account/tokens`: "API: full access", "Allows this token to call the API"',
+            "The `production` environment secrets: `DEPLOY_SSH_KEY/HOST/USER/PATH`; repo secret `RELEASE_TOKEN`",
+            'password: "Required for every login"', "**Token**: Rotated", "- token: Regenerated weekly",
+            "the first pass: Tr0ub4dorXq9 was the draft name", "compiler.pass: 'Reorders the definitions'",
+        ]
+        for line in lines:
+            self.assertIsNone(cf.content_reason([line]), line)
+
+    def test_placeholders_samples_and_ordinary_keys_pass(self) -> None:
+        lines = [
+            "OPENAI_KEY=sk-proj-…", "OpenAI API key: sk-proj-...", "GOOGLE_MAPS_KEY: AIza...", "api key: <your key>",
+            "OPENAI_KEY=${OPENAI_KEY}", "export TOKEN=$CI_JOB_TOKEN", "password: %DB_PASSWORD%", "password: changeme",
+            "token: [your token]", "OPENAI_KEY=sk-proj-" + "x" * 40, "deploy key: " + shaped("example", 33),
+            "OPENAI_KEY=sk-proj-example" + shaped("", 32), "SORT_KEY=createdAt", "cache_key: user.profile.v2",
+            "primary key: id", "idempotency_key: order-12345", "    client-certificate-data: " + CERT_IN_BASE64,
+            "echo $PW | docker login --password-stdin -u ci registry.internal",
+            "skopeo copy --token-file /run/secrets/registry docker://a docker://b",
+            "the sk-" + "language-pack-for-the-slovak-storefront-translations release",
+            "foreign_key: customer_id", "partition key: tenant_id",
+            "Idempotency-Key: create-goal-2026-06-07-purchase", "session_key: 5f0c8e2a-3b71-4d9e-a6c1-0b9d2e7f4a13",
+            "{ publicKey: " + shaped("pk_", 32, step=7) + " }", "?public_key=" + shaped("pk_", 32, step=7),
+            'export SIGNING_PRIVATE_KEY="$HOME/.config/app/signing.pem"',
+        ]
+        for line in lines:
+            self.assertIsNone(cf.content_reason([line]), line)
+
+    def test_a_secret_word_ending_a_label_is_held_when_set_to_a_literal(self) -> None:
+        word = shaped("", 12, step=7)
+        hexadecimal = shaped("", 32, "0123456789abcdef", step=5)
+        lines = [
+            "staging db password: " + word, "**Staging DB password**: " + word, "Login: admin / Password: " + word,
+            "Admin password: " + word, "SMTP password: " + word, "1. prod password: " + word,
+            "root password = " + word, "Stripe secret: " + word, "GitHub token: " + hexadecimal,
+            "API token = " + hexadecimal, "- wifi passphrase: " + word, "SSH pass: " + word,
+            "Admin password: " + word + " (rotated monthly)",
+        ]
+        for line in lines:
+            self.assertEqual(cf.content_reason([line]), cf.ASSIGNED_SECRET, line)
+
+    def test_a_label_set_to_a_phrase_or_a_pointer_passes(self) -> None:
+        lines = [
+            "password: see 1Password", "the password is in the vault manager", "token: the one in the team manager",
+            "Admin password: see the team manager", "Staging token: rotated weekly", "SMTP password: ${SMTP_PASSWORD}",
+            "root password = <ask the on-call>", "The deploy secret: DEPLOY_SECRET_FROM_ENV",
+            "in the second pass: " + shaped("", 12, step=7) + " was renamed",
+            "- every module compiler pass: [[access]], [[admin]] and [[config]]", "password: [[Team vault]]",
+        ]
+        for line in lines:
+            self.assertIsNone(cf.content_reason([line]), line)
+
+    def test_a_quoted_passphrase_holding_a_digit_or_a_symbol_is_held(self) -> None:
+        for line in ('wifi password: "purple monkey dishwasher 42"', 'PASSPHRASE="correct horse battery 7"',
+                     "DB_PASSWORD='blue whale & red fox'"):
+            self.assertEqual(cf.content_reason([line]), cf.ASSIGNED_SECRET, line)
+        for line in ('password: "Required for every login"', "token: 'Rotated by the deploy job, weekly.'"):
             self.assertIsNone(cf.content_reason([line]), line)
 
     def test_unreadable_lines_never_count_as_clean_and_a_name_decides_without_reading(self) -> None:
@@ -280,24 +377,113 @@ class HoldTests(unittest.TestCase):
                          ["[VAULT] brought up to date — 1 commit from the remote"])
         self.assertTrue((self.vault.path / ".env").is_file())
 
-    def test_a_held_tracked_edit_that_stops_a_rebase_is_named(self) -> None:
-        kb = self.vault.path
-        self.write(kb, "Modules/deploy.md", f"# Deploy\n\nREPO_TOKEN={HOST_TOKEN}\n")
-        self.write(kb, "Modules/mine.md", "my note\n")
-        self.assertTrue(sc.commit_vault(self.vault, SESSION))
+    def teammate_pushes(self, name: str, text: str) -> None:
         teammate = self.clone("bob")
-        self.write(teammate, "Modules/b.md", "bob's note\n")
+        self.write(teammate, name, text)
         git(teammate, "add", "-A")
         git(teammate, "commit", "-q", "-m", "bob")
         git(teammate, "push", "-q", "origin", "main")
 
-        self.assertEqual(sc.integrate_vault(self.vault, sleep=lambda _s: None), "deferred")
+    def printed_brief(self) -> str:
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             sc.brief(self.vault)
-        self.assertIn("not rebased: edits held back from the commit stand in the way (Modules/deploy.md)",
-                      printed.getvalue())
-        self.assertNoValue(printed.getvalue(), "the brief")
+        return printed.getvalue()
+
+    def test_a_held_tracked_edit_lets_the_other_notes_reach_a_remote_that_moved(self) -> None:
+        kb = self.vault.path
+        held = f"# Deploy\n\nRuns on push.\nREPO_TOKEN={HOST_TOKEN}\n"
+        self.write(kb, "Modules/deploy.md", held)
+        self.write(kb, "Modules/mine.md", "my note\n")
+        self.assertTrue(sc.commit_vault(self.vault, SESSION))
+        self.teammate_pushes("Modules/b.md", "bob's note\n")
+
+        self.assertEqual(sc.integrate_vault(self.vault, sleep=lambda _s: None), "pushed")
+
+        self.assertLessEqual({"Modules/mine.md", "Modules/b.md"}, self.remote_files())
+        self.assertNoValue(self.published(), "the remote")
+        self.assertEqual((kb / "Modules/deploy.md").read_text(), held)
+        self.assertEqual(git(kb, "status", "--porcelain"), " M Modules/deploy.md\n")
+        self.assertEqual(git(kb, "stash", "list"), "")
+        brief = self.printed_brief()
+        self.assertIn(f"[VAULT] not committed: Modules/deploy.md ({cf.ACCESS_TOKEN})", brief)
+        self.assertNotIn("not rebased", brief)
+        self.assertNoValue(brief, "the brief")
+
+    def test_notes_that_do_not_rebase_go_to_their_branch_and_the_held_edit_comes_back(self) -> None:
+        kb = self.vault.path
+        held = f"# Deploy\n\nRuns on push.\nREPO_TOKEN={HOST_TOKEN}\n"
+        self.write(kb, "Modules/deploy.md", held)
+        self.write(kb, "Modules/shared.md", "alice's version\n")
+        self.assertTrue(sc.commit_vault(self.vault, SESSION))
+        self.teammate_pushes("Modules/shared.md", "bob's version\n")
+
+        self.assertEqual(sc.integrate_vault(self.vault, sleep=lambda _s: None), "conflict")
+
+        self.assertFalse(sc.rebasing(self.vault))
+        self.assertEqual(git(kb, "rev-parse", "HEAD"), git(self.remote, "rev-parse", "main"))
+        self.assertEqual((kb / "Modules/deploy.md").read_text(), held)
+        self.assertEqual(git(kb, "status", "--porcelain"), " M Modules/deploy.md\n")
+        self.assertEqual(git(kb, "stash", "list"), "")
+        self.assertNoValue(self.published(), "the remote")
+
+    def test_a_held_edit_the_remote_also_changed_waits_in_the_stash(self) -> None:
+        kb = self.vault.path
+        self.write(kb, "Modules/deploy.md", f"# Deploy\n\nRuns on push with REPO_TOKEN={HOST_TOKEN}\n")
+        self.write(kb, "Modules/mine.md", "my note\n")
+        self.assertTrue(sc.commit_vault(self.vault, SESSION))
+        self.teammate_pushes("Modules/deploy.md", "# Deploy\n\nRuns on every tag.\n")
+
+        self.assertEqual(sc.integrate_vault(self.vault, sleep=lambda _s: None), "pushed")
+
+        self.assertIn("Modules/mine.md", self.remote_files())
+        self.assertNoValue(self.published(), "the remote")
+        self.assertEqual((kb / "Modules/deploy.md").read_text(), "# Deploy\n\nRuns on every tag.\n")
+        self.assertEqual(git(kb, "status", "--porcelain"), "")
+        self.assertIn(HOST_TOKEN, git(kb, "stash", "show", "-p", "stash@{0}"), "the held edit was lost")
+        brief = self.printed_brief()
+        self.assertIn('Modules/deploy.md', brief)
+        self.assertIn('git -C "kb" stash pop stash@{0}', brief)
+        self.assertNotIn("[VAULT] not committed", brief)
+        self.assertNoValue(brief, "the brief")
+
+        self.end_session()
+        self.assertIn('git -C "kb" stash pop stash@{0}', self.next_brief(), "a later session end forgot it")
+        git(kb, "stash", "drop", "-q")
+        self.assertNotIn("stash pop", self.next_brief())
+
+    def test_held_edits_of_a_note_the_remote_deleted_and_one_it_changed_wait_in_the_stash_without_markers(self) -> None:
+        kb = self.vault.path
+        self.write(kb, "Modules/a.md", "# A\n\nRuns on push.\n")
+        self.write(kb, "Modules/b.md", "# B\n\nRuns on push.\n")
+        git(kb, "add", "-A")
+        git(kb, "commit", "-q", "-m", "a and b")
+        git(kb, "push", "-q", "origin", "main")
+        self.write(kb, "Modules/a.md", f"# A\n\nRuns on push with REPO_TOKEN={HOST_TOKEN}\n")
+        self.write(kb, "Modules/b.md", f"# B\n\nRuns on push with REPO_TOKEN={HOST_TOKEN}\n")
+        self.write(kb, "Modules/mine.md", "my note\n")
+        self.assertTrue(sc.commit_vault(self.vault, SESSION))
+        teammate = self.clone("bob")
+        git(teammate, "rm", "-q", "Modules/a.md")
+        self.write(teammate, "Modules/b.md", "# B\n\nRuns on every tag.\n")
+        git(teammate, "commit", "-q", "-am", "bob")
+        git(teammate, "push", "-q", "origin", "main")
+
+        self.assertEqual(sc.integrate_vault(self.vault, sleep=lambda _s: None), "pushed")
+
+        self.assertIn("Modules/mine.md", self.remote_files())
+        self.assertNoValue(self.published(), "the remote")
+        for note in kb.rglob("*.md"):
+            self.assertNotIn("<<<<<<<", note.read_text(), f"conflict markers left in {note}")
+        self.assertFalse((kb / "Modules/a.md").exists(), "the note the remote deleted came back with the value")
+        self.assertEqual((kb / "Modules/b.md").read_text(), "# B\n\nRuns on every tag.\n")
+        self.assertEqual(git(kb, "status", "--porcelain", "--untracked-files=all"), "")
+        stashed = git(kb, "stash", "show", "-p", "stash@{0}")
+        self.assertEqual(sorted(git(kb, "stash", "show", "--name-only", "stash@{0}").split()),
+                         ["Modules/a.md", "Modules/b.md"])
+        self.assertEqual(stashed.count(HOST_TOKEN), 2, "a held edit was lost")
+        self.assertEqual(sc.read_state(self.vault)["aside"][0]["paths"], ["Modules/a.md", "Modules/b.md"])
+        self.assertIn('git -C "kb" stash pop stash@{0}', self.printed_brief())
 
 
 if __name__ == "__main__":

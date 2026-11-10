@@ -23,8 +23,11 @@ a SessionEnd hook is given seconds. The worker:
    its own.** A project's repository is never committed, whoever owns it. A file named like a
    credential, or whose added lines look like one (`credential_filter`), is held back: unstaged, left
    in the work tree, and named with its reason — never its value — on every brief until it is gone or
-   committed by hand; the rest is committed without it. The commit comes first and
-   the rebase onto the remote after it, never a stash. A push the remote refuses is retried after a
+   committed by hand; the rest is committed without it. The commit comes first and the rebase onto
+   the remote after it. Only a held edit of a tracked file is stashed for the rebase, by its exact
+   paths, and put back after it; when the remote changed the same lines, deleted the note or renamed
+   it, each path goes back to the remote's version (or away, where the remote has none), the edits
+   stay in the stash, and the brief names the command that brings them back. A push the remote refuses is retried after a
    fresh fetch and rebase, a few times, with jittered waits. Notes that do not rebase are pushed to a
    `conflict/<handle>/<UTC time>` branch, and the clone steps back to the remote only when nothing in
    it is uncommitted. A clone in the middle of a merge, rebase, cherry-pick or revert, with unmerged
@@ -352,8 +355,9 @@ def capture(vault: vaultlib.Vault, session_id: str, lines: list[str], day: str,
 # Every git operation on the vault — the commit, the rebase and push that follow it, the session
 # start's fetch and fast-forward — runs under one lock file in the state directory, so two sessions
 # of one machine never rebase the same clone at once. A session end commits first and integrates
-# after; it never stashes, so a stash that would not re-apply can never leave conflict markers for
-# the next commit to publish.
+# after. It stashes nothing but the held edits of tracked files, and puts them back only when they
+# apply without a conflict, so a stash that would not re-apply never leaves conflict markers for the
+# next commit to publish.
 
 CAPTURE_WAIT = 600.0
 BRIEF_WAIT = 3.0
@@ -614,18 +618,23 @@ def rebasing(vault: vaultlib.Vault) -> bool:
 
 
 def read_state(vault: vaultlib.Vault) -> dict:
-    """What the last runs left for the brief: conflict branches to merge, one notice, the files held back."""
+    """What the last runs left for the brief: conflict branches to merge, one notice, the files held back,
+    and the held edits left in git's stash."""
     try:
         state = json.loads((vault.state / SYNC_STATE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"conflicts": [], "notice": None, "held": []}
+        return {"conflicts": [], "notice": None, "held": [], "aside": []}
     conflicts = state.get("conflicts") if isinstance(state, dict) else None
     notice = state.get("notice") if isinstance(state, dict) else None
     held = state.get("held") if isinstance(state, dict) else None
+    aside = state.get("aside") if isinstance(state, dict) else None
     return {"conflicts": [c for c in conflicts or [] if isinstance(c, dict) and isinstance(c.get("branch"), str)],
             "notice": notice if isinstance(notice, str) else None,
             "held": [h for h in (held if isinstance(held, list) else [])
-                     if isinstance(h, dict) and isinstance(h.get("path"), str) and isinstance(h.get("reason"), str)]}
+                     if isinstance(h, dict) and isinstance(h.get("path"), str) and isinstance(h.get("reason"), str)],
+            "aside": [a for a in (aside if isinstance(aside, list) else [])
+                      if isinstance(a, dict) and isinstance(a.get("stash"), str) and isinstance(a.get("paths"), list)
+                      and all(isinstance(path, str) for path in a["paths"])]}
 
 
 def write_state(vault: vaultlib.Vault, state: dict) -> None:
@@ -690,16 +699,108 @@ def park_conflict(vault: vaultlib.Vault, branch: str, now) -> str:
     return settle(vault, "conflict", None, entry)
 
 
-def deferred_notice(vault: vaultlib.Vault, when: str) -> str:
-    """Why a rebase did not run: a held tracked edit waits on a person, any other edit on the next session end."""
-    blocking = tracked(vault, [entry["path"] for entry in read_state(vault)["held"]])
-    if blocking:
-        names = ", ".join(readable(path) for path in blocking)
-        return (f"[VAULT] the remote had new vault commits at {when} — not rebased: edits held back from the "
-                f"commit stand in the way ({names}); take the value out, or commit them by hand if it is no "
-                "credential")
+def deferred_notice(when: str) -> str:
+    """Why a rebase did not run: an uncommitted edit that is not held back waits on the next session end."""
     return (f"[VAULT] the remote had new vault commits at {when} while this clone had uncommitted edits — not "
             "rebased; the next session end integrates them")
+
+
+def dirty_tracked(vault: vaultlib.Vault) -> Optional[list[str]]:
+    """Every tracked path with an uncommitted change; None when git cannot say."""
+    code, out = git_bytes(vault, "status", "--porcelain", "-z", "--untracked-files=no")
+    return status_paths(out) if code == 0 else None
+
+
+def stash_list(vault: vaultlib.Vault) -> list[str]:
+    """The commits of git's stash, newest first, so a position in it is `stash@{n}`."""
+    code, out = vaultlib.git_out(vault.path, "stash", "list", "--format=%H")
+    return out.split() if code == 0 else []
+
+
+def set_aside(vault: vaultlib.Vault, paths: list[str]) -> Optional[str]:
+    """Stash the edits of exactly `paths`, and nothing else; the stash's commit, or None when none was made."""
+    before = stash_list(vault)
+    code, _ = git_bytes(vault, "stash", "push", "--quiet", "-m", "vault: edits held back from the commit",
+                        "--", *paths)
+    after = stash_list(vault)
+    if code != 0 or not after or after[:1] == before[:1]:
+        return None
+    return after[0]
+
+
+def restore(vault: vaultlib.Vault, path: str) -> None:
+    """Return one path, index and work tree, to what HEAD holds; remove it where HEAD holds none."""
+    git_bytes(vault, "reset", "-q", "--", path)
+    if git_bytes(vault, "cat-file", "-e", f"HEAD:{path}")[0] == 0:
+        git_bytes(vault, "checkout", "-q", "HEAD", "--", path)
+        return
+    target = vault.path / path
+    if target.is_file() or target.is_symlink():
+        target.unlink()
+
+
+def put_back(vault: vaultlib.Vault, stash: str, paths: list[str]) -> bool:
+    """Re-apply a set-aside stash and drop it; False when it conflicts, and then it stays in the stash.
+
+    A conflicting apply leaves markers in the files, so each path is returned on its own to the
+    commit the rebase left: a path that commit holds is checked out from it, and one it deleted or
+    renamed away is removed, its edit kept in the stash. No marker, and no copy of a note the remote
+    deleted, is left for a later commit to publish. Either way the paths are left unstaged, as a held
+    edit stands.
+    """
+    applied = git_bytes(vault, "stash", "apply", "--quiet", stash)[0] == 0
+    if not applied:
+        # The rebase left every tracked path clean, so whatever the apply changed — a held path, or
+        # the new name of one the remote renamed — goes back.
+        for path in dict.fromkeys(paths + (dirty_tracked(vault) or [])):
+            restore(vault, path)
+        return False
+    git_bytes(vault, "reset", "-q", "--", *paths)
+    listed = stash_list(vault)
+    if stash in listed:
+        vaultlib.git_out(vault.path, "stash", "drop", "--quiet", f"stash@{{{listed.index(stash)}}}")
+    return True
+
+
+def keep_aside(vault: vaultlib.Vault, stash: str, paths: list[str], when: str) -> None:
+    """Record held edits that stay in the stash; they are no longer in the work tree to be held."""
+    state = read_state(vault)
+    waiting = set(stash_list(vault))
+    state["aside"] = [entry for entry in state["aside"] if entry["stash"] in waiting]
+    state["aside"].append({"stash": stash, "paths": paths, "time": when})
+    state["held"] = [entry for entry in state["held"] if entry["path"] not in paths]
+    write_state(vault, state)
+    vaultlib.log(vault, "session-capture.log",
+                 f"held edits kept in the stash {stash[:12]}: {', '.join(readable(path) for path in paths)}")
+
+
+def rebase_onto(vault: vaultlib.Vault, branch: str, upstream: str, when: str, now) -> Optional[str]:
+    """Rebase this clone's commits onto the remote; None when the push may follow, else how it ended.
+
+    Held edits of tracked files are the only uncommitted change a rebase is run past: they are set
+    aside by their exact paths and put back after it, on whatever commit it left.
+    """
+    held = set(tracked(vault, [entry["path"] for entry in read_state(vault)["held"]]))
+    dirty = dirty_tracked(vault)
+    if dirty is None or any(path not in held for path in dirty):
+        return settle(vault, "deferred", deferred_notice(when))
+    stash = set_aside(vault, dirty) if dirty else None
+    if dirty and stash is None:
+        return settle(vault, "deferred", f"[VAULT] the remote had new vault commits at {when} — not rebased: "
+                                         "the edits held back from the commit could not be set aside; the next "
+                                         "session end tries again")
+    try:
+        code, out = git(vault, "rebase", "--no-autostash", "--quiet", upstream, timeout=180)
+        if code == 0:
+            return None
+        if rebasing(vault):
+            return park_conflict(vault, branch, now)
+        vaultlib.log(vault, "session-capture.log", f"vault rebase failed: {out.strip()[:300]}")
+        return settle(vault, "unrebased", f"[VAULT] the vault could not be rebased onto its remote at {when} — "
+                                          f"{vault.shown(vault.state)}/session-capture.log says why")
+    finally:
+        if stash is not None and not put_back(vault, stash, dirty):
+            keep_aside(vault, stash, dirty, when)
 
 
 def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
@@ -731,16 +832,9 @@ def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
                                                 "the notes are committed on this machine; the next session end "
                                                 "pushes them")
             if ref_exists(vault, upstream) and not contains(vault, upstream):
-                if changes(vault, untracked=False):
-                    return settle(vault, "deferred", deferred_notice(vault, when))
-                code, out = git(vault, "rebase", "--no-autostash", "--quiet", upstream, timeout=180)
-                if code != 0:
-                    if rebasing(vault):
-                        return park_conflict(vault, branch, now)
-                    vaultlib.log(vault, "session-capture.log", f"vault rebase failed: {out.strip()[:300]}")
-                    return settle(vault, "unrebased", f"[VAULT] the vault could not be rebased onto its remote "
-                                                      f"at {when} — {vault.shown(vault.state)}/session-capture.log "
-                                                      "says why")
+                ended = rebase_onto(vault, branch, upstream, when, now)
+                if ended is not None:
+                    return ended
             code, out = net(vault, "push", "--quiet", "-u", "origin", f"refs/heads/{branch}:refs/heads/{branch}",
                             timeout=180)
             if code == 0:
@@ -819,8 +913,23 @@ def held_lines(held: list[dict]) -> list[str]:
             f"commit it by hand if it is no credential" for entry in held]
 
 
+def aside_lines(vault: vaultlib.Vault, aside: list[dict]) -> list[str]:
+    """One line per set-aside stash still in git's stash: the paths, and the command that brings them back."""
+    listed = stash_list(vault) if aside else []
+    lines = []
+    for entry in aside:
+        if entry["stash"] not in listed:
+            continue
+        names = ", ".join(readable(path) for path in entry["paths"])
+        lines.append(f"[VAULT] held edits of {names} did not go back after the rebase at {entry.get('time')} — the "
+                     f"remote changed them too; they wait in git's stash: git -C \"{vault.rel}\" stash pop "
+                     f"stash@{{{listed.index(entry['stash'])}}}, then take the value out")
+    return lines
+
+
 def sync_lines(vault: vaultlib.Vault) -> list[str]:
-    """What the last runs left behind: conflict branches to merge, files held back, a failed integration's notice."""
+    """What the last runs left behind: conflict branches to merge, files held back, held edits left in the
+    stash, a failed integration's notice."""
     state = read_state(vault)
     lines = []
     for conflict in state["conflicts"]:
@@ -830,6 +939,7 @@ def sync_lines(vault: vaultlib.Vault) -> list[str]:
                      f"so it was not reset to the remote")
         lines.append(line)
     lines += held_lines(state["held"])
+    lines += aside_lines(vault, state["aside"])
     if state["notice"]:
         lines.append(state["notice"])
     return lines
