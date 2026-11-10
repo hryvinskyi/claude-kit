@@ -20,7 +20,10 @@ a SessionEnd hook is given seconds. The worker:
    `Decisions/`: promoting an entry is a person's call.
 2. **Refreshes `vault_check.py`'s stamps and cache.**
 3. **Commits the vault, then integrates and pushes it — only when the vault is a git repository of
-   its own.** A project's repository is never committed, whoever owns it. The commit comes first and
+   its own.** A project's repository is never committed, whoever owns it. A file named like a
+   credential, or whose added lines look like one (`credential_filter`), is held back: unstaged, left
+   in the work tree, and named with its reason — never its value — on every brief until it is gone or
+   committed by hand; the rest is committed without it. The commit comes first and
    the rebase onto the remote after it, never a stash. A push the remote refuses is retried after a
    fresh fetch and rebase, a few times, with jittered waits. Notes that do not rebase are pushed to a
    `conflict/<handle>/<UTC time>` branch, and the clone steps back to the remote only when nothing in
@@ -47,6 +50,7 @@ import os
 import random
 import re
 import shlex
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -55,6 +59,7 @@ from typing import Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import vaultlib  # noqa: E402
+import credential_filter
 
 SESSION_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
@@ -413,21 +418,124 @@ def hold_off(vault: vaultlib.Vault, why: str) -> str:
     return settle(vault, "unfinished", f"[VAULT] not committed or pushed: {why}; the next session end does it")
 
 
+def git_bytes(vault: vaultlib.Vault, *args: str, timeout: int = 120) -> tuple[int, bytes]:
+    """Run git in the vault with every pathspec literal; its stdout undecoded, (1, b"") when it cannot run.
+
+    This is the read for what a file holds or a path is named: a byte that is no UTF-8 must not stop a
+    session end, and a note named with a `*` must not reach its neighbours.
+    """
+    try:
+        proc = subprocess.run(["git", "-C", str(vault.path), "--literal-pathspecs", *args], capture_output=True,
+                              timeout=timeout, stdin=subprocess.DEVNULL, env=vaultlib.git_env())
+    except (OSError, subprocess.SubprocessError):
+        return 1, b""
+    return proc.returncode, proc.stdout
+
+
+def readable(path: str) -> str:
+    """A path as text any output can carry; a byte of its name that is no UTF-8 shows as `?`."""
+    return path.encode("utf-8", "surrogateescape").decode("utf-8", "replace").replace("\ufffd", "?")
+
+
+def staged_files(vault: vaultlib.Vault) -> Optional[list[list[str]]]:
+    """The paths of each file the commit would add or change, a rename's old one first; None when git cannot say."""
+    code, listing = git_bytes(vault, "diff", "--cached", "-z", "--name-status", "--find-renames",
+                              "--diff-filter=ACMRT")
+    if code != 0:
+        return None
+    fields = [os.fsdecode(field) for field in listing.split(b"\0")]
+    files, at = [], 0
+    while at + 1 < len(fields):
+        width = 2 if fields[at][:1] in ("R", "C") else 1
+        files.append(fields[at + 1:at + 1 + width])
+        at += 1 + width
+    return files
+
+
+def added_lines(diff: bytes) -> list[str]:
+    """What a diff adds: the lines after its first hunk header that start with `+`, less the `+`.
+
+    Every NUL is dropped first: a file saved as UTF-16 spells an ASCII value with NULs between its
+    letters, and no value holds one of its own.
+    """
+    lines = diff.replace(b"\0", b"").decode("utf-8", errors="replace").split("\n")
+    first = next((at for at, line in enumerate(lines) if line.startswith("@@")), len(lines))
+    return [line[1:] for line in lines[first:] if line.startswith("+")]
+
+
+def why_held(vault: vaultlib.Vault, paths: list[str]) -> Optional[str]:
+    """Why a staged file may not be committed; None when it may.
+
+    Only what the commit adds is read, so a file's old lines never hold a new edit back, and a rename
+    passes both its paths: limited to the new one, git would show the whole file as added. A file git
+    would call binary is read as text. A diff that cannot be read never counts as clean.
+    """
+    def added() -> Optional[list[str]]:
+        code, diff = git_bytes(vault, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--text",
+                               "--find-renames", "--", *paths)
+        return added_lines(diff) if code == 0 else None
+    return credential_filter.why_held(paths[-1], added)
+
+
+def record_held(vault: vaultlib.Vault, files: list[dict]) -> None:
+    """Replace the list of files held back from the vault's commit."""
+    state = read_state(vault)
+    state["held"] = files
+    write_state(vault, state)
+
+
+def hold_back(vault: vaultlib.Vault) -> bool:
+    """Unstage and record every staged file that may not be committed; False when no commit may follow.
+
+    Only a path and a reason are kept or logged, never the value. A rename is unstaged by both its
+    paths, or the commit would delete the old file for everyone while the new one stays here. When
+    something cannot be listed or unstaged, the whole index is put back, so nothing staged is left
+    for a later commit to publish.
+    """
+    staged = staged_files(vault)
+    if staged is None:
+        vaultlib.log(vault, "session-capture.log", "vault not committed: git could not list what is staged")
+        vaultlib.git_out(vault.path, "reset", "-q")
+        return False
+    kept: list[dict] = []
+    unstaged = True
+    for paths in staged:
+        reason = why_held(vault, paths)
+        if reason is None:
+            continue
+        shown = readable(paths[-1])
+        vaultlib.log(vault, "session-capture.log", f"vault file held back: {shown} ({reason})")
+        if git_bytes(vault, "reset", "-q", "--", *paths)[0] != 0:
+            vaultlib.log(vault, "session-capture.log", f"vault not committed: {shown} could not be unstaged")
+            unstaged = False
+        kept.append({"path": paths[-1], "reason": reason})
+        kept += [{"path": path, "reason": f"renamed to {shown}"} for path in paths[:-1]]
+    record_held(vault, kept)
+    if not unstaged:
+        vaultlib.git_out(vault.path, "reset", "-q")
+    return unstaged
+
+
 def commit_vault(vault: vaultlib.Vault, session_id: str, wait: float = 0.0, sleep=time.sleep) -> bool:
-    """Commit what changed in a vault that is its own repository; never anything else."""
+    """Commit what changed in a vault that is its own repository, less the files held back; never anything else."""
     if vault.mode != "own-repo":
         return False
     with vaultlib.holding(lock_path(vault), wait, sleep=sleep) as held:
         if held is None:
             return False
         code, status = vaultlib.git_out(vault.path, "status", "--porcelain")
-        if code != 0 or not status.strip():
+        if code != 0:
+            return False
+        if not status.strip():
+            record_held(vault, [])
             return False
         why = vaultlib.unfinished(vault.path, vault.rel)
         if why is not None:
             hold_off(vault, why)
             return False
         vaultlib.git_out(vault.path, "add", "-A")
+        if not hold_back(vault) or vaultlib.git_out(vault.path, "diff", "--cached", "--quiet")[0] == 0:
+            return False
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         code, out = git(vault, "commit", "-q", "-m", f"session {stamp} ({session_id[:8]})")
         if code != 0:
@@ -463,11 +571,36 @@ def count(vault: vaultlib.Vault, revisions: str) -> int:
     return int(out.strip()) if code == 0 and out.strip().isdigit() else 0
 
 
-def changes(vault: vaultlib.Vault, untracked: bool = True) -> bool:
-    """Whether the work tree holds anything uncommitted (an unreadable status counts as changes)."""
-    args = ["status", "--porcelain"] + ([] if untracked else ["--untracked-files=no"])
-    code, out = vaultlib.git_out(vault.path, *args)
-    return code != 0 or bool(out.strip())
+def status_paths(status: bytes) -> list[str]:
+    """Every path of a `status --porcelain -z` listing, both of a rename's."""
+    fields = status.split(b"\0")
+    paths: list[str] = []
+    at = 0
+    while at < len(fields) and fields[at]:
+        width = 2 if set(fields[at][:2]) & set(b"RC") else 1
+        paths.append(os.fsdecode(fields[at][3:]))
+        paths += [os.fsdecode(field) for field in fields[at + 1:at + width]]
+        at += width
+    return paths
+
+
+def changes(vault: vaultlib.Vault, untracked: bool = True, aside: frozenset = frozenset()) -> bool:
+    """Whether the work tree holds anything uncommitted beyond the exact paths `aside`.
+
+    An unreadable status counts as changes. Untracked files are listed one by one, so a new file in a
+    new directory shows as its own path rather than as the directory.
+    """
+    code, out = git_bytes(vault, "status", "--porcelain", "-z", f"--untracked-files={'all' if untracked else 'no'}")
+    return code != 0 or any(path not in aside for path in status_paths(out))
+
+
+def tracked(vault: vaultlib.Vault, paths: list[str]) -> list[str]:
+    """Those of `paths` git tracks; an edit to one is what a rebase cannot pass."""
+    if not paths:
+        return []
+    code, out = git_bytes(vault, "ls-files", "-z", "--", *paths)
+    known = {os.fsdecode(field) for field in out.split(b"\0")} if code == 0 else set()
+    return [path for path in paths if path in known]
 
 
 def git_dir(vault: vaultlib.Vault) -> Optional[Path]:
@@ -481,15 +614,18 @@ def rebasing(vault: vaultlib.Vault) -> bool:
 
 
 def read_state(vault: vaultlib.Vault) -> dict:
-    """What the last integration left for the brief: conflict branches still to merge, and one notice."""
+    """What the last runs left for the brief: conflict branches to merge, one notice, the files held back."""
     try:
         state = json.loads((vault.state / SYNC_STATE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"conflicts": [], "notice": None}
+        return {"conflicts": [], "notice": None, "held": []}
     conflicts = state.get("conflicts") if isinstance(state, dict) else None
     notice = state.get("notice") if isinstance(state, dict) else None
+    held = state.get("held") if isinstance(state, dict) else None
     return {"conflicts": [c for c in conflicts or [] if isinstance(c, dict) and isinstance(c.get("branch"), str)],
-            "notice": notice if isinstance(notice, str) else None}
+            "notice": notice if isinstance(notice, str) else None,
+            "held": [h for h in (held if isinstance(held, list) else [])
+                     if isinstance(h, dict) and isinstance(h.get("path"), str) and isinstance(h.get("reason"), str)]}
 
 
 def write_state(vault: vaultlib.Vault, state: dict) -> None:
@@ -544,11 +680,26 @@ def park_conflict(vault: vaultlib.Vault, branch: str, now) -> str:
                       f"[VAULT CONFLICT] your notes from {when} do not rebase onto the remote and their branch "
                       f"{name} could not be pushed — they stay on this clone's {branch}")
     entry = {"branch": name, "onto": branch, "time": when, "reset": False}
-    if changes(vault):
+    # A held new file survives the reset, and a rebase would not have started onto a remote carrying
+    # its path; left in the way, it would replay this conflict onto a new branch at every session end.
+    paths = [file["path"] for file in read_state(vault)["held"]]
+    if changes(vault, aside=frozenset(paths) - frozenset(tracked(vault, paths))):
         return settle(vault, "conflict-dirty", None, entry)
     vaultlib.git_out(vault.path, "reset", "--hard", "--quiet", f"refs/remotes/origin/{branch}")
     entry["reset"] = True
     return settle(vault, "conflict", None, entry)
+
+
+def deferred_notice(vault: vaultlib.Vault, when: str) -> str:
+    """Why a rebase did not run: a held tracked edit waits on a person, any other edit on the next session end."""
+    blocking = tracked(vault, [entry["path"] for entry in read_state(vault)["held"]])
+    if blocking:
+        names = ", ".join(readable(path) for path in blocking)
+        return (f"[VAULT] the remote had new vault commits at {when} — not rebased: edits held back from the "
+                f"commit stand in the way ({names}); take the value out, or commit them by hand if it is no "
+                "credential")
+    return (f"[VAULT] the remote had new vault commits at {when} while this clone had uncommitted edits — not "
+            "rebased; the next session end integrates them")
 
 
 def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
@@ -581,9 +732,7 @@ def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
                                                 "pushes them")
             if ref_exists(vault, upstream) and not contains(vault, upstream):
                 if changes(vault, untracked=False):
-                    return settle(vault, "deferred", f"[VAULT] the remote had new vault commits at {when} while "
-                                                     "this clone had uncommitted edits — not rebased; the next "
-                                                     "session end integrates them")
+                    return settle(vault, "deferred", deferred_notice(vault, when))
                 code, out = git(vault, "rebase", "--no-autostash", "--quiet", upstream, timeout=180)
                 if code != 0:
                     if rebasing(vault):
@@ -651,7 +800,7 @@ def update_vault(vault: vaultlib.Vault, wait: float = BRIEF_WAIT, sleep=time.sle
         if not behind:
             return []
         news = f"the remote has {plural(behind, 'vault commit')} this clone lacks"
-        if changes(vault):
+        if changes(vault, aside=frozenset(entry["path"] for entry in state["held"])):
             return [f"[VAULT] {news} — not merged: the vault has uncommitted edits; the next session end "
                     f"integrates them"]
         ahead = count(vault, f"{upstream}..HEAD")
@@ -664,8 +813,14 @@ def update_vault(vault: vaultlib.Vault, wait: float = BRIEF_WAIT, sleep=time.sle
         return [f"[VAULT] brought up to date — {plural(behind, 'commit')} from the remote"]
 
 
+def held_lines(held: list[dict]) -> list[str]:
+    """One line per file held back from the commit: its path and the reason class, never its value."""
+    return [f"[VAULT] not committed: {readable(entry['path'])} ({entry['reason']}) — take the value out, or "
+            f"commit it by hand if it is no credential" for entry in held]
+
+
 def sync_lines(vault: vaultlib.Vault) -> list[str]:
-    """What the last integration left behind: conflict branches to merge and the notice of a failed one."""
+    """What the last runs left behind: conflict branches to merge, files held back, a failed integration's notice."""
     state = read_state(vault)
     lines = []
     for conflict in state["conflicts"]:
@@ -674,6 +829,7 @@ def sync_lines(vault: vaultlib.Vault) -> list[str]:
             line += (f" · this clone's {conflict.get('onto')} still holds them too: the vault had unsaved edits, "
                      f"so it was not reset to the remote")
         lines.append(line)
+    lines += held_lines(state["held"])
     if state["notice"]:
         lines.append(state["notice"])
     return lines

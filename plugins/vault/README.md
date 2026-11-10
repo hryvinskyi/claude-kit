@@ -8,7 +8,7 @@ kept as Markdown beside the code, and the tools that keep it honest.
 | Part | When it runs | What it does |
 |---|---|---|
 | `hooks/session_brief.sh` | `SessionStart` (startup, clear) | Brings a vault that is its own repository up to date (fetch and fast-forward only), then prints a short brief: the board's `## Now` and `## Next`, the latest journal entry and decision, the vault check's findings, the inbox, conflict and backup lines, and the board queue's lines for this repository when a `board-queue` command is installed |
-| `bin/session_capture.py` | `SessionEnd` | Hands off to a detached worker that files a session which committed work without a journal entry into the vault's inbox, refreshes the vault check, commits a vault that is a git repository of its own, rebases it onto its remote and pushes it, and refreshes the search index |
+| `bin/session_capture.py` | `SessionEnd` | Hands off to a detached worker that files a session which committed work without a journal entry into the vault's inbox, refreshes the vault check, commits a vault that is a git repository of its own — less any file that looks like a credential, which stays in the work tree and is named on the brief — rebases it onto its remote and pushes it, and refreshes the search index |
 | `hooks/journal_nudge.py` | `Stop` | Once per session, after real work in a vault project with no journal entry for today, asks the model to offer `/vault:journal` |
 | `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync` | on request | Write a decision record, a journal entry, work the TODO board, refresh the notes from the code |
 | `vault:wiki-updater` | spawned by `/vault:wiki-sync` | Runs the project's sync tooling and writes the prose a script cannot. A project that defines its own `wiki-updater` agent gets that one instead |
@@ -141,6 +141,21 @@ A vault that is a repository of its own can be cloned by a team. Then:
   with waits of one to four seconds. Fetch and push never wait on a prompt: they run the ssh command
   git would run (`$GIT_SSH_COMMAND`, `core.sshCommand`, `$GIT_SSH`, else `ssh`), and when that is
   OpenSSH they add `-o BatchMode=yes -o ConnectTimeout=N` after its own options.
+- **What looks like a credential is never committed.** After staging, a file is held back for its
+  name — `.env` and `.env.*` (not `.env.example`/`.env.dist`/`.env.sample`/`.env.template`), `*.pem`,
+  `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.kdbx`, a private `id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`
+  key (not its `.pub`), `.netrc`, `.pgpass`, `credentials.json`, a non-Markdown file named with
+  `secret` — or for the lines the commit would add to it: a private-key block, a token of a well-known
+  shape, a JWT, an `Authorization: Bearer` value, a password inside a URI, or a secret-named key
+  (`password`, `pass`, `secret`, `token`, `api_key`, `private_key`, `access_key`, …) set to a literal.
+  Placeholders pass (`changeme`, `<your key>`, `${VAR}`, `***`, `…`, `REDACTED`, `your_…`, `xxx…`,
+  `%s`, anything under eight characters), and so do prose, a lower-case word, a number, an identifier
+  or code after the key, so a note that discusses token formats or shows one truncated is committed.
+  A held file is unstaged and stays in the work tree; the rest is committed and pushed. The brief
+  says `[VAULT] not committed: <path> (<reason>) — take the value out, or commit it by hand if it is
+  no credential` until it is gone — the path and the reason class only, never the value, and the log
+  records no more. A held edit of a tracked note keeps the clone from rebasing onto a remote that
+  moved, and the brief names it; a held new file does not stop the session start's fast-forward.
 - **A clone git is not done with** — a merge, rebase, cherry-pick or revert waiting for a person,
   unmerged files, a detached head — is neither committed nor pushed, and the brief says
   `[VAULT] not committed or pushed: …` with the way out until a session end finds it put right.

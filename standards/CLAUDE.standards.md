@@ -13,7 +13,7 @@ A project's vault is whatever `find-vault` (the `vault` plugin's command on `PAT
 - **At session end**, the `vault` plugin's capture hook (`vault-capture` when run by hand) does three things:
   - files a session that committed work without a journal entry into the vault's inbox (the brief's `[INBOX]` line names the file; `/vault:journal` clears it);
   - refreshes the stamps and the search index;
-  - commits and pushes **only a vault that is a git repository of its own** — never a project's repository.
+  - commits and pushes **only a vault that is a git repository of its own** — never a project's repository. A file named like a credential, or whose added lines look like one, is held back and left in the work tree; the brief says `[VAULT] not committed: <path> (<reason>)` until the value is taken out, or the file is committed by hand when it holds none.
 - **Nothing is written into a project's tracked tree.** A vault that is neither its own repository nor ignored by the project keeps its inbox, stamps and caches under `~/.claude/state/vaults/<project>/`.
 - **`[VAULT] no copy off this machine`** means the vault has no backup. Giving it one creates a remote, which is an outward action: propose it and wait for a yes. The steps are `git -C <vault> init`, a private remote, then a push; if a project encloses the vault, exclude it with `.git/info/exclude`. Never back up a client project's vault to a personal account without asking.
 - Kill switch: `CLAUDE_NO_VAULT_TOOLS=1`.
