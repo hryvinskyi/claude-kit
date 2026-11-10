@@ -136,6 +136,72 @@ async function seedBlocked(space: Workspace, issue: number): Promise<string> {
   return id;
 }
 
+/** An evidence comment that failed, and the close filed behind it that can now never run. */
+async function seedFailedCommentWithClose(space: Workspace, issue: number): Promise<{ comment: string; close: string }> {
+  const comment = globalThis.crypto.randomUUID();
+  const close = globalThis.crypto.randomUUID();
+  await space.seed(async (container) => {
+    const now = container.clock.now();
+    const failing = Action.enqueue({
+      id: comment,
+      kind: 'issue.comment',
+      payload: { repo: FIRST, issue, body: 'verified on staging' },
+      issueRef: IssueRef.of(FIRST, issue),
+      origin: 'a test',
+      now: new Date(now.getTime() - 2000),
+    });
+    await container.repository.insert(failing);
+    failing.start(now);
+    failing.failTransient(now, 'the API answered 502', 1, 30);
+    await container.repository.update(failing);
+    await container.repository.insert(Action.enqueue({
+      id: close,
+      kind: 'issue.close',
+      payload: { repo: FIRST, issue },
+      issueRef: IssueRef.of(FIRST, issue),
+      origin: 'a test',
+      now: new Date(now.getTime() - 1000),
+    }));
+  });
+  return { comment, close };
+}
+
+/** A board move and the evidence comment after it, both failed, and the close filed behind them. */
+async function seedTwoStopsWithClose(space: Workspace, issue: number): Promise<{ move: string; comment: string }> {
+  const move = globalThis.crypto.randomUUID();
+  const comment = globalThis.crypto.randomUUID();
+  await space.seed(async (container) => {
+    const now = container.clock.now();
+    const filed = [
+      { id: move, kind: 'board.set-fields', payload: { repo: FIRST, issue, fields: { Status: 'Ready for QA' } } },
+      { id: comment, kind: 'issue.comment', payload: { repo: FIRST, issue, body: 'verified on staging' } },
+    ];
+    for (const [at, { id, kind, payload }] of filed.entries()) {
+      const failing = Action.enqueue({
+        id,
+        kind,
+        payload,
+        issueRef: IssueRef.of(FIRST, issue),
+        origin: 'a test',
+        now: new Date(now.getTime() - 3000 + at * 1000),
+      });
+      await container.repository.insert(failing);
+      failing.start(now);
+      failing.failTransient(now, 'the API answered 502', 1, 30);
+      await container.repository.update(failing);
+    }
+    await container.repository.insert(Action.enqueue({
+      id: globalThis.crypto.randomUUID(),
+      kind: 'issue.close',
+      payload: { repo: FIRST, issue },
+      issueRef: IssueRef.of(FIRST, issue),
+      origin: 'a test',
+      now: new Date(now.getTime() - 1000),
+    }));
+  });
+  return { move, comment };
+}
+
 /** A move somebody held for a deploy and never released. */
 async function seedHeld(space: Workspace, issue: number, ageDays: number): Promise<string> {
   const id = globalThis.crypto.randomUUID();
@@ -387,6 +453,36 @@ describe('the queue on a command line', () => {
       assert.equal(said.length, 2);
       assert.equal(said[0], '[BOARD QUEUE] queued 0 · held 0 · blocked 1 · failed 0');
       assert.match(said[1] ?? '', new RegExp(`^\\[BOARD QUEUE\\] blocked ${FIRST}#41 — Severity has no option`));
+    });
+  });
+
+  it('counts work stuck behind a failed action apart from the queued, and names the issue', async () => {
+    await workspace(async (space) => {
+      const { comment } = await seedFailedCommentWithClose(space, 41);
+
+      const spoken = await space.run(['brief', '--repo', FIRST]);
+      const said = lines(spoken.out);
+
+      assert.equal(spoken.code, 0, spoken.err);
+      assert.deepEqual(said, [
+        '[BOARD QUEUE] queued 0 · held 0 · blocked 0 · failed 1 · behind a stop 1',
+        `[BOARD QUEUE] stopped ${FIRST}#41 behind failed ${comment} — 1 waiting; retry or cancel ${comment} to let them run`,
+      ]);
+    });
+  });
+
+  it('names both stopped actions in front of a close, the oldest first', async () => {
+    await workspace(async (space) => {
+      const { move, comment } = await seedTwoStopsWithClose(space, 42);
+
+      const spoken = await space.run(['brief', '--repo', FIRST]);
+
+      assert.equal(spoken.code, 0, spoken.err);
+      assert.deepEqual(lines(spoken.out), [
+        '[BOARD QUEUE] queued 0 · held 0 · blocked 0 · failed 2 · behind a stop 1',
+        `[BOARD QUEUE] stopped ${FIRST}#42 behind failed ${move} — 1 waiting; 2 stopped actions stand in front: `
+        + `retry or cancel ${move} first, then ${comment}, to let them run`,
+      ]);
     });
   });
 

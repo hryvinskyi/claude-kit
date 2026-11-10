@@ -159,10 +159,12 @@ and nothing new is filed. A request with a key never merges with another.
   is queued or running, and also once it has **failed** or is **blocked**: nothing filed after it on that
   issue runs until it is retried and gets through, or is cancelled. A close filed behind an evidence comment
   that failed therefore stays queued, tick after tick, rather than closing the issue without its evidence.
-  `status` (and `board_status`) lists each such issue under `stopped`, with the action in front and what
-  waits behind it, and `list` (and `board_queue`) marks every waiting action with the one it waits behind:
-  `retry` the one in front once its cause is fixed, or `cancel` it to let the rest go. Done, skipped and
-  cancelled actions hold nothing.
+  `status` (and `board_status`) lists each such issue under `stopped`, with the action in front, every
+  stopped action that holds work up and what waits behind them, and `list` (and `board_queue`) marks every
+  waiting action with the oldest stopped one in front of it and all of them (`inFront`): `retry` each once
+  its cause is fixed, or `cancel` it, to let the rest go. Every stopped action holds the issue on its own, so
+  with a failed move and a failed comment in front of a close, retrying the comment alone runs nothing; the
+  lines name them all, the oldest first. Done, skipped and cancelled actions hold nothing.
 - A **held** action does not hold its issue: work filed after it runs as usual while it waits for its
   release, and once released it is queued and takes its place in the line from then on.
 - A write is done only once reading it back agrees with it; a mismatch is a failure carrying both values.
@@ -536,8 +538,23 @@ tens of milliseconds, and prints
 ```
 
 — the second line only when something is blocked, and nothing at all when the repository has no
-outstanding work. A repository this queue does not carry is silent, which is what lets one hook ask on
-behalf of every project.
+outstanding work. Work that cannot run because a failed or blocked action stands in front of it on its
+issue is not counted as queued; it is counted apart (`behind a stop 1`) and one such issue is named, with
+what lets it move:
+
+```
+[BOARD QUEUE] queued 0 · held 0 · blocked 0 · failed 1 · behind a stop 1
+[BOARD QUEUE] stopped example-org/example-repo#412 behind failed 0b6f… — 1 waiting; retry or cancel 0b6f… to let them run
+```
+
+With two stopped actions in front of the same work, the line names both, the oldest first:
+
+```
+[BOARD QUEUE] stopped example-org/example-repo#412 behind failed 0b6f… — 1 waiting; 2 stopped actions stand in front: retry or cancel 0b6f… first, then 9c21…, to let them run
+```
+
+A repository this queue does not carry is silent, which is what lets one hook ask on behalf of every
+project.
 
 ## Installing
 

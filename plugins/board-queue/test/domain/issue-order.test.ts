@@ -74,12 +74,59 @@ describe('the order actions on one issue keep', () => {
 
     assert.deepEqual(stopped.map((issue) => ({
       front: issue.front.id,
-      waiting: issue.waiting.map((action) => action.id),
+      stopped: issue.stopped.map((action) => action.id),
+      waiting: issue.waiting.map((waiting) => waiting.action.id),
     })), [
-      { front: 'first-comment', waiting: ['close', 'move'] },
-      { front: 'blocked-on-thirteen', waiting: ['after-on-thirteen'] },
+      { front: 'first-comment', stopped: ['first-comment', 'second-comment'], waiting: ['close', 'move'] },
+      { front: 'blocked-on-thirteen', stopped: ['blocked-on-thirteen'], waiting: ['after-on-thirteen'] },
     ]);
   });
+
+  it('puts a waiting action behind every stopped one filed before it, the oldest in front', () => {
+    const stopped = stoppedIssues([
+      anAction('move', 'failed', twelve),
+      anAction('evidence', 'failed', twelve),
+      anAction('close', 'queued', twelve),
+    ]);
+
+    assert.deepEqual(stopped.map((issue) => ({
+      front: issue.front.id,
+      stopped: issue.stopped.map((action) => action.id),
+      waiting: issue.waiting.map((waiting) => ({
+        id: waiting.action.id,
+        inFront: waiting.inFront.map((action) => action.id),
+      })),
+    })), [{
+      front: 'move',
+      stopped: ['move', 'evidence'],
+      waiting: [{ id: 'close', inFront: ['move', 'evidence'] }],
+    }]);
+  });
+
+  it('gives each waiting action only the stopped ones filed before it, and leaves out a stop with nothing after it',
+    () => {
+      const stopped = stoppedIssues([
+        anAction('first-failure', 'failed', twelve),
+        anAction('after-first', 'queued', twelve),
+        anAction('second-failure', 'blocked', twelve),
+        anAction('held-after-second', 'held', twelve),
+        anAction('last-failure', 'failed', twelve),
+      ]);
+
+      assert.deepEqual(stopped.map((issue) => ({
+        stopped: issue.stopped.map((action) => action.id),
+        waiting: issue.waiting.map((waiting) => ({
+          id: waiting.action.id,
+          inFront: waiting.inFront.map((action) => action.id),
+        })),
+      })), [{
+        stopped: ['first-failure', 'second-failure'],
+        waiting: [
+          { id: 'after-first', inFront: ['first-failure'] },
+          { id: 'held-after-second', inFront: ['first-failure', 'second-failure'] },
+        ],
+      }]);
+    });
 
   it('leaves out an issue whose stopped action has nothing behind it, and work filed before it', () => {
     assert.deepEqual(stoppedIssues([
@@ -96,6 +143,6 @@ describe('the order actions on one issue keep', () => {
       anAction('after', 'queued', null),
     ]);
 
-    assert.deepEqual(stopped.map((issue) => issue.waiting.map((action) => action.id)), [['after']]);
+    assert.deepEqual(stopped.map((issue) => issue.waiting.map((waiting) => waiting.action.id)), [['after']]);
   });
 });

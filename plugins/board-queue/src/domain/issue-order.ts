@@ -29,38 +29,60 @@ export function holdsItsIssue(state: ActionState): boolean {
   return HOLDING.includes(state);
 }
 
-/**
- * One issue whose actions stopped moving: the stopped action in front, and the
- * actions filed after it that will not run until it is retried or cancelled.
- */
-export type StoppedIssue = {
-  front: Action;
-  waiting: readonly Action[];
+/** An action waiting its turn, and every stopped action filed before it on its issue, oldest first. */
+export type WaitingAction = {
+  action: Action;
+  inFront: readonly Action[];
 };
 
 /**
- * The issues held up by a failed or blocked action, given actions in the order
+ * One issue whose actions stopped moving: every stopped action with work filed
+ * after it, oldest first, and that work. The oldest is the front.
+ */
+export type StoppedIssue = {
+  front: Action;
+  stopped: readonly Action[];
+  waiting: readonly WaitingAction[];
+};
+
+/**
+ * The issues held up by failed or blocked actions, given actions in the order
  * they were filed.
  *
- * The front of an issue is its oldest stopped action; every queued or held action
- * filed after it is waiting behind it. An issue whose stopped action has nothing
- * behind it is not listed: nothing is held up there. Actions that name no issue
- * form one line of their own, as they do when the queue orders them.
+ * A queued or held action waits behind every stopped action filed before it on
+ * its issue, because each of them holds the issue on its own: retrying the
+ * nearer one runs nothing while an older one still stands in front of it. Every
+ * one of them has to be retried or cancelled, the oldest first, before the work
+ * behind them runs. The front of an issue is its oldest stopped action; a stopped
+ * action filed after the last waiting one holds nothing up and is not counted.
+ * An issue whose stopped actions have nothing behind them is not listed. Actions
+ * that name no issue form one line of their own, as they do when the queue
+ * orders them.
  */
 export function stoppedIssues(actionsInFilingOrder: readonly Action[]): StoppedIssue[] {
-  const fronts = new Map<string, { front: Action; waiting: Action[] }>();
+  const lanes = new Map<string, { stopped: Action[]; waiting: WaitingAction[] }>();
   for (const action of actionsInFilingOrder) {
     const lane = laneOf(action);
-    const stopped = fronts.get(lane);
-    if (stopped === undefined) {
-      if (STOPPED_STATES.includes(action.state)) {
-        fronts.set(lane, { front: action, waiting: [] });
+    const issue = lanes.get(lane);
+    if (STOPPED_STATES.includes(action.state)) {
+      if (issue === undefined) {
+        lanes.set(lane, { stopped: [action], waiting: [] });
+      } else {
+        issue.stopped.push(action);
       }
     } else if (WAITING_STATES.includes(action.state)) {
-      stopped.waiting.push(action);
+      issue?.waiting.push({ action, inFront: [...issue.stopped] });
     }
   }
-  return [...fronts.values()].filter((stopped) => stopped.waiting.length > 0);
+  const stoppedIssues: StoppedIssue[] = [];
+  for (const { waiting } of lanes.values()) {
+    const last = waiting.at(-1);
+    const front = last?.inFront[0];
+    if (last !== undefined && front !== undefined) {
+      stoppedIssues.push({ front, stopped: last.inFront, waiting });
+    }
+  }
+  return stoppedIssues;
 }
 
 function laneOf(action: Action): string {

@@ -67,18 +67,19 @@ export type HeldActionView = {
   ageDays: number;
 };
 
-/** An action waiting its turn behind a stopped one on the same issue. */
-export type WaitingActionView = {
+/** An action on a stopped issue: one of the stopped ones, or one waiting its turn behind them. */
+export type IssueActionView = {
   id: string;
   kind: string;
   state: ActionState;
 };
 
 /**
- * An issue whose actions stopped moving: the failed or blocked action in front,
- * and what was filed after it and will not run until somebody retries or cancels
- * that one. A failed comment and the close waiting behind it read here as one
- * issue that is stuck, not as one failure and one action about to happen.
+ * An issue whose actions stopped moving: the oldest failed or blocked action in
+ * front, every stopped action that holds work up, oldest first, and what was filed
+ * after them and will not run until somebody retries or cancels every one of them.
+ * A failed comment and the close waiting behind it read here as one issue that is
+ * stuck, not as one failure and one action about to happen.
  */
 export type StoppedIssueView = {
   ref: string | null;
@@ -88,7 +89,8 @@ export type StoppedIssueView = {
     state: ActionState;
     lastError: string | null;
   };
-  waiting: WaitingActionView[];
+  stopped: IssueActionView[];
+  waiting: IssueActionView[];
 };
 
 /**
@@ -121,7 +123,7 @@ export type QueueStatusView = {
   failed: StuckActionView[];
   held: HeldActionView[];
   delayed: DelayedActionView[];
-  /** The issues held up behind a failed or blocked action, oldest front first. */
+  /** The issues held up behind failed or blocked actions, oldest front first. */
   stopped: StoppedIssueView[];
   /** Null when this deployment keeps nothing in step. */
   sync: SyncView | null;
@@ -267,8 +269,13 @@ function stoppedIssueView(stopped: StoppedIssue): StoppedIssueView {
   return {
     ref: front.issueRef === null ? null : front.issueRef.toString(),
     front: { id: front.id, kind: front.kind, state: front.state, lastError: front.lastError },
-    waiting: stopped.waiting.map((action) => ({ id: action.id, kind: action.kind, state: action.state })),
+    stopped: stopped.stopped.map(issueActionView),
+    waiting: stopped.waiting.map(({ action }) => issueActionView(action)),
   };
+}
+
+function issueActionView(action: Action): IssueActionView {
+  return { id: action.id, kind: action.kind, state: action.state };
 }
 
 function ageInDays(since: Date, now: Date): number {

@@ -39,16 +39,22 @@ export function actionView(action: Action): ActionView {
   };
 }
 
-/** The failed or blocked action another one waits behind on the same issue. */
+/**
+ * The failed or blocked actions another one waits behind on the same issue: the
+ * oldest, which is the one to clear first, and the ids of all of them, oldest
+ * first, the oldest included.
+ */
 export type FrontView = {
   id: string;
   state: ActionState;
+  inFront: string[];
 };
 
 /**
- * An action as a listing shows it: what it is, and, when it is waiting behind a
- * failed or blocked action on its issue, which one. Such an action will not run
- * until that one is retried or cancelled, however long the queue is left alone.
+ * An action as a listing shows it: what it is, and, when it is waiting behind
+ * failed or blocked actions on its issue, which ones. Such an action will not run
+ * until every one of them is retried or cancelled, however long the queue is left
+ * alone.
  */
 export type ListedActionView = ActionView & {
   waitingBehind: FrontView | null;
@@ -69,8 +75,8 @@ export class ListActions {
   }
 
   /**
-   * Which stopped action each listed one waits behind. The issue's whole line is
-   * read, not only the listed actions, because the action in front need not match
+   * Which stopped actions each listed one waits behind. The issue's whole line is
+   * read, not only the listed actions, because the actions in front need not match
    * the filter: a listing of queued work still has to say what holds it.
    */
   async #frontsOf(listed: readonly Action[], filter: ActionFilter): Promise<Map<string, FrontView>> {
@@ -84,8 +90,11 @@ export class ListActions {
       issue: filter.issue,
     });
     for (const stopped of stoppedIssues(open)) {
-      for (const waiting of stopped.waiting) {
-        fronts.set(waiting.id, { id: stopped.front.id, state: stopped.front.state });
+      for (const { action, inFront } of stopped.waiting) {
+        const [front] = inFront;
+        if (front !== undefined) {
+          fronts.set(action.id, { id: front.id, state: front.state, inFront: inFront.map((one) => one.id) });
+        }
       }
     }
     return fronts;

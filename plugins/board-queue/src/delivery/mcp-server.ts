@@ -59,7 +59,9 @@ export function createMcpServer(container: Container): McpServer {
         'often it has been attempted and the error that stopped it. Filters narrow it; with none, the whole',
         'queue comes back. Actions on one issue run in the order they were filed, and a failed or blocked action',
         'holds every action filed after it on its issue: such an action carries waitingBehind, the id and state',
-        'of the one in front, and runs only once that one is retried (board_retry) or cancelled (board_cancel).',
+        'of the oldest stopped action in front of it and inFront, the ids of every stopped one there, oldest',
+        'first. It runs only once every one of them is retried (board_retry) or cancelled (board_cancel); clear',
+        'the oldest first, since retrying a nearer one runs nothing while an older one still stands in front.',
         'This reads the queue only and costs no API allowance.',
       ].join(' '),
       inputSchema: {

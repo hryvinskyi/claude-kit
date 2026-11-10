@@ -50,14 +50,28 @@ export function actionLine(action: ActionView): string {
 }
 
 /**
- * One action as a listing shows it: its line, and, when it waits behind a failed
- * or blocked action on its issue, which one and what lets it run.
+ * One action as a listing shows it: its line, and, when it waits behind failed or
+ * blocked actions on its issue, the oldest of them and what lets it run.
  */
 export function listedLine(action: ListedActionView): string {
   const front = action.waitingBehind;
   return front === null
     ? actionLine(action)
-    : `${actionLine(action)} — waits behind ${front.state} ${front.id}; retry or cancel ${front.id} to let it run`;
+    : `${actionLine(action)} — waits behind ${front.state} ${front.id}; ${clearing(front.id, front.inFront, 'it')}`;
+}
+
+/**
+ * What lets work behind stopped actions run. Each stopped action holds its issue
+ * on its own, so with several in front every one of them has to be retried or
+ * cancelled, and the oldest is named first: clearing only a nearer one runs
+ * nothing.
+ */
+export function clearing(oldest: string, inFront: readonly string[], work: 'it' | 'them'): string {
+  const after = inFront.filter((id) => id !== oldest);
+  return after.length === 0
+    ? `retry or cancel ${oldest} to let ${work} run`
+    : `${String(after.length + 1)} stopped actions stand in front: retry or cancel ${oldest} first, then `
+      + `${after.join(', ')}, to let ${work} run`;
 }
 
 /** One action that just changed, named by what happened to it. */
@@ -110,13 +124,14 @@ export function statusLines(status: QueueStatusView): string[] {
   return lines;
 }
 
-/** An issue held up behind a stopped action: what waits, and what lets it move. */
+/** An issue held up behind stopped actions: what waits, and what lets it move. */
 function stoppedIssueLine(issue: StoppedIssueView): string {
   const front = issue.front;
   const waiting = issue.waiting.map((action) => `${action.id} ${action.kind}`
     + (action.state === 'queued' ? '' : ` (${action.state})`)).join(', ');
+  const inFront = issue.stopped.map((action) => action.id);
   return `stopped ${issue.ref ?? NO_ISSUE} behind ${front.state} ${front.id} ${front.kind} — `
-    + `${String(issue.waiting.length)} waiting: ${waiting}; retry or cancel ${front.id} to let them run`;
+    + `${String(issue.waiting.length)} waiting: ${waiting}; ${clearing(front.id, inFront, 'them')}`;
 }
 
 /** What keeping in step with the coordination server looks like from this worker. */

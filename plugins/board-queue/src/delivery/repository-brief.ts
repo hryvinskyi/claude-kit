@@ -1,6 +1,6 @@
 import type { ActionState } from '../domain/action.ts';
-import type { ActionView } from '../application/list-actions.ts';
-import { oneLine } from './human-text.ts';
+import type { ListedActionView } from '../application/list-actions.ts';
+import { clearing, oneLine } from './human-text.ts';
 
 /**
  * The two lines a session sees when it starts in one repository.
@@ -27,6 +27,9 @@ const TAG = '[BOARD QUEUE]';
  */
 export const BRIEF_STATES: readonly ActionState[] = ['queued', 'running', 'held', 'blocked', 'failed'];
 
+/** How a line names work that belongs to no issue. */
+const NO_ISSUE = '(no issue)';
+
 /** Beyond this, a wait is worth naming rather than counting as work in hand. */
 const WORTH_NAMING_DAYS = 1;
 
@@ -36,10 +39,23 @@ export type BlockedHeadline = {
   error: string;
 };
 
+export type StoppedHeadline = {
+  ref: string | null;
+  /** The oldest failed or blocked action the issue's work waits behind: the one to clear first. */
+  frontId: string;
+  frontState: ActionState;
+  /** Every stopped action in front of that work, oldest first, the front included. */
+  inFront: string[];
+  /** Queued and held actions that will not run until every stopped one in front is retried or cancelled. */
+  waiting: number;
+};
+
 export type RepositoryBrief = {
   repo: string;
   /** Work the worker will pick up, including whatever it has in hand right now. */
   queued: number;
+  /** Queued work that cannot run: it waits behind a failed or blocked action on its issue. */
+  behindStopped: number;
   held: number;
   /** How long the oldest held action has been waiting, or nothing when none is. */
   oldestHeldDays: number | null;
@@ -51,6 +67,8 @@ export type RepositoryBrief = {
   failed: number;
   /** The first action waiting for a person, which is the one worth naming. */
   firstBlocked: BlockedHeadline | null;
+  /** The first issue held up behind a stopped action, which is the one worth naming. */
+  firstStopped: StoppedHeadline | null;
 };
 
 /**
@@ -62,10 +80,11 @@ export type RepositoryBrief = {
  * one in the count — which is the honest reading, because that action has not
  * happened.
  */
-export function briefOf(repo: string, actions: readonly ActionView[], now: Date): RepositoryBrief {
+export function briefOf(repo: string, actions: readonly ListedActionView[], now: Date): RepositoryBrief {
   const brief: RepositoryBrief = {
     repo,
     queued: 0,
+    behindStopped: 0,
     held: 0,
     oldestHeldDays: null,
     delayed: 0,
@@ -73,8 +92,25 @@ export function briefOf(repo: string, actions: readonly ActionView[], now: Date)
     blocked: 0,
     failed: 0,
     firstBlocked: null,
+    firstStopped: null,
   };
   for (const action of actions) {
+    const front = action.waitingBehind;
+    if (front !== null) {
+      brief.firstStopped ??= { ref: action.ref, frontId: front.id, frontState: front.state, inFront: [], waiting: 0 };
+      if (brief.firstStopped.frontId === front.id) {
+        brief.firstStopped.waiting += 1;
+        if (front.inFront.length > brief.firstStopped.inFront.length) {
+          brief.firstStopped.inFront = [...front.inFront];
+        }
+      }
+    }
+    if (action.state === 'queued' && front !== null) {
+      // Work that cannot run is not work the worker will pick up, and no date it
+      // is waiting for is the reason it has not happened.
+      brief.behindStopped += 1;
+      continue;
+    }
     if (action.state === 'queued' || action.state === 'running') {
       brief.queued += 1;
     }
@@ -106,7 +142,7 @@ export function briefOf(repo: string, actions: readonly ActionView[], now: Date)
 
 /** Whether there is anything to say at all. */
 export function hasNews(brief: RepositoryBrief): boolean {
-  return brief.queued + brief.held + brief.blocked + brief.failed > 0;
+  return brief.queued + brief.behindStopped + brief.held + brief.blocked + brief.failed > 0;
 }
 
 export function briefLines(brief: RepositoryBrief): string[] {
@@ -119,13 +155,19 @@ export function briefLines(brief: RepositoryBrief): string[] {
   const delayed = brief.nextDelayedDays === null
     ? ''
     : ` · delayed ${String(brief.delayed)} (next in ${brief.nextDelayedDays.toFixed(1)}d)`;
+  const behindStopped = brief.behindStopped === 0 ? '' : ` · behind a stop ${String(brief.behindStopped)}`;
   const lines = [
     `${TAG} queued ${String(brief.queued)} · ${held}${delayed} · blocked ${String(brief.blocked)}`
-    + ` · failed ${String(brief.failed)}`,
+    + ` · failed ${String(brief.failed)}${behindStopped}`,
   ];
   const blocked = brief.firstBlocked;
   if (blocked !== null) {
     lines.push(`${TAG} blocked ${blocked.ref ?? blocked.id} — ${blocked.error}`);
+  }
+  const stopped = brief.firstStopped;
+  if (stopped !== null) {
+    lines.push(`${TAG} stopped ${stopped.ref ?? NO_ISSUE} behind ${stopped.frontState} ${stopped.frontId} — `
+      + `${String(stopped.waiting)} waiting; ${clearing(stopped.frontId, stopped.inFront, 'them')}`);
   }
   return lines;
 }
@@ -136,7 +178,7 @@ export function briefLines(brief: RepositoryBrief): string[] {
  * own backoff pushes an action a minute or two ahead all the time, and a session
  * brief that reported those would be noise from the first morning.
  */
-function waitsFor(action: ActionView, now: Date): number | null {
+function waitsFor(action: ListedActionView, now: Date): number | null {
   if (action.state !== 'queued' || action.notBefore === null) {
     return null;
   }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { ListActions } from '../../src/application/list-actions.ts';
+import type { ListedActionView } from '../../src/application/list-actions.ts';
 import { fixture } from './queue-fixture.ts';
 
 describe('reading the queue', () => {
@@ -69,8 +70,10 @@ describe('reading the queue', () => {
     await file({ id: 'before-fields', state: 'queued', issue: 14, createdAt: at(0) });
     const list = new ListActions(repository);
 
-    const behind = (views: readonly { id: string; waitingBehind: { id: string; state: string } | null }[]) =>
-      Object.fromEntries(views.map((view) => [view.id, view.waitingBehind]));
+    const behind = (views: readonly ListedActionView[]) => Object.fromEntries(views.map((view) => [
+      view.id,
+      view.waitingBehind === null ? null : { id: view.waitingBehind.id, state: view.waitingBehind.state },
+    ]));
 
     assert.deepEqual(behind(await list.execute({})), {
       'before-fields': null,
@@ -85,6 +88,20 @@ describe('reading the queue', () => {
       { close: { id: 'comment', state: 'failed' } },
       'the action in front is found though the filter leaves it out',
     );
+  });
+
+  it('names the oldest stopped action in front of a waiting one, and every stopped one there', async () => {
+    const { repository, file } = fixture();
+    const at = (hour: number): Date => new Date(Date.UTC(2026, 0, 9, hour));
+    await file({ id: 'move', state: 'failed', issue: 12, createdAt: at(1) });
+    await file({ id: 'comment', state: 'failed', kind: 'issue.comment', issue: 12, createdAt: at(2) });
+    await file({ id: 'close', state: 'queued', kind: 'issue.close', issue: 12, createdAt: at(3) });
+
+    const views = await new ListActions(repository).execute({ states: ['queued'] });
+
+    assert.deepEqual(views.map((view) => view.waitingBehind), [
+      { id: 'move', state: 'failed', inFront: ['move', 'comment'] },
+    ]);
   });
 
   it('names nothing once the action in front is retried', async () => {

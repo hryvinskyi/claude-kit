@@ -127,6 +127,7 @@ describe('what the queue is doing', () => {
       {
         ref: 'example-org/first-repo#12',
         front: { id: 'comment', kind: 'issue.comment', state: 'failed', lastError: 'the API was unreachable' },
+        stopped: [{ id: 'comment', kind: 'issue.comment', state: 'failed' }],
         waiting: [
           { id: 'close', kind: 'issue.close', state: 'queued' },
           { id: 'move', kind: 'board.set-fields', state: 'held' },
@@ -140,6 +141,7 @@ describe('what the queue is doing', () => {
           state: 'blocked',
           lastError: 'Severity has no option matching "urgent"; it accepts: S1 · blocking, S2 · broken',
         },
+        stopped: [{ id: 'fields', kind: 'board.set-fields', state: 'blocked' }],
         waiting: [{ id: 'after-fields', kind: 'board.set-fields', state: 'queued' }],
       },
     ]);
