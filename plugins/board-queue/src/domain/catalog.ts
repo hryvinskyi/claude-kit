@@ -31,6 +31,17 @@ export type IssueFacts = {
   subIssuesTotal: number | null;
 };
 
+/**
+ * What one single-select field of a row read at some moment: the option's name as
+ * the row showed it — an empty text for no value — and the option's id, looked up
+ * in the catalog, when the catalog knew that name. The id is what tells a renamed
+ * option from a different one.
+ */
+export type FieldReading = {
+  name: string;
+  optionId: string | null;
+};
+
 /** One row of the board: the item, the issue it holds, and its single-select values. */
 export type ReadItemResult = {
   itemId: string;

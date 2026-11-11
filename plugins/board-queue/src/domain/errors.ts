@@ -277,8 +277,12 @@ export class PreconditionUnmet extends BoardQueueError {
   }
 }
 
-/** The row is not on the board, or carries a status the write does not move a row out of. */
-export type PreconditionReason = 'not_on_board' | 'status_not_owned';
+/**
+ * The row is not on the board, or carries a status the write does not move a row
+ * out of, or every value a guarded write would set sits in a field that has been
+ * changed on the board since the guard was taken.
+ */
+export type PreconditionReason = 'not_on_board' | 'status_not_owned' | 'changed_since';
 
 /**
  * A log reader asked for events after a position the log no longer keeps. The

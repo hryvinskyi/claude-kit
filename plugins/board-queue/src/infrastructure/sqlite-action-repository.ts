@@ -2,8 +2,9 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { SQLInputValue, SQLOutputValue, StatementSync } from 'node:sqlite';
 import { ACTION_STATES, emptyActionCounts } from '../application/action-states.ts';
 import type { ActionCounts, ActionFilter, ActionRepository, Clock, MetaWrite } from '../application/ports.ts';
+import { z } from 'zod';
 import { Action } from '../domain/action.ts';
-import type { ActionState } from '../domain/action.ts';
+import type { ActionProps, ActionState } from '../domain/action.ts';
 import type { BoardKey } from '../domain/board-directory.ts';
 import type { CachedCatalog, CatalogField, CatalogOption, FieldCatalog } from '../domain/catalog.ts';
 import { StaleAction } from '../domain/errors.ts';
@@ -29,14 +30,15 @@ const LOCK_RENEW_EVERY_MS = 60 * 1000;
 const LOCK_STALE_AFTER_MS = 5 * 60 * 1000;
 
 const COLUMNS = 'id, kind, payload, repo, issue, state, attempts, not_before, origin, '
-  + 'created_at, updated_at, last_error, result, blocked_reason, version, dedupe_key, ended_as';
+  + 'created_at, updated_at, last_error, result, blocked_reason, version, dedupe_key, ended_as, option_wait, '
+  + 'write_guard';
 
 /**
  * An action whose key another action already carries is not written: the filer
  * said this is one piece of work, and it is already in the queue.
  */
 const INSERT_SQL = `INSERT INTO actions (${COLUMNS}) `
-  + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (dedupe_key) DO NOTHING';
+  + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (dedupe_key) DO NOTHING';
 
 /**
  * Guarded by the version the aggregate was read at: when another writer has
@@ -45,7 +47,7 @@ const INSERT_SQL = `INSERT INTO actions (${COLUMNS}) `
  */
 const UPDATE_SQL = 'UPDATE actions SET kind = ?, payload = ?, repo = ?, issue = ?, state = ?, ended_as = ?, '
   + 'attempts = ?, not_before = ?, origin = ?, updated_at = ?, last_error = ?, result = ?, '
-  + 'blocked_reason = ?, version = ? WHERE id = ? AND version = ?';
+  + 'blocked_reason = ?, option_wait = ?, write_guard = ?, version = ? WHERE id = ? AND version = ?';
 
 /**
  * The next action a worker may run, in one question.
@@ -487,6 +489,8 @@ export class SqliteActionRepository implements ActionRepository {
       row.version,
       row.dedupe_key,
       row.ended_as,
+      row.option_wait,
+      row.write_guard,
     )) > 0;
   }
 
@@ -506,6 +510,8 @@ export class SqliteActionRepository implements ActionRepository {
       row.last_error,
       row.result,
       row.blocked_reason,
+      row.option_wait,
+      row.write_guard,
       row.version,
       row.id,
       action.persistedVersion,
@@ -601,6 +607,8 @@ type ActionRow = {
   version: number;
   dedupe_key: string | null;
   ended_as: string | null;
+  option_wait: string | null;
+  write_guard: string | null;
 };
 
 /**
@@ -632,6 +640,8 @@ function toRow(action: Action): ActionRow {
     last_error: props.lastError === null ? null : redactSecrets(props.lastError),
     result: props.result === null ? null : redactSecrets(props.result),
     blocked_reason: props.blockedReason,
+    option_wait: encodeOptionWait(props),
+    write_guard: encodeWriteGuard(props),
     version: props.version,
     dedupe_key: props.dedupeKey,
   };
@@ -661,8 +671,84 @@ function fromRow(row: Record<string, SQLOutputValue>): Action {
     result: readOptionalText(row, 'result'),
     version: readInteger(row, 'version'),
     blockedReason: readOptionalText(row, 'blocked_reason'),
+    ...optionWaitOf(readOptionalText(row, 'option_wait'), readInteger(row, 'version')),
+    writeGuard: writeGuardOf(readOptionalText(row, 'write_guard'), readInteger(row, 'version')),
     dedupeKey: readOptionalText(row, 'dedupe_key'),
   });
+}
+
+/**
+ * What an action blocked for a missing option waits for, as it is stored: the
+ * record and the row version it was written at.
+ *
+ * Releases that came before this record share the file and never touch the
+ * column, but every write they make moves the version on. A record whose version
+ * is not the row's was therefore left behind by such a write — a retry, a block
+ * for another value — and describes a block that is over; it reads as no record,
+ * and the action waits for a person, as it did before the record existed.
+ */
+const StoredReading = z.object({ name: z.string(), optionId: z.string().nullable() });
+
+const StoredOptionWait = z.object({
+  at: z.number().int(),
+  missing: z.array(z.string()).min(1),
+  row: z.record(z.string(), StoredReading).nullable(),
+});
+
+type OptionWaitProps = Pick<ActionProps, 'missingOptions' | 'rowAtBlock'>;
+
+const NO_OPTION_WAIT: OptionWaitProps = { missingOptions: [], rowAtBlock: null };
+
+function encodeOptionWait(props: ActionProps): string | null {
+  if (props.missingOptions.length === 0) {
+    return null;
+  }
+  return JSON.stringify({
+    at: props.version,
+    missing: [...props.missingOptions],
+    row: props.rowAtBlock,
+  } satisfies z.infer<typeof StoredOptionWait>);
+}
+
+/** The stored record, or none when it is absent, unreadable, or older than the row it sits in. */
+function optionWaitOf(stored: string | null, version: number): OptionWaitProps {
+  if (stored === null) {
+    return NO_OPTION_WAIT;
+  }
+  const parsed = StoredOptionWait.safeParse(parseJson(stored));
+  if (!parsed.success || parsed.data.at !== version) {
+    return NO_OPTION_WAIT;
+  }
+  return { missingOptions: parsed.data.missing, rowAtBlock: parsed.data.row };
+}
+
+/**
+ * The guard a release set, as it is stored: the readings and the row version they
+ * were written at. Releases before the guard existed never touch the column, so
+ * an action they run writes unguarded, as they always did; any write they make
+ * moves the version on — a merge folded into the action included — and a guard
+ * whose version is not the row's reads as none, because the values it guarded may
+ * no longer be the ones the action carries.
+ */
+const StoredWriteGuard = z.object({
+  at: z.number().int(),
+  guard: z.record(z.string(), StoredReading),
+});
+
+function encodeWriteGuard(props: ActionProps): string | null {
+  if (props.writeGuard === null) {
+    return null;
+  }
+  const stored = { at: props.version, guard: { ...props.writeGuard } } satisfies z.infer<typeof StoredWriteGuard>;
+  return JSON.stringify(stored);
+}
+
+function writeGuardOf(stored: string | null, version: number): ActionProps['writeGuard'] {
+  if (stored === null) {
+    return null;
+  }
+  const parsed = StoredWriteGuard.safeParse(parseJson(stored));
+  return parsed.success && parsed.data.at === version ? parsed.data.guard : null;
 }
 
 /** The spelling the caller filed, when the payload still carries the same repository. */

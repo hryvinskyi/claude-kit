@@ -4,7 +4,14 @@ import type { ExecutionContext } from '../../src/domain/kinds/action-kind.ts';
 import { AssigneesKind } from '../../src/domain/kinds/assignees.ts';
 import { CloseKind } from '../../src/domain/kinds/close.ts';
 import { CommentKind } from '../../src/domain/kinds/comment.ts';
-import { OptionNotFound, PreconditionUnmet, ReadbackMismatch, RefusedByRule } from '../../src/domain/errors.ts';
+import {
+  OptionNotFound,
+  PreconditionUnmet,
+  ReadbackMismatch,
+  RefusedByRule,
+  TransientFailure,
+} from '../../src/domain/errors.ts';
+import type { FieldReading } from '../../src/domain/catalog.ts';
 import { FieldRequest } from '../../src/domain/field-request.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { applyFields } from '../../src/domain/kinds/fields.ts';
@@ -35,6 +42,7 @@ function stage(options: {
   issues?: readonly SeededIssue[];
   actionId?: string;
   enqueuedAt?: Date;
+  writeGuard?: Readonly<Record<string, FieldReading>>;
 } = {}): Stage {
   const clock = new FakeClock(FILED);
   const sleeper = new FakeSleeper(clock);
@@ -50,6 +58,7 @@ function stage(options: {
       refusedStatus: testConfig.refusedStatus,
       actionId: options.actionId ?? 'a-1',
       enqueuedAt: options.enqueuedAt ?? FILED,
+      writeGuard: options.writeGuard ?? {},
     },
     board,
     issues,
@@ -256,9 +265,88 @@ describe('the last guard before a board write', () => {
   it('writes a value that only shares a letter with it', async () => {
     const it_ = stage({ items: [seedItem(twelve, 'item-7', {})] });
 
-    const readback = await applyFields(twelve, FieldRequest.forRead({ Status: 'In Rev' }, testConfig), it_.ctx);
+    const applied = await applyFields(twelve, FieldRequest.forRead({ Status: 'In Rev' }, testConfig), it_.ctx);
 
-    assert.deepEqual(readback, { Status: 'In Review' });
+    assert.deepEqual(applied.readback, { Status: 'In Review' });
+  });
+});
+
+describe('a write guarded by what the row read before', () => {
+  const kind = new SetFieldsKind(testConfig);
+  const payload = { repo: FIRST, issue: 12, fields: { status: 'In Review', severity: 'S2', module: 'Checkout' } };
+  const guard = {
+    status: { name: 'Todo', optionId: 'option-status-todo' },
+    module: { name: '', optionId: null },
+  };
+
+  it('writes every value whose field still holds the option it held, reading the row right before the write',
+    async () => {
+      const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })], writeGuard: guard });
+
+      const result = await kind.execute(payload, it_.ctx);
+
+      assert.deepEqual(it_.board.valuesOf(twelve), {
+        Status: 'In Review',
+        Severity: 'S2 · broken · no workaround',
+        Module: 'Checkout',
+      });
+      assert.doesNotMatch(result.summary, /was not set/);
+      const firstWrite = it_.board.calls.indexOf('setSingleSelect');
+      assert.ok(it_.board.calls.slice(0, firstWrite).includes('readItemById'), 'the row is read before any write');
+    });
+
+  it('leaves alone a field somebody moved, writes the rest, and says which and from what', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'In Progress' })], writeGuard: guard });
+
+    const result = await kind.execute(payload, it_.ctx);
+
+    assert.deepEqual(it_.board.valuesOf(twelve), {
+      Status: 'In Progress',
+      Severity: 'S2 · broken · no workaround',
+      Module: 'Checkout',
+    });
+    assert.deepEqual(result.readback, { Severity: 'S2 · broken · no workaround', Module: 'Checkout' });
+    assert.match(
+      result.summary,
+      /Status was not set to "In Review": it has been changed on the board since \(from "Todo" to "In Progress"\)/,
+    );
+  });
+
+  it('reads a renamed option as the same option, not as a move', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })], writeGuard: guard });
+    it_.board.renameOption('Status', 'Todo', 'Backlog');
+
+    await kind.execute(payload, it_.ctx);
+
+    assert.equal(it_.board.valuesOf(twelve)?.['Status'], 'In Review');
+  });
+
+  it('ends without a write when every value it would write is guarded and moved', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'In Progress' })], writeGuard: { status: guard.status } });
+
+    await assert.rejects(
+      () => kind.execute({ repo: FIRST, issue: 12, fields: { status: 'In Review' } }, it_.ctx),
+      (error: unknown) => error instanceof PreconditionUnmet && error.reason === 'changed_since',
+    );
+    assert.equal(it_.board.written.length, 0);
+  });
+
+  it('is a fault of the moment, not a dropped value, when the row cannot be read before the write', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })], writeGuard: guard });
+    it_.board.fail('readItemById', new TransientFailure('the API answered 502'));
+
+    await assert.rejects(() => kind.execute(payload, it_.ctx), TransientFailure);
+    assert.equal(it_.board.written.length, 0);
+  });
+
+  it('reads the row once before writing when it is conditional on the status too', async () => {
+    const it_ = stage({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })], writeGuard: guard });
+
+    await kind.execute({ ...payload, onlyIfStatusIn: ['Todo'] }, it_.ctx);
+
+    const firstWrite = it_.board.calls.indexOf('setSingleSelect');
+    assert.equal(it_.board.calls.slice(0, firstWrite).filter((call) => call === 'readItemById').length, 1);
+    assert.equal(it_.board.valuesOf(twelve)?.['Status'], 'In Review');
   });
 });
 

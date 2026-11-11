@@ -89,3 +89,40 @@ describe('a stopped issue, as a terminal shows it', () => {
     assert.equal(listedLine(CLOSE), 'c-2 queued issue.close example-org/first-repo#12');
   });
 });
+
+describe('an action that got past an error, as a listing shows it', () => {
+  const OPTION_ERROR = 'Severity has no option matching "S4"; it accepts: S1 · blocking';
+  const RELEASED = {
+    ...CLOSE,
+    id: 'm-1',
+    kind: 'board.set-fields',
+    lastError: OPTION_ERROR,
+    result: 'the board now offers what this waited for, so it runs again with severity "S4"\n'
+      + 'example-org/first-repo#12: Severity → S4 · trivial',
+  };
+
+  it('shows what a finished action did, not the error it got past', () => {
+    assert.equal(
+      listedLine({ ...RELEASED, state: 'done' }),
+      'm-1 done board.set-fields example-org/first-repo#12 — the board now offers what this waited for, so it '
+      + 'runs again with severity "S4"',
+    );
+    assert.equal(
+      listedLine({ ...RELEASED, state: 'skipped', result: 'Status reads "In Review"; the row was left as it is' }),
+      'm-1 skipped board.set-fields example-org/first-repo#12 — Status reads "In Review"; the row was left as it is',
+    );
+  });
+
+  it('shows the error that stopped an action still waiting on it, and a finished one\'s error when it kept no result',
+    () => {
+      assert.equal(
+        listedLine({ ...RELEASED, state: 'blocked', result: null }),
+        `m-1 blocked board.set-fields example-org/first-repo#12 — ${OPTION_ERROR}`,
+      );
+      assert.equal(listedLine({ ...RELEASED, state: 'queued' }), `m-1 queued board.set-fields example-org/first-repo#12 — ${OPTION_ERROR}`);
+      assert.equal(
+        listedLine({ ...RELEASED, state: 'done', result: null }),
+        `m-1 done board.set-fields example-org/first-repo#12 — ${OPTION_ERROR}`,
+      );
+    });
+});

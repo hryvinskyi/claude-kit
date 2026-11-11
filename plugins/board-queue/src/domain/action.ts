@@ -1,3 +1,4 @@
+import type { FieldReading } from './catalog.ts';
 import type { BoardQueueError } from './errors.ts';
 import { IllegalTransition } from './errors.ts';
 import type { IssueRef } from './issue-ref.ts';
@@ -11,6 +12,23 @@ export type ActionState =
   | 'blocked'
   | 'skipped'
   | 'cancelled';
+
+/**
+ * A board row as it read the moment an action was blocked for an option the board
+ * lacked: per payload field key the action wanted and the board could answer, what
+ * the row held then — no value, for every key, when the issue had no row. It is
+ * what tells, once the board offers the option, which of the action's other values
+ * somebody has moved on since and which nobody touched.
+ */
+export type RowAtBlock = Readonly<Record<string, FieldReading>>;
+
+/**
+ * Per payload field key, what the row must still read for that value to be
+ * written. It belongs to the action rather than to its payload: it is this
+ * queue's own condition, set when the board releases a blocked action, and never
+ * something a caller files.
+ */
+export type WriteGuard = Readonly<Record<string, FieldReading>>;
 
 export type ActionProps = {
   id: string;
@@ -27,6 +45,19 @@ export type ActionProps = {
   result: string | null;
   version: number;
   blockedReason: string | null;
+  /**
+   * The payload's field keys whose wanted option the board did not offer when this
+   * action was blocked for it; empty in every other state, and on an action blocked
+   * before the queue kept this record.
+   */
+  missingOptions: readonly string[];
+  /**
+   * The row as it read when the action was blocked for those options; null in every
+   * other state, and when the row could not be read then.
+   */
+  rowAtBlock: RowAtBlock | null;
+  /** What the row must still read for each guarded value to be written; null when nothing is guarded. */
+  writeGuard: WriteGuard | null;
   /**
    * What makes this action the one copy of a piece of work, when its filer says
    * so: a second action carrying the same key is never written.
@@ -76,6 +107,9 @@ export class Action {
   #version: number;
   #persistedVersion: number;
   #blockedReason: string | null;
+  #missingOptions: readonly string[];
+  #rowAtBlock: RowAtBlock | null;
+  #writeGuard: WriteGuard | null;
 
   constructor(props: ActionProps) {
     this.id = props.id;
@@ -94,6 +128,9 @@ export class Action {
     this.#version = props.version;
     this.#persistedVersion = props.version;
     this.#blockedReason = props.blockedReason;
+    this.#missingOptions = [...props.missingOptions];
+    this.#rowAtBlock = props.rowAtBlock;
+    this.#writeGuard = props.writeGuard;
   }
 
   /**
@@ -117,6 +154,9 @@ export class Action {
       result: null,
       version: 1,
       blockedReason: null,
+      missingOptions: [],
+      rowAtBlock: null,
+      writeGuard: null,
       dedupeKey: input.dedupeKey ?? null,
     });
   }
@@ -166,6 +206,24 @@ export class Action {
     return this.#blockedReason;
   }
 
+  /**
+   * Which of the values this action wants the board had no option for when it was
+   * blocked: the part of the work a board that has since learnt them is answering.
+   */
+  get missingOptions(): readonly string[] {
+    return this.#missingOptions;
+  }
+
+  /** The row as it read when this action was blocked for a missing option, when it could be read. */
+  get rowAtBlock(): RowAtBlock | null {
+    return this.#rowAtBlock;
+  }
+
+  /** What the row must still read for each guarded value to be written, when anything is guarded. */
+  get writeGuard(): WriteGuard | null {
+    return this.#writeGuard;
+  }
+
   /** Called by a store once its write landed; the guard moves up to the stored version. */
   markPersisted(): void {
     this.#persistedVersion = this.#version;
@@ -187,6 +245,9 @@ export class Action {
       result: this.#result,
       version: this.#version,
       blockedReason: this.#blockedReason,
+      missingOptions: [...this.#missingOptions],
+      rowAtBlock: this.#rowAtBlock,
+      writeGuard: this.#writeGuard,
       dedupeKey: this.dedupeKey,
     };
   }
@@ -201,10 +262,11 @@ export class Action {
    * A later request may fold into this one only while it is still waiting to run:
    * once a worker has claimed it, the merged values would never reach the board.
    * A held or delayed action is deliberately not a candidate — folding a request
-   * into it would make it run at a moment nobody asked for.
+   * into it would make it run at a moment nobody asked for — and neither is a
+   * guarded one, whose guard would then hold back values a person asked for now.
    */
   isCoalescible(now: Date): boolean {
-    return this.isRunnable(now);
+    return this.isRunnable(now) && this.#writeGuard === null;
   }
 
   /** Taken by a worker. The attempt is counted here, before the outward call. */
@@ -220,6 +282,7 @@ export class Action {
     this.#state = 'done';
     this.#result = append(this.#result, result);
     this.#blockedReason = null;
+    this.#writeGuard = null;
     this.#touch(now);
   }
 
@@ -241,12 +304,24 @@ export class Action {
     this.#touch(now);
   }
 
-  /** A failure a retry will not fix. It waits for a person, and keeps the reason. */
-  block(now: Date, error: BoardQueueError): void {
+  /**
+   * A failure a retry will not fix. It waits for a person, and keeps the reason —
+   * and, when the board lacked options, which of the wanted values they were and
+   * how the row read at that moment, so that the board learning them can release
+   * the work without writing over a value somebody has moved since.
+   */
+  block(
+    now: Date,
+    error: BoardQueueError,
+    missingOptions: readonly string[] = [],
+    rowAtBlock: RowAtBlock | null = null,
+  ): void {
     this.#require(['running'], 'block');
     this.#state = 'blocked';
     this.#lastError = error.describe();
     this.#blockedReason = error.category;
+    this.#missingOptions = [...missingOptions];
+    this.#rowAtBlock = missingOptions.length === 0 ? null : rowAtBlock;
     this.#touch(now);
   }
 
@@ -260,6 +335,7 @@ export class Action {
     this.#state = 'skipped';
     this.#result = append(this.#result, reason);
     this.#blockedReason = null;
+    this.#writeGuard = null;
     this.#touch(now);
   }
 
@@ -274,7 +350,8 @@ export class Action {
    * The way back from a dead end: the cause was fixed outside this system (an
    * option added to the board, a repository that came back), so the action gets
    * its attempts back. The error it failed with is kept — it is the record of
-   * what was fixed.
+   * what was fixed. A person's retry is their own decision to write what the
+   * action carries, so a guard a release set is dropped with it.
    */
   retry(now: Date): void {
     this.#require(['blocked', 'failed'], 'be retried');
@@ -282,6 +359,53 @@ export class Action {
     this.#attempts = 0;
     this.#notBefore = null;
     this.#blockedReason = null;
+    this.#missingOptions = [];
+    this.#rowAtBlock = null;
+    this.#writeGuard = null;
+    this.#touch(now);
+  }
+
+  /**
+   * The board now offers every option this action was blocked for, and nobody but
+   * the board answered: it goes back on the queue carrying the values that waited
+   * for those options and the others whose blocked reading is known, each value
+   * the guard names written only while its field still reads as the guard says.
+   * The narrowing is for good — the action carries this payload from now on — and
+   * the note says what was left out, so nobody has to guess why a value did not
+   * land.
+   */
+  resumeWith(now: Date, payload: unknown, note: string, guard: WriteGuard | null): void {
+    this.#require(['blocked'], 'be resumed');
+    if (this.#missingOptions.length === 0) {
+      throw new IllegalTransition(this.id, this.#state, 'be resumed without a record of the options it waited for');
+    }
+    this.#payload = payload;
+    this.#state = 'queued';
+    this.#attempts = 0;
+    this.#notBefore = null;
+    this.#blockedReason = null;
+    this.#missingOptions = [];
+    this.#rowAtBlock = null;
+    this.#writeGuard = guard === null || Object.keys(guard).length === 0 ? null : guard;
+    this.#result = append(this.#result, note);
+    this.#touch(now);
+  }
+
+  /**
+   * The board offers what this action waited for, but the part of it that would
+   * run again is no longer something this queue may run — the configuration
+   * changed since it was filed. It stays blocked, with the reason in place of the
+   * one the board has answered, and no longer waits on the board: only a person's
+   * retry or cancel moves it now.
+   */
+  refuseRelease(now: Date, reason: string): void {
+    this.#require(['blocked'], 'have its release refused');
+    if (this.#missingOptions.length === 0) {
+      throw new IllegalTransition(this.id, this.#state, 'have a release refused that it was never waiting for');
+    }
+    this.#lastError = `the board now offers what this waited for, but it could not be released: ${reason}`;
+    this.#missingOptions = [];
+    this.#rowAtBlock = null;
     this.#touch(now);
   }
 
@@ -289,6 +413,9 @@ export class Action {
     this.#require(['queued', 'held', 'blocked', 'failed'], 'be cancelled');
     this.#state = 'cancelled';
     this.#blockedReason = null;
+    this.#missingOptions = [];
+    this.#rowAtBlock = null;
+    this.#writeGuard = null;
     this.#touch(now);
   }
 

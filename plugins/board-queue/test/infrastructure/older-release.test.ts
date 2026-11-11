@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { z } from 'zod';
 import { Action } from '../../src/domain/action.ts';
+import { OptionNotFound } from '../../src/domain/errors.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { SqliteActionRepository } from '../../src/infrastructure/sqlite-action-repository.ts';
 import { SqliteForgeLedger } from '../../src/infrastructure/sqlite-forge-ledger.ts';
@@ -20,6 +21,9 @@ const FIRST_LAYOUT_RELEASE = 'f1d33eadd22bc93bfc158b0c3aad9669bc614ba6';
 
 /** The last release whose queue wrote the second layout, before the forge's tables. */
 const SECOND_LAYOUT_RELEASE = 'd2a0ebc78abff71fc13fa0d2ba0c01b793e51d1a';
+
+/** The last release whose queue wrote the third layout, before it kept which values a board lacked. */
+const THIRD_LAYOUT_RELEASE = 'f5ce87aad77bdd27b8a805889f3b65bab2bc85c2';
 
 const PLUGIN = path.join(import.meta.dirname, '..', '..');
 const FIRST = 'example-org/first-repo';
@@ -36,9 +40,81 @@ import { SqliteActionRepository } from './src/infrastructure/sqlite-action-repos
 import { QueueStatus } from './src/application/queue-status.ts';
 import { Action } from './src/domain/action.ts';
 import { IssueRef } from './src/domain/issue-ref.ts';
+import { OptionNotFound } from './src/domain/errors.ts';
 
 const [command, file, id] = process.argv.slice(2);
 const repository = new SqliteActionRepository(file);
+if (command === 'reblock') {
+  // A person retries a blocked action, and the worker blocks it again for another value.
+  const now = new Date('2026-01-01T10:00:00.000Z');
+  const blocked = await repository.get(id);
+  blocked.retry(now);
+  await repository.update(blocked);
+  const claimed = await repository.claimNextRunnable(now);
+  claimed.block(now, new OptionNotFound('Defect type', 'Chore', ['Bug', 'Regression']));
+  await repository.update(claimed);
+}
+let folded = null;
+if (command === 'fold-and-run') {
+  // A session of this release files a request on the issue, and this release's
+  // worker runs the queue against a board that answers like the real one.
+  const { EnqueueAction } = await import('./src/application/enqueue-action.ts');
+  const { DrainQueue } = await import('./src/application/drain-queue.ts');
+  const { BoardRouter } = await import('./src/application/board-router.ts');
+  const { BudgetPolicy } = await import('./src/application/budget-policy.ts');
+  const { BoardDirectory } = await import('./src/domain/board-directory.ts');
+  const { ConfigSchema } = await import('./src/domain/config.ts');
+  const { defaultKindRegistry } = await import('./src/domain/kinds/default-kinds.ts');
+  const { RateBudget } = await import('./src/domain/rate-budget.ts');
+  const config = ConfigSchema.parse({
+    boards: [{ owner: 'example-org', number: 7, ownerType: 'organization', repos: ['${FIRST}'] }],
+    fields: ['Status', 'Severity', 'Module', 'Environment', 'Defect type'],
+    refusedStatus: ['Done'],
+    worker: { paceMs: 0 },
+  });
+  const offered = { Status: ['Todo', 'In Progress', 'In Review'], Severity: ['S2', 'S4'], Module: ['Checkout'] };
+  const catalog = {
+    projectId: 'project-1',
+    fields: Object.entries(offered).map(([name, names]) => ({
+      id: 'field-' + name, name, dataType: 'SINGLE_SELECT',
+      options: names.map((option) => ({ id: 'option-' + name + '-' + option, name: option })),
+    })),
+  };
+  const values = { Status: 'In Progress' };
+  const ref = IssueRef.of('${FIRST}', 12);
+  const budget = new RateBudget({ resource: 'graphql', remaining: 4000, limit: 5000, used: 1000, resetAt: new Date(Date.now() + 3600000) });
+  const board = {
+    probeBudget: async () => budget,
+    lastBudget: () => budget,
+    catalog: async () => catalog,
+    ensureItem: async () => 'item-7',
+    findItem: async () => ({ itemId: 'item-7', ref, values: { ...values } }),
+    readItemById: async () => ({ itemId: 'item-7', ref, values: { ...values } }),
+    setSingleSelect: async (_item, fieldId, optionId) => {
+      const field = catalog.fields.find((one) => one.id === fieldId);
+      values[field.name] = field.options.find((one) => one.id === optionId).name;
+    },
+  };
+  const clock = { now: () => new Date() };
+  const directory = BoardDirectory.of(config.boards);
+  const kinds = defaultKindRegistry(config);
+  const outcome = await new EnqueueAction({ repository, kinds, directory, clock }).execute({
+    kind: 'board.set-fields',
+    payload: { repo: '${FIRST}', issue: 12, fields: { module: 'Checkout' } },
+    origin: 'a session of the older release',
+  });
+  const report = await new DrainQueue({
+    repository,
+    boards: new BoardRouter(directory, () => ({ board, issues: {} })),
+    kinds,
+    policy: new BudgetPolicy(config.worker),
+    clock,
+    sleeper: { sleep: async () => undefined },
+    logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    config,
+  }).run();
+  folded = { coalescedInto: outcome.coalescedInto ?? null, done: report.done, values };
+}
 if (command === 'file') {
   await repository.insert(Action.enqueue({
     id,
@@ -59,6 +135,7 @@ process.stdout.write(JSON.stringify({
   one: one === null ? null : { id: one.id, state: one.state },
   counts,
   statusCounts: status.counts,
+  folded,
 }));
 `;
 
@@ -67,10 +144,15 @@ const OlderAnswer = z.object({
   one: z.object({ id: z.string(), state: z.string() }).nullable(),
   counts: z.record(z.string(), z.number()),
   statusCounts: z.record(z.string(), z.number()),
+  folded: z.object({
+    coalescedInto: z.string().nullable(),
+    done: z.number(),
+    values: z.record(z.string(), z.string()),
+  }).nullable(),
 });
 
 type OlderRelease = {
-  run(command: 'file' | 'read', file: string, id: string): z.infer<typeof OlderAnswer>;
+  run(command: 'file' | 'read' | 'reblock' | 'fold-and-run', file: string, id: string): z.infer<typeof OlderAnswer>;
 };
 
 /** An older release's queue code, taken from history into a directory of its own. */
@@ -192,5 +274,94 @@ describe('going back to the release before the forge\'s tables', () => {
     });
     assert.equal((await reopened.listing(FIRST))?.etag, '"p1"');
     assert.equal((await reopened.pull(FIRST, 2))?.reported, 'merged');
+  });
+});
+
+describe('going back to the release before the queue kept which values a board lacked', () => {
+  it('reads a record that release left behind as no record, once it has retried and blocked the action again',
+    async (t) => {
+      const older = olderRelease(t, THIRD_LAYOUT_RELEASE);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-roundtrip-'));
+      t.after(() => {
+        fs.rmSync(dir, { recursive: true, force: true });
+      });
+      const file = path.join(dir, 'queue.db');
+
+      const current = new SqliteActionRepository(file);
+      const action = Action.enqueue({
+        id: 'waits-for-an-option',
+        kind: 'board.set-fields',
+        payload: { repo: FIRST, issue: 12, fields: { severity: 'S4', type: 'Chore' } },
+        issueRef: IssueRef.of(FIRST, 12),
+        origin: 'a session',
+        now: BASE,
+      });
+      await current.insert(action);
+      action.start(BASE);
+      action.block(BASE, new OptionNotFound('Severity', 'S4', ['S1']), ['severity'], { type: { name: '', optionId: null } });
+      await current.update(action);
+      assert.deepEqual((await current.get('waits-for-an-option'))?.missingOptions, ['severity']);
+      current.close();
+
+      const back = older.run('reblock', file, 'waits-for-an-option');
+      assert.deepEqual(back.one, { id: 'waits-for-an-option', state: 'blocked' });
+
+      const reopened = new SqliteActionRepository(file);
+      t.after(() => {
+        reopened.close();
+      });
+      const reblocked = await reopened.get('waits-for-an-option');
+      assert.equal(reblocked?.state, 'blocked');
+      assert.equal(reblocked.blockedReason, 'option-not-found');
+      assert.match(reblocked.lastError ?? '', /Chore/);
+      assert.deepEqual(reblocked.missingOptions, [], 'the record describes a block that is over');
+      assert.equal(reblocked.rowAtBlock, null);
+    });
+});
+
+describe('going back to the release before the board guarded what it released', () => {
+  it('folds a request into a guarded action and runs it, unguarded, as that release always did', async (t) => {
+    const older = olderRelease(t, THIRD_LAYOUT_RELEASE);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-roundtrip-'));
+    t.after(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    const file = path.join(dir, 'queue.db');
+
+    const current = new SqliteActionRepository(file);
+    const action = Action.enqueue({
+      id: 'released-by-the-board',
+      kind: 'board.set-fields',
+      payload: { repo: FIRST, issue: 12, fields: { status: 'In Review', severity: 'S4' } },
+      issueRef: IssueRef.of(FIRST, 12),
+      origin: 'a session',
+      now: BASE,
+    });
+    await current.insert(action);
+    action.start(BASE);
+    action.block(BASE, new OptionNotFound('Severity', 'S4', ['S2']), ['severity'], {
+      status: { name: 'Todo', optionId: 'option-Status-Todo' },
+    });
+    action.resumeWith(BASE, action.payload, 'the board now offers what this waited for', {
+      status: { name: 'Todo', optionId: 'option-Status-Todo' },
+    });
+    await current.update(action);
+    current.close();
+
+    const back = older.run('fold-and-run', file, 'released-by-the-board');
+
+    assert.deepEqual(back.folded, {
+      coalescedInto: 'released-by-the-board',
+      done: 1,
+      values: { Status: 'In Review', Severity: 'S4', Module: 'Checkout' },
+    });
+    assert.deepEqual(back.one, { id: 'released-by-the-board', state: 'done' });
+    const reopened = new SqliteActionRepository(file);
+    t.after(() => {
+      reopened.close();
+    });
+    const ran = await reopened.get('released-by-the-board');
+    assert.equal(ran?.state, 'done');
+    assert.equal(ran.writeGuard, null);
   });
 });

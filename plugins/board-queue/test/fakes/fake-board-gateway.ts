@@ -121,6 +121,30 @@ export class FakeBoardGateway implements BoardGateway {
     };
   }
 
+  /** What somebody renaming an option in the board's own interface would do; rows holding it follow. */
+  renameOption(fieldName: string, from: string, to: string): void {
+    this.#catalog = {
+      projectId: this.#catalog.projectId,
+      fields: this.#catalog.fields.map((field) => (field.name === fieldName
+        ? { ...field, options: field.options.map((option) => (option.name === from ? { ...option, name: to } : option)) }
+        : field)),
+    };
+    for (const item of this.#items.values()) {
+      if (item.values[fieldName] === from) {
+        item.values[fieldName] = to;
+      }
+    }
+  }
+
+  /** What a person setting a value in the board's own interface does: nothing of this system sees it. */
+  setByHand(ref: IssueRef, fieldName: string, optionName: string): void {
+    const item = this.#items.get(ref.key());
+    if (item === undefined) {
+      throw new Error(`the board holds no row for ${ref.toString()}`);
+    }
+    item.values[fieldName] = optionName;
+  }
+
   valuesOf(ref: IssueRef): Record<string, string> | null {
     const item = this.#items.get(ref.key());
     return item === undefined ? null : { ...item.values };

@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { Action } from '../../src/domain/action.ts';
+import { OptionNotFound } from '../../src/domain/errors.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { LAYOUT_REVISION } from '../../src/infrastructure/queue-database.ts';
 import { SqliteActionRepository } from '../../src/infrastructure/sqlite-action-repository.ts';
@@ -157,6 +158,51 @@ describe('a queue file of the second layout', () => {
 
     assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
     assert.equal(await ledger.listing('example-org/first-repo'), null);
+  });
+});
+
+/**
+ * A file a release of the third layout wrote, as far as these tests need it: the
+ * revision it recorded, and an action it blocked for a missing option before the
+ * queue kept a record of which values the board lacked.
+ */
+const THIRD_LAYOUT = `
+UPDATE queue_state SET value = '3' WHERE key = 'layout_revision';
+INSERT INTO actions (id, kind, payload, repo, issue, state, attempts, origin, created_at, updated_at, version,
+                     last_error, blocked_reason)
+VALUES ('blocked-1', 'board.set-fields',
+        '{"repo":"example-org/first-repo","issue":13,"fields":{"status":"In Progress","severity":"S4"}}',
+        'example-org/first-repo', 13, 'blocked', 1, 'a session', 1767254400000, 1767254400000, 3,
+        'Severity has no option matching "S4"', 'option-not-found');
+`;
+
+describe('a queue file of the third layout', () => {
+  it('is copied once, and its blocked actions come back with no record of the values the board lacked',
+    async (t) => {
+      const dir = directory(t);
+      const file = fileIn(dir, FIRST_LAYOUT, SECOND_LAYOUT, THIRD_LAYOUT);
+
+      const repository = opened(t, file);
+
+      assert.deepEqual(backupsIn(dir), [BACKUP]);
+      assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
+      const blocked = await repository.get('blocked-1');
+      assert.equal(blocked?.state, 'blocked');
+      assert.equal(blocked?.blockedReason, 'option-not-found');
+      assert.deepEqual(blocked?.missingOptions, []);
+    });
+
+  it('takes the record of the values the board lacked afterwards', async (t) => {
+    const dir = directory(t);
+    const file = fileIn(dir, FIRST_LAYOUT, SECOND_LAYOUT, THIRD_LAYOUT);
+    const repository = opened(t, file);
+    const action = keyed('new-1', null, 14);
+    await repository.insert(action);
+    action.start(BASE);
+    action.block(BASE, new OptionNotFound('Severity', 'S4', ['S2']), ['severity']);
+    await repository.update(action);
+
+    assert.deepEqual((await repository.get('new-1'))?.missingOptions, ['severity']);
   });
 });
 

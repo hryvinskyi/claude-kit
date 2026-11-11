@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import type { BoardGateway, Clock, IssueGateway, Sleeper } from '../../application/ports.ts';
+import type { FieldReading } from '../catalog.ts';
 import type { IssueRef } from '../issue-ref.ts';
 
 /**
@@ -19,6 +20,12 @@ export type ExecutionContext = {
   actionId: string;
   /** When the action was filed; a listing that looks for what already landed starts here. */
   enqueuedAt: Date;
+  /**
+   * Per payload field key, what the row must still read for that value to be
+   * written; empty when nothing is guarded. A kind that writes fields leaves a
+   * guarded field that reads otherwise as it is.
+   */
+  writeGuard: Readonly<Record<string, FieldReading>>;
 };
 
 export type ActionResult = {
@@ -58,6 +65,23 @@ export interface ActionKind {
    * merged payload says.
    */
   coalesce(existing: unknown, incoming: unknown): unknown;
+
+  /**
+   * Whether a release by the board narrows this kind's payload and guards what it
+   * keeps by the row as it read when the action blocked. Such a kind needs that
+   * reading, and only such a kind is worth the reads that take it.
+   */
+  readonly narrowsOnRelease: boolean;
+
+  /**
+   * What runs again once the board offers the options this payload was blocked
+   * for: the payload narrowed to the field keys named — chosen by the release,
+   * which also decides the guard each is written under — or null when none of it
+   * is left. A kind that does not narrow ignores the keys and replays its payload
+   * as it is. A replay the current rules refuse is a refusal, thrown, never a
+   * payload that fails later.
+   */
+  replayFor(payload: unknown, keys: readonly string[]): unknown;
 
   execute(payload: unknown, ctx: ExecutionContext): Promise<ActionResult>;
 }

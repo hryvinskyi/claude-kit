@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 export const READER_GENERATION = 1;
 
 /** The layout this version writes; it only ever grows, and older readers never look at it. */
-export const LAYOUT_REVISION = 3;
+export const LAYOUT_REVISION = 4;
 
 const READER_GENERATION_KEY = 'schema_version';
 const LAYOUT_REVISION_KEY = 'layout_revision';
@@ -140,6 +140,24 @@ const STEPS: readonly Step[] = [
         db.exec('ALTER TABLE actions ADD COLUMN ended_as TEXT');
       }
       db.exec("UPDATE actions SET state = 'cancelled', ended_as = 'skipped' WHERE state = 'skipped'");
+    },
+  },
+  {
+    to: 4,
+    apply: (db) => {
+      // Which wanted values the board had no option for when an action was
+      // blocked for one, and how its row read then. Nullable: an action blocked
+      // before it existed carries no record, and is left for a person rather than
+      // released by the board.
+      if (!hasColumn(db, 'actions', 'option_wait')) {
+        db.exec('ALTER TABLE actions ADD COLUMN option_wait TEXT');
+      }
+      // What a release by the board requires the row to still read for each value
+      // it guards. Kept beside the payload, never in it, so a release that predates
+      // it reads the payload it always read and writes unguarded.
+      if (!hasColumn(db, 'actions', 'write_guard')) {
+        db.exec('ALTER TABLE actions ADD COLUMN write_guard TEXT');
+      }
     },
   },
 ];

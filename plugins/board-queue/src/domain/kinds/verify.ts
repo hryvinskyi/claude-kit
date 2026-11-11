@@ -12,6 +12,7 @@ import {
   fieldRequestFrom,
   resolveWanted,
 } from './fields.ts';
+import { validatedReplay } from './replay.ts';
 
 const shape = z
   .object({
@@ -74,6 +75,13 @@ export class VerifyKind implements ActionKind {
   /** Two verifications are two questions; merging them would lose one of the answers. */
   coalesce(_existing: unknown, _incoming: unknown): unknown {
     return null;
+  }
+
+  readonly narrowsOnRelease = false;
+
+  /** A verification writes nothing, so asking the whole question again overwrites nothing. */
+  replayFor(payload: unknown): unknown {
+    return validatedReplay(this.payloadSchema, payload);
   }
 
   /**

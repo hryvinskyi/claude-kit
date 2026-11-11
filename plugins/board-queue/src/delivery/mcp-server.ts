@@ -55,8 +55,9 @@ export function createMcpServer(container: Container): McpServer {
     'board_queue',
     {
       description: [
-        'List what is in the queue, oldest first, with each action\'s state, its payload as it was filed, how',
-        'often it has been attempted and the error that stopped it. Filters narrow it; with none, the whole',
+        'List what is in the queue, oldest first, with each action\'s state, its payload (as it was filed, or as',
+        'the board narrowed it when it released a blocked action), how often it has been attempted, the error',
+        'that stopped it and the result it recorded. Filters narrow it; with none, the whole',
         'queue comes back. Actions on one issue run in the order they were filed, and a failed or blocked action',
         'holds every action filed after it on its issue: such an action carries waitingBehind, the id and state',
         'of the oldest stopped action in front of it and inFront, the ids of every stopped one there, oldest',
@@ -127,9 +128,14 @@ export function createMcpServer(container: Container): McpServer {
     {
       description: [
         'Put a blocked or failed action back on the queue with its attempts reset. Use it once you have fixed',
-        'what the action reported — added the option to the board, found the issue that was missing. Nothing',
-        'retries itself: an action is blocked because something outside this queue has to change first. Until',
-        'it is retried or cancelled, nothing filed after it on the same issue runs.',
+        'what the action reported — added the option to the board, found the issue that was missing. A retry',
+        'writes every value the action carries, so check the row has not moved on since. One blocked for an',
+        'option the board lacked goes back by itself once the board offers it: it writes the values the board',
+        'lacked, and each other value only if its field still reads, right before the write, as it did when the',
+        'action blocked — a field changed on the board since is not written, and its result says so. That narrows',
+        'the action for good, and a later retry writes the narrowed values without that check. One blocked before',
+        'this queue recorded what the board lacked waits for a person. Until it is retried or cancelled, nothing',
+        'filed after it on the same issue runs.',
       ].join(' '),
       inputSchema: { id: z.string().min(1).describe('the action id') },
     },

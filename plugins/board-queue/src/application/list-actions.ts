@@ -4,7 +4,8 @@ import type { ActionFilter, ActionRepository } from './ports.ts';
 
 /**
  * An action as everything outside this system reads it: plain values, moments
- * already written out, the payload as it was filed. The aggregate itself never
+ * already written out, the payload it carries — as it was filed, or as the board
+ * narrowed it when it released the action from a block. The aggregate itself never
  * leaves the application — a printer that can call `cancel()` on what it is
  * printing is a mistake waiting for a careless line.
  */

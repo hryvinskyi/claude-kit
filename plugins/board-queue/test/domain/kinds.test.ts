@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { UnknownKind } from '../../src/domain/errors.ts';
+import { RefusedByRule, UnknownKind } from '../../src/domain/errors.ts';
 import { defaultKindRegistry, defaultKinds } from '../../src/domain/kinds/default-kinds.ts';
 import { KindRegistry } from '../../src/domain/kinds/registry.ts';
 import { SetFieldsKind } from '../../src/domain/kinds/set-fields.ts';
 import { VerifyKind } from '../../src/domain/kinds/verify.ts';
 import { CommentKind } from '../../src/domain/kinds/comment.ts';
 import { CloseKind } from '../../src/domain/kinds/close.ts';
+import { AssigneesKind } from '../../src/domain/kinds/assignees.ts';
 import { testConfig } from '../fixtures/config.ts';
 
 const setFields = new SetFieldsKind(testConfig);
@@ -76,6 +77,51 @@ describe('board.set-fields', () => {
       fields: { status: 'In Progress', severity: 'S1', module: 'Checkout' },
     });
   });
+
+  it('replays only the values named, keeping the condition the payload carries', () => {
+    const replay = setFields.replayFor(
+      {
+        repo: 'example-org/first-repo',
+        issue: 12,
+        fields: { status: 'In Progress', severity: 'S4', type: 'Chore', module: 'Checkout' },
+        onlyIfStatusIn: ['Todo'],
+      },
+      ['severity', 'type', 'status'],
+    );
+    assert.deepEqual(replay, {
+      repo: 'example-org/first-repo',
+      issue: 12,
+      fields: { status: 'In Progress', severity: 'S4', type: 'Chore' },
+      onlyIfStatusIn: ['Todo'],
+    });
+  });
+
+  it('judges a replay by the values it runs, under the configuration as it reads now', () => {
+    const payload = { repo: 'example-org/first-repo', issue: 12, fields: { status: 'In Progress', severity: 'S4' } };
+    const refusingTheStatus = new SetFieldsKind({ ...testConfig, refusedStatus: ['Done', 'In Progress'] });
+    assert.deepEqual(refusingTheStatus.replayFor(payload, ['severity']), {
+      repo: 'example-org/first-repo',
+      issue: 12,
+      fields: { severity: 'S4' },
+    });
+
+    const severityUnmanaged = new SetFieldsKind({
+      ...testConfig,
+      fields: testConfig.fields.filter((field) => field !== 'Severity'),
+    });
+    assert.throws(() => severityUnmanaged.replayFor(payload, ['severity']), (error: unknown) => {
+      assert.ok(error instanceof RefusedByRule);
+      assert.match(error.describe(), /Severity/);
+      return true;
+    });
+    assert.throws(() => refusingTheStatus.replayFor(payload, ['severity', 'status']), RefusedByRule);
+  });
+
+  it('has nothing to replay when none of the keys named is in the payload', () => {
+    const payload = { repo: 'example-org/first-repo', issue: 12, fields: { status: 'In Progress' } };
+    assert.equal(setFields.replayFor(payload, ['severity']), null);
+    assert.equal(setFields.replayFor(payload, []), null);
+  });
 });
 
 describe('board.verify', () => {
@@ -104,6 +150,20 @@ describe('board.verify', () => {
     assert.equal(parsed.expect, undefined);
     // Every other shape is a question with no question in it.
     refuses(verify, { repo: 'example-org/first-repo', issue: 1, onBoard: true });
+  });
+
+  it('asks the whole question again once the board learnt what it lacked, since it writes nothing', () => {
+    const payload = { repo: 'example-org/first-repo', issue: 1, expect: { status: 'In Review', severity: 'S4' } };
+    assert.deepEqual(verify.replayFor(payload), payload);
+  });
+
+  it('refuses to ask again a question the configuration no longer lets it ask', () => {
+    const payload = { repo: 'example-org/first-repo', issue: 1, expect: { status: 'In Review', severity: 'S4' } };
+    const severityUnmanaged = new VerifyKind({
+      ...testConfig,
+      fields: testConfig.fields.filter((field) => field !== 'Severity'),
+    });
+    assert.throws(() => severityUnmanaged.replayFor(payload), RefusedByRule);
   });
 
   it('never merges: two questions have two answers', () => {
@@ -149,6 +209,22 @@ describe('issue.comment and issue.close', () => {
     refuses(close, { repo: 'example-org/first-repo', issue: 3, reason: 'wontfix' });
     refuses(close, { repo: 'example-org/first-repo', issue: 3 });
     assert.equal(close.coalesce({ a: 1 }, { b: 2 }), null);
+    assert.deepEqual(close.replayFor({ repo: 'example-org/first-repo', issue: 3, reason: 'completed' }), {
+      repo: 'example-org/first-repo',
+      issue: 3,
+      reason: 'completed',
+    });
+    assert.deepEqual(comment.replayFor({ repo: 'example-org/first-repo', issue: 3, body: 'x' }), {
+      repo: 'example-org/first-repo',
+      issue: 3,
+      body: 'x',
+    });
+    assert.throws(() => close.replayFor({ repo: 'example-org/first-repo', issue: 3, reason: 'wontfix' }), RefusedByRule);
+    assert.throws(() => comment.replayFor({ repo: 'example-org/first-repo', issue: 3, body: '' }), RefusedByRule);
+    const assignees = new AssigneesKind();
+    const assign = { repo: 'example-org/first-repo', issue: 3, add: ['alice-gh'] };
+    assert.deepEqual(assignees.replayFor(assign), assign);
+    assert.throws(() => assignees.replayFor({ repo: 'example-org/first-repo', issue: 3 }), RefusedByRule);
     assert.equal(close.issueRefOf({ repo: 'example-org/first-repo', issue: 3, reason: 'completed' })?.number, 3);
   });
 });

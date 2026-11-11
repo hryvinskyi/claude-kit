@@ -5,10 +5,21 @@ Rules, in base/current/incoming terms (see `driver`):
 - Each block's key is read in the base's terms first. Blocks sharing one identity (several rows
   naming one ticket) are matched to the base's by the same text, then the same first line, then in
   order, so a row added or removed among them does not shift the others onto each other.
-- A side that deleted key K and added key K' of the same kind, in the same section, directly after
-  the same keyed block, edited K: K' is read as K. Without this, editing the title of a row that
-  has no issue reference would read as a deletion and an addition, and any change on the other side
-  would leave a silent duplicate.
+- A side that deleted key K and added key K' of the same kind, in the same section, may have
+  edited K: K' is then read as K. Without this, editing the title of a row that has no issue
+  reference, or giving it its ticket, would read as a deletion and an addition, and any change on
+  the other side would leave a silent duplicate. A ticket or a session is an identity the text
+  cannot change: when K and K' both name one (an item's issue reference, an inbox entry's session,
+  a reference in a heading's text) and not the same one, K' is a new row and K a deleted one, and a
+  move or an edit of K on the other side stays with K; when they name the same one, K' is K.
+  K' is in K's place when it directly follows the last keyed block the side kept from the base,
+  with only deleted base blocks between that one and K. There, when only one of them names a
+  reference — a row rewritten in place to gain its ticket, or to drop it — and when neither does
+  for an item, K' can be K when the words of their first lines, the references left out, mostly
+  agree; a heading that names none is K by its place alone. Anywhere else in the section, K' can
+  be K only when it says the same: the same reference, or, with one or neither naming one, the
+  same words. Of several K that K' can be, it is the one it resembles most, the one in its place
+  first on a tie.
 - Text has no key of its own: it is read as the text after the keyed block it follows. A run that
   lost its place (the block before it was deleted or added) is matched to a base run of the same
   section with the same text, or to the only unmatched one there.
@@ -35,7 +46,9 @@ Rules, in base/current/incoming terms (see `driver`):
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, TypeVar
 
 from vault_merge import blocks as md
@@ -47,6 +60,10 @@ START = "^"
 AFTER = "~after:"
 CURRENT = "current"
 INCOMING = "incoming"
+REF_IDENT = "ref:"
+SESSION_IDENT = "session:"
+RETITLE_SIMILARITY = 0.5
+WORD = re.compile(r"\w+")
 
 T = TypeVar("T")
 TextMerge = Callable[[str, str, str, str], Tuple[List[str], int]]
@@ -119,16 +136,17 @@ def side_version(base: Version, document: md.Document) -> Version:
     matched = match_identities(base, blocks)
     renames = RenameIndex(base, set(matched.values()))
 
-    last = START
+    known = START
     for at, block in enumerate(blocks):
         sections[at] = canon.get(block.section, block.section) if block.section is not None else None
         if not block.keyed:
             continue
-        key = matched.get(at) or renames.take(block, sections[at], last) or fresh(block.key, base, used)
+        key = matched.get(at) or renames.take(block, sections[at], known) or fresh(block.key, base, used)
         canon[block.key] = key
         used.add(key)
         keys[at] = key
-        last = key
+        if key in base.index:
+            known = key
 
     displaced: List[int] = []
     last = START
@@ -188,28 +206,94 @@ def first_line(block: md.Block) -> str:
 
 
 class RenameIndex:
-    """The base's keyed blocks no block of a side was matched to, by the keyed block before them."""
+    """The base's keyed blocks no block of a side was matched to, each by the keyed block before it."""
 
     def __init__(self, base: Version, own: Set[str]) -> None:
         self.base = base
-        self.by_previous: Dict[str, List[int]] = {}
+        self.following: Dict[str, int] = {}
+        self.taken: Set[int] = set()
         last = START
         for at, block in enumerate(base.blocks):
             if not block.keyed:
                 continue
             if block.key not in own:
-                self.by_previous.setdefault(last, []).append(at)
+                self.following[last] = at
             last = block.key
 
     def take(self, block: md.Block, section: Optional[str], previous: str) -> Optional[str]:
-        """The base key `block` replaces, removed from the index, or None."""
-        for at in self.by_previous.get(previous, []):
+        """The base key `block` replaces, taken from the index, or None: of the unmatched base blocks
+        of its kind and section, the one `block` resembles most — those of the run directly after
+        `previous` first on a tie, the nearest first among them. Only a block of that run can be
+        `block` by its place alone (a heading, neither naming a reference)."""
+        run: List[int] = []
+        key = previous
+        while key in self.following:
+            run.append(self.following[key])
+            key = self.base.blocks[run[-1]].key
+        elsewhere = [at for at in sorted(self.following.values()) if at not in run]
+        best: Optional[int] = None
+        best_score = 0.0
+        for at in run + elsewhere:
             candidate = self.base.blocks[at]
-            if candidate.kind == block.kind and candidate.level == block.level \
-                    and self.base.sections[at] == section:
-                self.by_previous[previous].remove(at)
-                return candidate.key
-        return None
+            if at in self.taken or candidate.kind != block.kind or candidate.level != block.level \
+                    or self.base.sections[at] != section:
+                continue
+            if at not in run and not says_the_same(candidate, block):
+                continue
+            score = resemblance(candidate, block)
+            if score is not None and (best is None or score > best_score):
+                best, best_score = at, score
+        if best is None:
+            return None
+        self.taken.add(best)
+        return self.base.blocks[best].key
+
+
+def reference(block: md.Block) -> Optional[str]:
+    """The ticket or session a block names as its identity, or None when only its text identifies
+    it: an item's or an inbox entry's key, the first issue reference in a heading's text."""
+    if block.ident.startswith((REF_IDENT, SESSION_IDENT)):
+        return block.ident
+    heading = md.HEADING.match(md.content(block.lines[0])) if block.level else None
+    found = md.REF.search(heading.group(2)) if heading else None
+    return REF_IDENT + found.group(1).lower() if found else None
+
+
+def resemblance(old: md.Block, new: md.Block) -> Optional[float]:
+    """How much `new`, put where `old` was deleted, reads as `old` with its text changed (1.0 at
+    most), or None when it cannot be `old`. Two that name different tickets or sessions never are;
+    two that name the same one always are. When only one names a ticket (a row that gained one, or
+    dropped it), the two are one when the words of their first lines, the references left out,
+    still mostly agree. When neither names one, a heading is its text alone, so its place is
+    enough, and an item needs those words to agree too."""
+    old_ref, new_ref = reference(old), reference(new)
+    if old_ref is not None and new_ref is not None:
+        return 1.0 if old_ref == new_ref else None
+    if by_place_alone(old, new):
+        return 1.0
+    ratio = SequenceMatcher(None, title_words(old), title_words(new)).ratio()
+    return ratio if ratio >= RETITLE_SIMILARITY else None
+
+
+def says_the_same(old: md.Block, new: md.Block) -> bool:
+    """Whether `new` is `old` by what it says, wherever it stands: both name the same ticket or
+    session, or the words of their first lines are the same once references and markup are left
+    out (a row that only gained its ticket, or dropped it)."""
+    old_ref, new_ref = reference(old), reference(new)
+    if old_ref is not None and new_ref is not None:
+        return old_ref == new_ref
+    return title_words(old) == title_words(new)
+
+
+def by_place_alone(old: md.Block, new: md.Block) -> bool:
+    """Whether only its place can make `new` the block `old`: headings that name no reference."""
+    return old.kind != md.ITEM_KIND and reference(old) is None and reference(new) is None
+
+
+def title_words(block: md.Block) -> List[str]:
+    """The words of a block's first line, normalised, its issue references and its markup (the
+    heading marks, bold, the separator after a reference) left out."""
+    return WORD.findall(md.REF.sub(" ", first_line(block)))
 
 
 def displaced_text(base: Version, block: md.Block, section: Optional[str], used: Set[str],

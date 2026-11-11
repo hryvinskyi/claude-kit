@@ -3,6 +3,7 @@ import { ReadbackMismatch } from '../errors.ts';
 import { IssueRef } from '../issue-ref.ts';
 import type { ActionKind, ActionResult, ExecutionContext } from './action-kind.ts';
 import { IssueNumberSchema, RepoSchema } from './fields.ts';
+import { validatedReplay } from './replay.ts';
 
 /** A GitHub login: letters, digits and single hyphens, at most 39 characters. */
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
@@ -77,6 +78,13 @@ export class AssigneesKind implements ActionKind {
       return null;
     }
     return { repo: after.repo, issue: after.issue, add, remove } satisfies AssigneesPayload;
+  }
+
+  readonly narrowsOnRelease = false;
+
+  /** It writes no board field, so nothing in it can overwrite a value set since. */
+  replayFor(payload: unknown): unknown {
+    return validatedReplay(this.payloadSchema, payload);
   }
 
   /**

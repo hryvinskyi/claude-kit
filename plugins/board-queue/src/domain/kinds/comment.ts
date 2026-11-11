@@ -3,6 +3,7 @@ import { IssueRef } from '../issue-ref.ts';
 import type { ActionKind, ActionResult, ExecutionContext } from './action-kind.ts';
 import { BodyTextSchema, IssueNumberSchema, RepoSchema } from './fields.ts';
 import { postCommentOnce } from './posts.ts';
+import { validatedReplay } from './replay.ts';
 
 const shape = z
   .object({
@@ -40,6 +41,13 @@ export class CommentKind implements ActionKind {
   /** Merging two comments would silently drop one of them. */
   coalesce(_existing: unknown, _incoming: unknown): unknown {
     return null;
+  }
+
+  readonly narrowsOnRelease = false;
+
+  /** It writes no board field, so nothing in it can overwrite a value set since. */
+  replayFor(payload: unknown): unknown {
+    return validatedReplay(this.payloadSchema, payload);
   }
 
   async execute(payload: unknown, ctx: ExecutionContext): Promise<ActionResult> {
