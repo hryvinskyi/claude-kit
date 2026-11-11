@@ -103,6 +103,172 @@ describe('filing an action', () => {
     });
   });
 
+  it('never folds a request past one filed after the action it would join, so the newest values run last', async () => {
+    const { repository, clock, enqueue } = harness();
+
+    const first = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S2' }),
+      origin: 'a session',
+    });
+    // A conditional request merges with nothing, so it is filed on its own, after the first.
+    const second = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: { repo: FIRST, issue: 12, fields: { severity: 'S4' }, onlyIfStatusIn: ['Todo'] },
+      origin: 'a session',
+    });
+    const third = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S1' }),
+      origin: 'a session',
+    });
+
+    assert.notEqual(second.id, first.id);
+    assert.equal(third.coalescedInto, undefined, 'folding into the first would run the third before the second');
+    assert.notEqual(third.id, first.id);
+    const run: unknown[] = [];
+    for (let claimed = await repository.claimNextRunnable(clock.now()); claimed !== null;
+      claimed = await repository.claimNextRunnable(clock.now())) {
+      run.push(claimed.payload);
+      claimed.succeed(clock.now(), 'written');
+      await repository.update(claimed);
+    }
+    const severities = run.map((payload) => JSON.stringify(payload).match(/"severity":"(S\d)"/)?.[1]);
+    assert.deepEqual(severities, ['S2', 'S4', 'S1'], 'the values asked for last are the ones the board keeps');
+  });
+
+  it('folds into the newest waiting action when nothing was filed after it', async () => {
+    const { repository, enqueue } = harness();
+
+    await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S2' }),
+      origin: 'a session',
+    });
+    const second = await enqueue.execute({
+      kind: 'issue.comment',
+      payload: { repo: FIRST, issue: 12, body: 'the evidence' },
+      origin: 'a session',
+    });
+    const third = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S1' }),
+      origin: 'a session',
+    });
+    const fourth = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ module: 'Checkout' }),
+      origin: 'a session',
+    });
+
+    assert.equal(third.coalescedInto, undefined, 'a comment filed in between keeps the third after it');
+    assert.equal(fourth.coalescedInto, third.id);
+    assert.notEqual(second.id, third.id);
+    assert.equal((await repository.list({})).length, 3);
+    assert.deepEqual((await repository.get(third.id))?.payload, {
+      repo: FIRST,
+      issue: 12,
+      fields: { severity: 'S1', module: 'Checkout' },
+    });
+  });
+
+  it('never folds past a held action, so one released before the drain still runs before the later request', async () => {
+    const { repository, clock, enqueue } = harness();
+    const waiting = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S2' }),
+      origin: 'a session',
+    });
+    const held = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S4' }),
+      origin: 'a session, for after the deploy',
+      hold: true,
+    });
+    const later = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S1' }),
+      origin: 'a session',
+    });
+    // The deploy lands before the next drain: the held move takes its place in
+    // the line, between the two requests it was filed between.
+    const release = await repository.get(held.id);
+    assert.ok(release !== null);
+    release.release(clock.now());
+    await repository.update(release);
+
+    const run: string[] = [];
+    for (let claimed = await repository.claimNextRunnable(clock.now()); claimed !== null;
+      claimed = await repository.claimNextRunnable(clock.now())) {
+      run.push(JSON.stringify(claimed.payload).match(/"severity":"(S\d)"/)?.[1] ?? '?');
+      claimed.succeed(clock.now(), 'written');
+      await repository.update(claimed);
+    }
+
+    assert.equal(later.coalescedInto, undefined, 'folded into the first, the request would run before the held move');
+    assert.notEqual(later.id, waiting.id);
+    assert.deepEqual(run, ['S2', 'S4', 'S1'], 'the value asked for last is the one the board keeps');
+  });
+
+  it('writes a held action released after the drain over whatever ran meanwhile, which is what holding it means', async () => {
+    const { repository, clock, enqueue } = harness();
+    await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ severity: 'S2' }), origin: 'a session' });
+    const held = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S4' }),
+      origin: 'a session, for after the deploy',
+      hold: true,
+    });
+    await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ severity: 'S1' }), origin: 'a session' });
+    const run: string[] = [];
+    const drain = async (): Promise<void> => {
+      for (let claimed = await repository.claimNextRunnable(clock.now()); claimed !== null;
+        claimed = await repository.claimNextRunnable(clock.now())) {
+        run.push(JSON.stringify(claimed.payload).match(/"severity":"(S\d)"/)?.[1] ?? '?');
+        claimed.succeed(clock.now(), 'written');
+        await repository.update(claimed);
+      }
+    };
+
+    await drain();
+    const release = await repository.get(held.id);
+    assert.ok(release !== null);
+    release.release(clock.now());
+    await repository.update(release);
+    await drain();
+
+    assert.deepEqual(run, ['S2', 'S1', 'S4']);
+  });
+
+  it('files its own action when another is filed after the one it would join, between the look and the fold', async () => {
+    const { repository, enqueue } = harness();
+    const first = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S2' }),
+      origin: 'a session',
+    });
+    let between = '';
+    repository.beforeNextCoalesce = async (): Promise<void> => {
+      between = (await enqueue.execute({
+        kind: 'issue.comment',
+        payload: { repo: FIRST, issue: 12, body: 'filed by another session meanwhile' },
+        origin: 'another session',
+      })).id;
+    };
+
+    const second = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields({ severity: 'S1' }),
+      origin: 'a session',
+    });
+
+    assert.equal(second.coalescedInto, undefined);
+    assert.notEqual(second.id, first.id);
+    assert.notEqual(second.id, between);
+    assert.deepEqual((await repository.get(first.id))?.payload, setFields({ severity: 'S2' }));
+    assert.equal((await repository.list({})).length, 3);
+  });
+
   it('gives a request that waits on a deploy an action of its own', async () => {
     const { repository, enqueue } = harness();
 
@@ -638,14 +804,19 @@ describe('assigning whoever starts the work', () => {
     ]);
   });
 
-  it('folds a second start of the same issue into the assignment already waiting', async () => {
+  it('files a second start of the same issue after the first one\'s assignment, in the order both were asked for', async () => {
     const { repository, enqueue } = startingHarness('alice');
 
     const first = await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ status: 'In Progress' }), origin: 'a' });
     const second = await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ status: 'In Progress' }), origin: 'b' });
 
-    assert.equal(second.assignment?.id, first.assignment?.id);
-    assert.equal((await repository.list({ kind: 'issue.assignees' })).length, 1);
+    // The first move has its assignment filed after it, so the second move cannot
+    // be folded into it without running ahead of that assignment.
+    assert.equal(second.coalescedInto, undefined);
+    assert.deepEqual(
+      (await repository.list({})).map((action) => action.id),
+      [first.id, first.assignment?.id, second.id, second.assignment?.id],
+    );
   });
 
   it('files nothing more for a request already filed under its key', async () => {

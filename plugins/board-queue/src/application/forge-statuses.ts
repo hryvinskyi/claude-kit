@@ -10,6 +10,14 @@ import type { ForgeRepositoryRun } from './sync-meta.ts';
 
 const HOUR_MS = 60 * 60 * 1000;
 
+/**
+ * The server's answer for one base — null when it knows no such repository or
+ * branch — or that no answer could be had.
+ */
+type Wanted =
+  | { readonly known: true; readonly wanted: WantedStatus | null }
+  | { readonly known: false };
+
 export type WriteStatusesDeps = {
   forge: CommitStatuses;
   coordination: ForgeCoordination;
@@ -36,6 +44,13 @@ export type WriteStatusesDeps = {
  * member, a head whose last status here was not a success gets one success saying
  * it is no longer checked, and the status is forgotten. Nothing written is left
  * holding a pull request back.
+ *
+ * Only an answer takes a status back. When what the server wants for a base could
+ * not be learnt — a refusal, an answer of the wrong shape — every status on its
+ * members' pull requests stays as it is, a failure included, the lookup counts as
+ * a failure of the pass, and the next pass asks again. Taking a failure back on a
+ * question that went unanswered would open the merge while the server holds it
+ * shut.
  *
  * Each write counts against GitHub's limit on content created, which the queue's
  * own writes spend too: a pass writes at most a set number, every pass together at
@@ -65,17 +80,21 @@ export class WriteStatuses implements ForgeJob {
 
   async run(repo: string, pass: ForgePassState, tally: ForgeRepositoryRun): Promise<void> {
     const id = pass.snapshot.repositories.idOf(repo);
-    const wanted = new Map<string, WantedStatus | null>();
+    const answers = new Map<string, Wanted>();
     for (const pull of await this.#pulls.openPulls(repo)) {
       const byMember = pull.author !== null && pass.snapshot.memberLogins.has(pull.author.toLowerCase());
       let status: CommitStatus | null = null;
       if (byMember && id !== null) {
-        let answer = wanted.get(pull.baseRef);
+        let answer = answers.get(pull.baseRef);
         if (answer === undefined) {
-          answer = await this.#wanted(id, repo, pull.baseRef, pass);
-          wanted.set(pull.baseRef, answer);
+          answer = await this.#wanted(id, repo, pull.baseRef, pass, tally);
+          answers.set(pull.baseRef, answer);
         }
-        status = answer !== null && answer.enabled ? answer.status : null;
+        if (!answer.known) {
+          // Not knowing what the server wants is no reason to change what stands.
+          continue;
+        }
+        status = answer.wanted !== null && answer.wanted.enabled ? answer.wanted.status : null;
       }
       await this.#withdraw(pull, status, pass, tally);
       if (status !== null) {
@@ -84,16 +103,23 @@ export class WriteStatuses implements ForgeJob {
     }
   }
 
-  async #wanted(id: string, repo: string, base: string, pass: ForgePassState): Promise<WantedStatus | null> {
+  /** What the server wants for one base, or that it could not be learnt, which is counted and logged once. */
+  async #wanted(id: string, repo: string, base: string, pass: ForgePassState, tally: ForgeRepositoryRun): Promise<Wanted> {
     try {
-      return await pass.calls.coordination(`the status for ${repo} into ${base}`, () =>
+      const wanted = await pass.calls.coordination(`the status for ${repo} into ${base}`, () =>
         this.#coordination.wantedStatus(id, base));
+      return { known: true, wanted };
     } catch (error) {
       if (error instanceof ForgeStop) {
         throw error;
       }
-      this.#logger.warn('the status the server wants could not be read', { repo, base, reason: sentenceOf(error) });
-      return null;
+      tally.failures += 1;
+      this.#logger.warn('the status the server wants could not be read; the statuses on its pull requests stay as they are', {
+        repo,
+        base,
+        reason: sentenceOf(error),
+      });
+      return { known: false };
     }
   }
 

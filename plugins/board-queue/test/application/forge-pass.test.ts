@@ -7,7 +7,9 @@ import type { TestContext } from 'node:test';
 import { BudgetPolicy } from '../../src/application/budget-policy.ts';
 import { ForgePass } from '../../src/application/forge-pass.ts';
 import type { KeptPull, ListingMark, WantedStatus } from '../../src/application/forge-ports.ts';
+import { TickLockLost } from '../../src/application/leased-gateways.ts';
 import { LimiterWait } from '../../src/application/limiter-wait.ts';
+import type { TickLease } from '../../src/application/ports.ts';
 import { readForgeRun } from '../../src/application/sync-meta.ts';
 import type { ForgeRepositoryRun, ForgeRun } from '../../src/application/sync-meta.ts';
 import { WorkerConfigSchema } from '../../src/domain/config.ts';
@@ -20,6 +22,7 @@ import { FakeForge, pullRequest } from '../fakes/fake-forge.ts';
 import { FakeForgeCoordination } from '../fakes/fake-forge-coordination.ts';
 import { FakeClock, FakeSleeper } from '../fakes/in-memory-time.ts';
 import { RecordingLogger } from '../fakes/wire-doubles.ts';
+import { HELD, leaseLostWhen } from '../fixtures/lease.ts';
 import { SERVER } from '../fixtures/sync.ts';
 
 const FIRST = 'example-org/first-repo';
@@ -71,6 +74,8 @@ type Harness = {
   pass(): Promise<ForgeRun>;
   /** Runs one pass and answers why it was skipped. */
   skipped(): Promise<string>;
+  /** Runs one pass under a lease the test controls, and answers what it threw, if anything. */
+  passUnder(lease: TickLease): Promise<unknown>;
   tallyOf(run: ForgeRun, repo: string): ForgeRepositoryRun;
 };
 
@@ -127,12 +132,12 @@ function harness(t: TestContext, options: Options = {}): Harness {
     logger,
   });
   let passes = 0;
-  const execute = async () => {
+  const execute = async (lease: TickLease = HELD) => {
     if (passes > 0) {
       clock.advanceMinutes(5);
     }
     passes += 1;
-    return pass.execute();
+    return pass.execute(lease);
   };
   return {
     forge,
@@ -155,6 +160,14 @@ function harness(t: TestContext, options: Options = {}): Harness {
         throw new Error('the pass ran');
       }
       return report.skipped;
+    },
+    passUnder: async (lease) => {
+      try {
+        await execute(lease);
+        return null;
+      } catch (error) {
+        return error;
+      }
     },
     tallyOf: (run, repo) => {
       const tally = run.repos.find((one) => one.repo === repo);
@@ -495,6 +508,25 @@ describe('whether a pull request merges cleanly', () => {
 });
 
 describe('the status on a member\'s pull request', () => {
+  it('is not written by a pass that lost the tick lock while it waited, nor anything else after', async (t) => {
+    const h = harness(t);
+    h.forge.put(pullRequest(FIRST, 5));
+    h.dibs.wants('web', 'main', FROZEN);
+    // Another pass takes the lock while this one waits out its pace before the write.
+    const sleptBefore = h.sleeper.slept.length;
+    const lease = leaseLostWhen(() => h.sleeper.slept.length > sleptBefore);
+
+    const thrown = await h.passUnder(lease);
+
+    assert.ok(thrown instanceof TickLockLost, `the pass stops for the lock, not ${String(thrown)}`);
+    assert.equal(h.forge.statuses.length, 0, 'no status was written once the lock was lost');
+    assert.equal(await readForgeRun(h.repository), null, 'the pass that lost the lock writes no report of its own');
+
+    await h.pass();
+
+    assert.deepEqual(h.forge.statuses.map((written) => written.status.state), ['failure'], 'the holder writes it');
+  });
+
   it('is written once for a state that does not change over ten passes, and again when it does', async (t) => {
     const h = harness(t);
     h.forge.put(pullRequest(FIRST, 5));
@@ -561,6 +593,55 @@ describe('the status on a member\'s pull request', () => {
       ['0005', 'freeze', 'success'],
       ['0006', 'dibs', 'success'],
     ]);
+  });
+
+  for (const [what, failure] of [
+    ['a refusal', new TransientFailure('the status for web into main was refused by the coordination server: 404 (not_found)')],
+    ['an answer of the wrong shape', new TransientFailure('the status for web into main answered an unexpected shape at state')],
+  ] as const) {
+    it(`leaves a failing status where it stands when what the server wants could not be read (${what}), and counts the failure`, async (t) => {
+      const h = harness(t, { repos: [FIRST, SECOND] });
+      h.forge.put(pullRequest(FIRST, 5));
+      h.forge.put(pullRequest(FIRST, 6));
+      h.forge.put(pullRequest(SECOND, 7));
+      h.dibs.wants('web', 'main', FROZEN);
+      h.dibs.wants('api', 'main', FROZEN);
+      await h.pass();
+      h.dibs.wants('api', 'main', { ...FROZEN, enabled: false });
+      h.dibs.fail('wantedStatus', failure);
+
+      const run = await h.pass();
+
+      assert.equal(h.tallyOf(run, FIRST).failures, 1, 'one lookup for the base, and it failed');
+      assert.equal(h.tallyOf(run, FIRST).statusesWithdrawn, 0);
+      assert.equal(h.tallyOf(run, SECOND).statusesWithdrawn, 1, 'a definite answer for another repository still counts');
+      assert.deepEqual(h.forge.statuses.slice(3).map((written) => [written.sha.slice(0, 4), written.status.state]), [
+        ['0007', 'success'],
+      ]);
+      for (const number of [5, 6]) {
+        assert.deepEqual(
+          (await h.ledger.statusesOn(FIRST, pullRequest(FIRST, number).headSha)).map((kept) => kept.state),
+          ['failure'],
+        );
+      }
+
+      await h.pass();
+      assert.equal(h.forge.statuses.length, 4, 'once the server answers the same freeze, nothing is written again');
+    });
+  }
+
+  it('takes back a failing status once the server says it knows no such repository or base', async (t) => {
+    const h = harness(t);
+    h.forge.put(pullRequest(FIRST, 5));
+    h.dibs.wants('web', 'main', FROZEN);
+    await h.pass();
+    h.dibs.wants('web', 'main', null);
+
+    const run = await h.pass();
+
+    assert.equal(h.tallyOf(run, FIRST).statusesWithdrawn, 1);
+    assert.equal(h.tallyOf(run, FIRST).failures, 0);
+    assert.deepEqual(h.forge.statuses.map((written) => written.status.state), ['failure', 'success']);
   });
 
   it('writes no more statuses in an hour than the hour allows, and the rest once it has passed', async (t) => {

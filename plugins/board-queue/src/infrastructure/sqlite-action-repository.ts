@@ -1,7 +1,14 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { SQLInputValue, SQLOutputValue, StatementSync } from 'node:sqlite';
 import { ACTION_STATES, emptyActionCounts } from '../application/action-states.ts';
-import type { ActionCounts, ActionFilter, ActionRepository, Clock, MetaWrite } from '../application/ports.ts';
+import type {
+  ActionCounts,
+  ActionFilter,
+  ActionRepository,
+  Clock,
+  MetaWrite,
+  TickLease,
+} from '../application/ports.ts';
 import { z } from 'zod';
 import { Action } from '../domain/action.ts';
 import type { ActionProps, ActionState } from '../domain/action.ts';
@@ -9,7 +16,7 @@ import type { BoardKey } from '../domain/board-directory.ts';
 import type { CachedCatalog, CatalogField, CatalogOption, FieldCatalog } from '../domain/catalog.ts';
 import { StaleAction } from '../domain/errors.ts';
 import { IssueRef } from '../domain/issue-ref.ts';
-import { ISSUE_HOLDING_STATES } from '../domain/issue-order.ts';
+import { ISSUE_HOLDING_STATES, STILL_TO_RUN_STATES } from '../domain/issue-order.ts';
 import { QueuePause } from '../domain/queue-pause.ts';
 import { randomUUID } from 'node:crypto';
 import { LocalProcessTable, UNKNOWN_START } from './process-table.ts';
@@ -27,6 +34,9 @@ const META_PREFIX = 'meta:';
  * lease has gone unrenewed this long is treated as gone, wherever it runs.
  */
 const LOCK_RENEW_EVERY_MS = 60 * 1000;
+
+/** Where a lock holder writes when its process started, as `ProcessTable.startOf` words it. */
+const START_MARK_KEY = 'startMark';
 const LOCK_STALE_AFTER_MS = 5 * 60 * 1000;
 
 const COLUMNS = 'id, kind, payload, repo, issue, state, attempts, not_before, origin, '
@@ -79,29 +89,53 @@ WHERE a.state = 'queued'
 ORDER BY a.created_at, a.rowid
 LIMIT 1`;
 
-/** The one waiting action a later request of the same sort may be folded into. */
-const COALESCIBLE_SQL = `SELECT ${COLUMNS} FROM actions
-WHERE kind = ? AND repo = ? AND issue = ? AND state = 'queued'
-  AND (not_before IS NULL OR not_before <= ?)
-ORDER BY created_at, rowid
+/**
+ * That no action which may still write to the issue — held ones included — was
+ * filed after the row the alias names. A request folded into that row runs at its
+ * place in the line, so one filed after it would otherwise land its older values
+ * over the request's.
+ */
+const nothingFiledAfter = (alias: string): string => `NOT EXISTS (
+    SELECT 1 FROM actions AS later
+    WHERE later.id <> ${alias}.id
+      AND later.repo IS ${alias}.repo
+      AND later.issue IS ${alias}.issue
+      AND ${storedIn('later', STILL_TO_RUN_STATES)}
+      AND (later.created_at > ${alias}.created_at
+        OR (later.created_at = ${alias}.created_at AND later.rowid > ${alias}.rowid))
+  )`;
+
+/**
+ * The one waiting action a later request of the same sort may be folded into: the
+ * last action on the issue that may still write to it, when that one is of this
+ * sort and is waiting to run.
+ */
+const coalescibleSql = (): string => `SELECT ${COLUMNS} FROM actions AS a
+WHERE a.kind = ? AND a.repo = ? AND a.issue = ? AND a.state = 'queued'
+  AND (a.not_before IS NULL OR a.not_before <= ?)
+  AND ${nothingFiledAfter('a')}
+ORDER BY a.created_at DESC, a.rowid DESC
 LIMIT 1`;
 
 /**
  * Folding a later request into a waiting one, as a single conditional statement.
  *
- * Three things must still hold for the merge to be the merge that was worked out.
+ * Four things must still hold for the merge to be the merge that was worked out.
  * The row must still be waiting, because a worker may have claimed it since it was
  * read and a whole-row write would put the values on an action already on its way
  * out. It must still be at the version the merge was computed from, or another
  * enqueuer merged into it in between and this write would drop their fields
- * without a word. And it must not have stepped into a wait, because a failure can
+ * without a word. It must not have stepped into a wait, because a failure can
  * push a queued action into a backoff between the read and the write, and folding
- * a request into it would hide that request behind a delay nobody asked for.
+ * a request into it would hide that request behind a delay nobody asked for. And
+ * it must still be the last action on its issue that may still write to it,
+ * because another filer may have added one behind it since — held or not — which
+ * would then run after the request's values.
  * No row changed means one of those stopped being true, and the caller looks again.
  */
-const COALESCE_SQL = 'UPDATE actions SET payload = ?, updated_at = ?, version = version + 1 '
+const coalesceSql = (): string => 'UPDATE actions SET payload = ?, updated_at = ?, version = version + 1 '
   + "WHERE id = ? AND state = 'queued' AND version = ? "
-  + 'AND (not_before IS NULL OR not_before <= ?)';
+  + `AND (not_before IS NULL OR not_before <= ?) AND ${nothingFiledAfter('actions')}`;
 
 export type SqliteActionRepositoryOptions = {
   /** Where the tick lock's timestamps come from. */
@@ -158,8 +192,8 @@ export class SqliteActionRepository implements ActionRepository {
     this.#getStatement = this.#db.prepare(`SELECT ${COLUMNS} FROM actions WHERE id = ?`);
     this.#byDedupeKeyStatement = this.#db.prepare(`SELECT ${COLUMNS} FROM actions WHERE dedupe_key = ?`);
     this.#claimStatement = this.#db.prepare(claimSql());
-    this.#coalescibleStatement = this.#db.prepare(COALESCIBLE_SQL);
-    this.#coalesceStatement = this.#db.prepare(COALESCE_SQL);
+    this.#coalescibleStatement = this.#db.prepare(coalescibleSql());
+    this.#coalesceStatement = this.#db.prepare(coalesceSql());
     this.#countsStatement = this.#db.prepare(
       'SELECT state, ended_as, COUNT(*) AS total FROM actions GROUP BY state, ended_as',
     );
@@ -354,6 +388,11 @@ export class SqliteActionRepository implements ActionRepository {
     return Promise.resolve();
   }
 
+  async deleteMeta(key: string): Promise<void> {
+    this.#deleteStateStatement.run(META_PREFIX + key);
+    return Promise.resolve();
+  }
+
   async getCatalog(board: BoardKey): Promise<CachedCatalog | null> {
     const row = this.#readCatalogStatement.get(board);
     if (row === undefined) {
@@ -371,20 +410,30 @@ export class SqliteActionRepository implements ActionRepository {
     return Promise.resolve();
   }
 
-  async withTickLock<T>(fn: () => Promise<T>): Promise<T | null> {
+  async withTickLock<T>(fn: (lease: TickLease) => Promise<T>): Promise<T | null> {
     const taken = this.#takeTickLock();
     if (taken === null) {
       return null;
     }
-    const holding = { value: taken.value };
+    const holding = { value: taken.value, lost: false };
+    const stillHeld = (): boolean => {
+      if (holding.lost) {
+        return false;
+      }
+      const renewed = this.#renewTickLock(holding.value, taken.lease);
+      if (renewed === null) {
+        holding.lost = true;
+        return false;
+      }
+      holding.value = renewed;
+      return true;
+    };
     // The lease is renewed for as long as the work runs, so a holder that is
     // alive is never taken for one that has gone silent, however long it works.
-    const renewal = setInterval(() => {
-      holding.value = this.#renewTickLock(holding.value, taken.lease);
-    }, this.#lockRenewEveryMs);
+    const renewal = setInterval(stillHeld, this.#lockRenewEveryMs);
     renewal.unref();
     try {
-      return await fn();
+      return await fn({ stillHeld: () => Promise.resolve(stillHeld()) });
     } finally {
       clearInterval(renewal);
       // Only our own holding is released: a tick that took the lock from us
@@ -406,11 +455,14 @@ export class SqliteActionRepository implements ActionRepository {
     });
   }
 
-  /** The holding written again with a fresh time, while it is still ours; what is held afterwards. */
-  #renewTickLock(value: string, lease: string): string {
+  /**
+   * The holding written again with a fresh time, while it is still ours; what is
+   * held afterwards, or null once another pass has written its own over it.
+   */
+  #renewTickLock(value: string, lease: string): string | null {
     return this.#transact(() => {
       if (this.#readState(TICK_LOCK_KEY) !== value) {
-        return value;
+        return null;
       }
       const renewed = this.#lockRecord(lease);
       this.#writeState(TICK_LOCK_KEY, renewed);
@@ -421,12 +473,20 @@ export class SqliteActionRepository implements ActionRepository {
   /**
    * Who holds the lock: the process, when it started and where its id counts,
    * the lease it holds it under, and when it last said it was still there.
+   *
+   * The start is written under a key of its own, in the spelling every reader
+   * of this version reads alike whatever its language or time zone. The key
+   * releases before it read, `started`, held the start as the reading process's
+   * own locale spelled it; such a release compares that key with its own reading
+   * and takes the lock from a holder whose spelling differs from its own. With
+   * the key left out it does what it does for a holder that never said when it
+   * started: it waits for the holder's process to end or its lease to lapse.
    */
   #lockRecord(lease: string): string {
     this.#ownStart ??= this.#processes.startOf(process.pid);
     return JSON.stringify({
       pid: process.pid,
-      started: this.#ownStart,
+      [START_MARK_KEY]: this.#ownStart,
       where: this.#processes.here(),
       lease,
       at: this.#clock.now().toISOString(),
@@ -441,7 +501,9 @@ export class SqliteActionRepository implements ActionRepository {
    * again — is no holder. A holder counted somewhere else cannot be looked up
    * from here, so its lease alone decides. A tick that was killed mid-run must
    * not keep the queue frozen, and one that is alive must not lose the lock to a
-   * second.
+   * second. A holder written by a release before this one says when it started
+   * only in its own locale's words, which cannot be compared with a reading
+   * here, so it is taken as a holder whose start is unknown.
    */
   #lockIsHeld(raw: string): boolean {
     const parsed = parseJson(raw);
@@ -464,7 +526,7 @@ export class SqliteActionRepository implements ActionRepository {
     if (seen === null) {
       return false;
     }
-    const started = asString(parsed['started']);
+    const started = asString(parsed[START_MARK_KEY]);
     return started === null || started === UNKNOWN_START || seen === UNKNOWN_START || seen === started;
   }
 

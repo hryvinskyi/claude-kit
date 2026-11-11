@@ -10,6 +10,8 @@ import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { seedItem } from '../fakes/fake-board-gateway.ts';
 import type { SeededItem } from '../fakes/fake-board-gateway.ts';
 import type { SeededIssue } from '../fakes/fake-issue-gateway.ts';
+import { TickLockLost } from '../../src/application/leased-gateways.ts';
+import { HELD, leaseLostWhen } from '../fixtures/lease.ts';
 import { FIRST, RESET, SECOND, START, tickFixture } from './tick-fixture.ts';
 import type { TickFixture } from './tick-fixture.ts';
 
@@ -83,7 +85,7 @@ describe('AuditBoard', () => {
     const tick = board();
     const sink = new RecordingSink();
 
-    const report = await auditOf(tick, sink).execute();
+    const report = await auditOf(tick, sink).execute(HELD);
 
     assert.deepEqual(report, {
       generatedAt: START,
@@ -118,7 +120,7 @@ describe('AuditBoard', () => {
   it('walks the board once per listing, and not at all for a repository with nothing to check', async () => {
     const tick = board();
 
-    await auditOf(tick, new RecordingSink()).execute();
+    await auditOf(tick, new RecordingSink()).execute(HELD);
 
     assert.equal(tick.board.snapshotFetches, 2);
   });
@@ -126,7 +128,7 @@ describe('AuditBoard', () => {
   it('files nothing, whatever it finds', async () => {
     const tick = board();
 
-    await auditOf(tick, new RecordingSink()).execute();
+    await auditOf(tick, new RecordingSink()).execute(HELD);
 
     assert.deepEqual(await tick.repository.list({}), []);
   });
@@ -144,7 +146,7 @@ describe('AuditBoard', () => {
       ],
     });
 
-    const report = await auditOf(tick, new RecordingSink()).execute();
+    const report = await auditOf(tick, new RecordingSink()).execute(HELD);
 
     const found = report.repos[FIRST];
     assert.deepEqual(found?.notOnBoard.map((issue) => issue.number), [30]);
@@ -157,7 +159,7 @@ describe('AuditBoard', () => {
       items: [seedItem(IssueRef.of(FIRST, 40), 'item-40', { ...FULL, Status: 'Done · shipped' })],
     });
 
-    const report = await auditOf(tick, new RecordingSink()).execute();
+    const report = await auditOf(tick, new RecordingSink()).execute(HELD);
 
     assert.deepEqual(report.repos[FIRST]?.closedNotDone, []);
   });
@@ -166,7 +168,7 @@ describe('AuditBoard', () => {
     const tick = board();
     const blind: Config = ConfigSchema.parse({ ...tick.config, refusedStatus: [] });
 
-    const report = await auditOf(tick, new RecordingSink(), blind).execute();
+    const report = await auditOf(tick, new RecordingSink(), blind).execute(HELD);
 
     assert.deepEqual(report.repos[FIRST]?.closedNotDone, []);
     assert.equal(tick.issues.calls.filter((call) => call === 'listClosedSince').length, 0);
@@ -176,7 +178,7 @@ describe('AuditBoard', () => {
   it('writes down the summary a status listing shows', async () => {
     const tick = board();
 
-    await auditOf(tick, new RecordingSink()).execute();
+    await auditOf(tick, new RecordingSink()).execute(HELD);
 
     assert.deepEqual(await readLastAudit(tick.repository), {
       at: tick.clock.now(),
@@ -191,7 +193,7 @@ describe('AuditBoard', () => {
     tick.issues.fail('listClosedSince', new SecondaryRateLimited(null));
     const sink = new RecordingSink();
 
-    const report = await auditOf(tick, sink).execute();
+    const report = await auditOf(tick, sink).execute(HELD);
 
     assert.deepEqual(report.repos[FIRST]?.notOnBoard.map((issue) => issue.number), [10]);
     assert.equal(report.repos[SECOND], undefined);
@@ -205,7 +207,7 @@ describe('AuditBoard', () => {
     const tick = board();
     tick.issues.fail('listClosedSince', new SecondaryRateLimited(null));
 
-    await auditOf(tick, new RecordingSink()).execute();
+    await auditOf(tick, new RecordingSink()).execute(HELD);
 
     assert.equal(await readLastAudit(tick.repository), null);
   });
@@ -215,7 +217,7 @@ describe('AuditBoard', () => {
     tick.issues.fail('listOpen', new PrimaryRateLimited(RESET));
     const sink = new RecordingSink();
 
-    const report = await auditOf(tick, sink).execute();
+    const report = await auditOf(tick, sink).execute(HELD);
 
     assert.deepEqual(report.repos, {});
     assert.deepEqual(sink.saved, []);
@@ -228,8 +230,23 @@ describe('AuditBoard', () => {
     tick.issues.fail('listOpen', new IssueNotFound(`${FIRST}#10`));
     const sink = new RecordingSink();
 
-    await assert.rejects(() => auditOf(tick, sink).execute(), /does not exist/);
+    await assert.rejects(() => auditOf(tick, sink).execute(HELD), /does not exist/);
     assert.deepEqual(sink.saved, []);
     assert.equal(await tick.repository.getPause(), null);
+  });
+});
+
+describe('the report-only pass and the tick lock', () => {
+  it('reads nothing more and writes nothing once another pass took the lock', async () => {
+    const tick = board();
+    const sink = new RecordingSink();
+    // The lock is taken once the first repository's open issues were read.
+    const lease = leaseLostWhen(() => tick.issues.calls.includes('listOpen'));
+
+    await assert.rejects(() => auditOf(tick, sink).execute(lease), TickLockLost);
+
+    assert.deepEqual(tick.issues.calls, ['listOpen'], 'nothing is read after the lock was lost');
+    assert.deepEqual(sink.saved, []);
+    assert.equal(await readLastAudit(tick.repository), null);
   });
 });

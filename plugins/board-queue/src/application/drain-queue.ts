@@ -12,11 +12,12 @@ import type { RateBudget } from '../domain/rate-budget.ts';
 import type { BoardRouter } from './board-router.ts';
 import type { BudgetPolicy } from './budget-policy.ts';
 import { catalogWarnings, unansweredOptions, wantedOptions } from './catalog-warnings.ts';
+import { leasedLane, LOCK_LOST, TickLockLost } from './leased-gateways.ts';
 import { LimiterWait } from './limiter-wait.ts';
 import { planReplay, replayNote, rowReadingsOf } from './option-wait.ts';
 import type { ReplayPlan } from './option-wait.ts';
 import { writeLastBudget, writeLastTickAt, writeSecondaryHits } from './queue-meta.ts';
-import type { ActionRepository, Clock, Logger, Sleeper } from './ports.ts';
+import type { ActionRepository, Clock, Logger, Sleeper, TickLease } from './ports.ts';
 
 /** What one run of the worker did, in the words a log line and a status report use. */
 export type TickReport = {
@@ -24,6 +25,11 @@ export type TickReport = {
   skipped?: string;
   /** Why the loop stopped, when it stopped for something other than an empty queue. */
   stoppedBecause?: string;
+  /**
+   * Set when the tick found the lock taken by another pass and stopped: nothing
+   * more in this tick is this pass's to do, the queue's notes and the report included.
+   */
+  lockLost?: true;
   /** Actions claimed and run, whatever became of them. */
   executed: number;
   done: number;
@@ -190,6 +196,8 @@ type Step = {
   /** Null when another writer had changed the row and this tick's verdict was dropped. */
   state: ActionState | null;
   stopsTick: boolean;
+  /** Set when the tick lock was found taken by another pass: nothing more is this pass's to do. */
+  lockLost?: boolean;
   reason?: string;
   pausedUntil?: string;
 };
@@ -244,14 +252,14 @@ export class DrainQueue {
   }
 
   async run(): Promise<TickReport> {
-    const report = await this.#repository.withTickLock(() => this.#tick());
+    const report = await this.#repository.withTickLock((lease) => this.#tick(lease));
     if (report === null) {
-      return { ...emptyTally(), skipped: 'another tick holds the lock' };
+      return notRun('another tick holds the lock');
     }
     return report;
   }
 
-  async #tick(): Promise<TickReport> {
+  async #tick(lease: TickLease): Promise<TickReport> {
     const recovered = await this.#putBackWhatAnEarlierRunLeftInHand();
 
     const waiting = await this.#waitingOut();
@@ -280,6 +288,9 @@ export class DrainQueue {
         stoppedBecause = mayStart.reason;
         break;
       }
+      if (!(await lease.stillHeld())) {
+        return this.#stoppedForTheLock(tally);
+      }
       const action = await this.#repository.claimNextRunnable(this.#clock.now());
       if (action === null) {
         break;
@@ -291,9 +302,12 @@ export class DrainQueue {
         await this.#sleeper.sleep(this.#config.worker.paceMs);
       }
       tally.executed += 1;
-      const step = await this.#runOne(action);
+      const step = await this.#runOne(action, lease);
       budget = this.#boards.lastBudget() ?? budget;
       count(tally, step.state);
+      if (step.lockLost === true) {
+        return this.#stoppedForTheLock(tally);
+      }
       if (step.state === 'done') {
         // An action that got through is the proof the burst limiter let go, and
         // the proof is only good at this moment: a refusal later in this same tick
@@ -327,6 +341,17 @@ export class DrainQueue {
       report.budget = budget.describe();
     }
     this.#logger.info('tick', { ...report });
+    return report;
+  }
+
+  /**
+   * The report of a pass that found the lock taken by another one. It writes
+   * nothing more — not even the queue's own notes — because everything a tick
+   * does after its work is the holder's to do, and the holder is the other pass.
+   */
+  #stoppedForTheLock(tally: Tally): TickReport {
+    const report: TickReport = { ...tally, stoppedBecause: LOCK_LOST, lockLost: true };
+    this.#logger.warn('the tick lock was taken by another pass; this one stopped', { ...report });
     return report;
   }
 
@@ -408,18 +433,24 @@ export class DrainQueue {
     }
   }
 
-  async #runOne(action: Action): Promise<Step> {
+  async #runOne(action: Action, lease: TickLease): Promise<Step> {
     let outcome: ActionResult | null = null;
     let failure: unknown = null;
     try {
-      outcome = await this.#kinds.get(action.kind).execute(action.payload, this.#contextFor(action));
+      outcome = await this.#kinds.get(action.kind).execute(action.payload, this.#contextFor(action, lease));
     } catch (error) {
       failure = error;
     }
 
     const now = this.#clock.now();
     let step: Step = { state: null, stopsTick: false };
-    if (outcome !== null) {
+    if (failure instanceof TickLockLost) {
+      // The pass that holds the lock now runs this action; it goes back for that
+      // pass untouched, with the attempt the claim charged, as an action an
+      // earlier run died holding does.
+      action.requeue(now);
+      step = { state: action.state, stopsTick: true, lockLost: true, reason: failure.message };
+    } else if (outcome !== null) {
       action.succeed(now, summarise(outcome));
       this.#logger.info('action done', { action: action.id, kind: action.kind, summary: outcome.summary });
       step = { state: action.state, stopsTick: false };
@@ -641,15 +672,17 @@ export class DrainQueue {
   }
 
   /**
-   * What the action runs with: the gateways of the board that carries its issue.
+   * What the action runs with: the gateways of the board that carries its issue,
+   * each write made only while this pass still holds the tick lock — a pass that
+   * lost it would otherwise write what the pass holding it writes too.
    * An action that names no issue, or names a repository no board carries any
    * longer, has no board to run against, and is refused rather than sent to one.
    */
-  #contextFor(action: Action): ExecutionContext {
+  #contextFor(action: Action, lease: TickLease): ExecutionContext {
     if (action.issueRef === null) {
       throw new RefusedByRule(`${action.kind} names no issue, so no board carries it`);
     }
-    const lane = this.#boards.laneOf(action.issueRef);
+    const lane = leasedLane(this.#boards.laneOf(action.issueRef), lease);
     return {
       board: lane.board,
       issues: lane.issues,
@@ -662,6 +695,11 @@ export class DrainQueue {
       writeGuard: action.writeGuard ?? {},
     };
   }
+}
+
+/** The report of a tick that did not run, and why. */
+export function notRun(reason: string): TickReport {
+  return { ...emptyTally(), skipped: reason };
 }
 
 /** What a failure costs, by its category; a failure nobody named is a moment's fault. */

@@ -220,7 +220,9 @@ export interface ForgeCoordination {
 
   /**
    * The status for pull requests of `repo` (the server's id) into `base`, or null
-   * when the server knows no such repository or branch.
+   * when the server answers that it knows no such repository or branch. Anything
+   * short of that answer — a refusal, a 404 that is not the server's, an answer of
+   * the wrong shape — is thrown, never read as wanting nothing.
    */
   wantedStatus(repo: string, base: string): Promise<WantedStatus | null>;
 

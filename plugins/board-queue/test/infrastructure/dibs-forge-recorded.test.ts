@@ -16,6 +16,7 @@ import { FakeForge, pullRequest } from '../fakes/fake-forge.ts';
 import { FakeClock, FakeSleeper } from '../fakes/in-memory-time.ts';
 import { RecordingLogger } from '../fakes/wire-doubles.ts';
 import { SERVER } from '../fixtures/sync.ts';
+import { HELD } from '../fixtures/lease.ts';
 
 const FIRST = 'example-org/first-repo';
 const SHA = 'abc1234def';
@@ -167,7 +168,7 @@ describe('one forge pass against the real shapes of the coordination server\'s a
       logger,
     });
 
-    const report = await pass.execute();
+    const report = await pass.execute(HELD);
 
     assert.deepEqual(fetcher.calls.map((call) => `${call.method} ${call.url.slice(SERVER.length)}`), [
       'GET /v1/me',

@@ -3,7 +3,8 @@ import { claimMoves } from '../domain/sync/finished-claims.ts';
 import type { HeldClaim, Sighting, StageStatuses } from '../domain/sync/finished-claims.ts';
 import type { FinishConfig, SyncConfig } from '../domain/sync-config.ts';
 import { describeUnknown } from './drain-queue.ts';
-import type { ActionRepository, Clock, Logger } from './ports.ts';
+import { confirmStillHeld, TickLockLost } from './leased-gateways.ts';
+import type { ActionRepository, Clock, Logger, TickLease } from './ports.ts';
 import { finishSightingsKey, readSightings, writeFinishRun, writeSightings } from './sync-meta.ts';
 import type { FinishRun } from './sync-meta.ts';
 import type { OwnClaims } from './sync-ports.ts';
@@ -35,6 +36,10 @@ export type FinishClaimsDeps = {
  * A call that fails leaves the sighting the claim had, so the next run makes it
  * again; a claim its holder no longer held is counted and forgotten. A token that
  * speaks for an integration rather than a person lets nothing go, and says so.
+ *
+ * Each call goes out only while the run still holds the tick lock. A run that
+ * finds it taken throws `TickLockLost` and keeps nothing it saw: the run holding
+ * the lock now reads the claims again and settles them itself.
  */
 export class FinishClaims {
   readonly #claims: OwnClaims;
@@ -53,7 +58,7 @@ export class FinishClaims {
     this.#sightingsKey = finishSightingsKey(deps.sync.server, deps.sync.project);
   }
 
-  async execute(): Promise<FinishReport> {
+  async execute(lease: TickLease): Promise<FinishReport> {
     const report: FinishReport = {
       at: this.#clock.now().toISOString(),
       holder: null,
@@ -65,8 +70,11 @@ export class FinishClaims {
       error: null,
     };
     try {
-      await this.#run(report);
+      await this.#run(report, lease);
     } catch (error) {
+      if (error instanceof TickLockLost) {
+        throw error;
+      }
       report.error = error instanceof BoardQueueError ? error.describe() : describeUnknown(error);
       this.#logger.warn('claims were not let go', { reason: report.error });
     }
@@ -75,7 +83,7 @@ export class FinishClaims {
     return report;
   }
 
-  async #run(report: FinishReport): Promise<void> {
+  async #run(report: FinishReport, lease: TickLease): Promise<void> {
     const holder = await this.#claims.holder();
     if (holder === null) {
       report.declined = 'the coordination server\'s token speaks for an integration, not a person, '
@@ -87,11 +95,14 @@ export class FinishClaims {
     report.held = held.length;
     const moves = claimMoves(held, await readSightings(this.#repository, this.#sightingsKey), this.#statuses);
     const seen = new Map(moves.seen);
+    let lockLost = false;
     try {
       for (const claim of moves.complete) {
+        await confirmStillHeld(lease);
         await this.#settle(claim, () => this.#claims.complete(claim.item), report.completed, report, seen, null);
       }
       for (const claim of moves.handOn) {
+        await confirmStillHeld(lease);
         await this.#settle(
           claim,
           () => this.#claims.giveUpAreas(claim.item, claim.areas),
@@ -101,8 +112,13 @@ export class FinishClaims {
           { claimedAt: claim.claimedAt, stage: 'handed-on' },
         );
       }
+    } catch (error) {
+      lockLost = error instanceof TickLockLost;
+      throw error;
     } finally {
-      await writeSightings(this.#repository, this.#sightingsKey, seen);
+      if (!lockLost) {
+        await writeSightings(this.#repository, this.#sightingsKey, seen);
+      }
     }
   }
 

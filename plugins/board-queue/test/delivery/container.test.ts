@@ -12,6 +12,7 @@ import { FakeIssueGateway } from '../fakes/fake-issue-gateway.ts';
 import { FakeClock, FakeSleeper } from '../fakes/in-memory-time.ts';
 import { lanesByBoard } from '../fakes/lanes.ts';
 import { ORG_BOARD, THIRD, USER_BOARD, testConfig, testRepos, twoBoardConfig } from '../fixtures/config.ts';
+import { HELD } from '../fixtures/lease.ts';
 
 const FIRST = 'example-org/first-repo';
 
@@ -128,7 +129,7 @@ describe('what the composition root hands out', () => {
 
       assert.equal(existsSync(join(directory, 'audit.json')), false);
       assert.equal((await container.status.execute()).lastAudit, null);
-      await container.audit.execute();
+      await container.audit.execute(HELD);
       assert.ok(existsSync(join(directory, 'audit.json')), 'it still runs when asked for by hand');
     } finally {
       container.close();
@@ -204,7 +205,7 @@ describe('what the composition root hands out', () => {
       },
     });
     try {
-      const report = await container.audit.execute();
+      const report = await container.audit.execute(HELD);
 
       assert.deepEqual(Object.keys(report.repos), testRepos);
       assert.ok(existsSync(join(directory, 'audit.json')));

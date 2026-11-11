@@ -62,9 +62,14 @@ export interface ActionRepository {
   get(id: string): Promise<Action | null>;
 
   /**
-   * The oldest action of this kind on this issue that is still waiting to run
-   * (queued, and past any waiting time), or null. The repository is matched
-   * case-insensitively; a held or delayed action is never a candidate.
+   * The action a later request of this kind on this issue may be folded into, or
+   * null: the last action filed on the issue that may still write to it (queued,
+   * held, running, failed or blocked), when that one is of this kind and still
+   * waiting to run (queued, and past any waiting time). An action with another one
+   * filed after it that may still write is never a candidate, whatever that one's
+   * kind, because the request would then run before it: a request never folds
+   * past a held action either. The repository is matched case-insensitively; a
+   * held or delayed action is never a candidate.
    */
   findCoalescible(kind: string, issueRef: IssueRef, now: Date): Promise<Action | null>;
 
@@ -73,8 +78,9 @@ export interface ActionRepository {
    * the version the merge was computed from, so it can lose neither a race with a
    * worker claiming the row nor one with a second enqueuer merging into it. False
    * means the row stopped being the row the merge was about — claimed, changed by
-   * somebody else, or stepped into a wait — and the caller must look again or file
-   * a new action.
+   * somebody else, stepped into a wait, or no longer the last action on its issue
+   * that may still write to it — and the caller must look again or file a new
+   * action.
    */
   coalesceInto(id: string, mergedPayload: unknown, now: Date, expectedVersion: number): Promise<boolean>;
 
@@ -101,6 +107,9 @@ export interface ActionRepository {
 
   setMeta(key: string, value: string): Promise<void>;
 
+  /** Forgets one of the queue's notes; a note that is not there is left as it is. */
+  deleteMeta(key: string): Promise<void>;
+
   /** The catalog last fetched for this board, or null; each board's is kept apart from every other's. */
   getCatalog(board: BoardKey): Promise<CachedCatalog | null>;
 
@@ -109,9 +118,27 @@ export interface ActionRepository {
   /**
    * Runs the callback while holding the single tick lock, or answers null when
    * another tick holds it. A holder that is too old, or whose process is gone, is
-   * not a holder: a crashed tick must not freeze the queue.
+   * not a holder: a crashed tick must not freeze the queue. The lease is renewed
+   * for as long as the callback runs, and the callback is handed it, so it can ask
+   * before each outward write whether the lock is still its own.
    */
-  withTickLock<T>(fn: () => Promise<T>): Promise<T | null>;
+  withTickLock<T>(fn: (lease: TickLease) => Promise<T>): Promise<T | null>;
+}
+
+/**
+ * The tick lock as the pass holding it sees it.
+ *
+ * Another pass may take the lock from this one — it waited out a lease this one
+ * could not renew, a suspended machine say — and this pass is not told. Whatever
+ * it writes outward after that, the other pass may write too.
+ */
+export interface TickLease {
+  /**
+   * Whether the lock is still this pass's, renewing the lease when it is. Once it
+   * answers false it answers false from then on: a pass that lost the lock never
+   * gets it back by asking.
+   */
+  stillHeld(): Promise<boolean>;
 }
 
 /** Where one board's fetched catalog is kept between processes. */

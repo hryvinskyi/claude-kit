@@ -352,7 +352,13 @@ const audit: Command = {
     // Whatever this finds, it files nothing: which module an issue belongs to and
     // how badly it hurts are judgements nobody here can make, and a guessed value
     // routes triage wrongly while looking exactly like a chosen one.
-    const report = await context.container().audit.execute();
+    // It reads under the one tick lock, as the scheduled pass does: two readings
+    // at once spend the shared allowance in the burst every limit here prevents.
+    const container = context.container();
+    const report = await container.repository.withTickLock((lease) => container.audit.execute(lease));
+    if (report === null) {
+      throw new RefusedByRule('a scheduled pass holds the tick lock and is using the allowance; ask again in a few minutes');
+    }
     printed(context, report, () => auditLines(report));
   },
 };

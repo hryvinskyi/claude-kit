@@ -4,9 +4,10 @@ import { STATUS_FIELD, namesRefusedStatus } from '../domain/field-request.ts';
 import { IssueRef } from '../domain/issue-ref.ts';
 import type { BoardLane, BoardRouter } from './board-router.ts';
 import type { BudgetPolicy } from './budget-policy.ts';
+import { confirmStillHeld, TickLockLost } from './leased-gateways.ts';
 import { LimiterWait } from './limiter-wait.ts';
 import { writeLastAudit } from './queue-meta.ts';
-import type { ActionRepository, Clock, IssueSummary, Logger } from './ports.ts';
+import type { ActionRepository, Clock, IssueSummary, Logger, TickLease } from './ports.ts';
 
 /** How far back the pass looks for issues that were closed and left behind. */
 const CLOSED_WINDOW_DAYS = 14;
@@ -115,7 +116,12 @@ export class AuditBoard {
     });
   }
 
-  async execute(): Promise<AuditReport> {
+  /**
+   * One pass under the tick lock the lease stands for. Before each read it
+   * confirms the lock is still its own; a pass that finds it taken throws
+   * `TickLockLost`, reads nothing more and writes no report.
+   */
+  async execute(lease: TickLease): Promise<AuditReport> {
     const startedAt = this.#clock.now();
     const repos: Record<string, RepoAudit> = {};
     let stoppedBecause: string | undefined;
@@ -123,8 +129,11 @@ export class AuditBoard {
     const visits = this.#boards.lanes().flatMap((lane) => lane.placement.repos.map((repo) => ({ lane, repo })));
     for (const { lane, repo } of visits) {
       try {
-        await this.#look(lane, repo, repos, startedAt);
+        await this.#look(lane, repo, repos, startedAt, lease);
       } catch (error) {
+        if (error instanceof TickLockLost) {
+          throw error;
+        }
         const pause = await this.#wait.after(error, this.#clock.now());
         if (pause === null) {
           throw error;
@@ -183,11 +192,19 @@ export class AuditBoard {
    * The entry appears in the report only once the open issues are known, so a
    * repository the pass was refused on is absent rather than reported as empty.
    */
-  async #look(lane: BoardLane, repo: string, repos: Record<string, RepoAudit>, now: Date): Promise<void> {
+  async #look(
+    lane: BoardLane,
+    repo: string,
+    repos: Record<string, RepoAudit>,
+    now: Date,
+    lease: TickLease,
+  ): Promise<void> {
+    await confirmStillHeld(lease);
     const open = await lane.issues.listOpen(repo);
     const found: RepoAudit = { open: open.length, notOnBoard: [], emptyFields: [], closedNotDone: [] };
     repos[repo] = found;
 
+    await confirmStillHeld(lease);
     const onBoard = await membership(lane, repo, open);
     for (const issue of open) {
       const row = onBoard.get(IssueRef.of(repo, issue.number).key());
@@ -213,7 +230,9 @@ export class AuditBoard {
     }
 
     const since = new Date(now.getTime() - CLOSED_WINDOW_DAYS * DAY_MS);
+    await confirmStillHeld(lease);
     const closed = await lane.issues.listClosedSince(repo, since);
+    await confirmStillHeld(lease);
     const rows = await membership(lane, repo, closed);
     for (const issue of closed) {
       const row = rows.get(IssueRef.of(repo, issue.number).key());

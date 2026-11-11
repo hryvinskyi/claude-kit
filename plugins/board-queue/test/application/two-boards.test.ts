@@ -23,6 +23,7 @@ import { lanesByBoard } from '../fakes/lanes.ts';
 import { RecordingLogger } from '../fakes/wire-doubles.ts';
 import { boardCatalog } from '../fixtures/board.ts';
 import { ORG_BOARD, THIRD, USER_BOARD, twoBoardConfig, twoBoardDirectory } from '../fixtures/config.ts';
+import { HELD } from '../fixtures/lease.ts';
 
 const FIRST = 'example-org/first-repo';
 
@@ -217,7 +218,7 @@ describe('a queue that writes to two boards', () => {
       },
     });
 
-    const report = await world.audit.execute();
+    const report = await world.audit.execute(HELD);
 
     assert.deepEqual(Object.keys(report.repos), [...twoBoardDirectory.repos()]);
     assert.deepEqual(report.repos[FIRST]?.notOnBoard.map((issue) => issue.number), [1]);

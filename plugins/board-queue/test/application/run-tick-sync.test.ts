@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { OwnMoves } from '../../src/application/mirror-audience.ts';
+import { TickLockLost } from '../../src/application/leased-gateways.ts';
 import { MirrorClaims } from '../../src/application/mirror-claims.ts';
+import { readLastAuditAttemptAt, writeLastAudit, writeLastAuditAttemptAt } from '../../src/application/queue-meta.ts';
 import { RunTick } from '../../src/application/run-tick.ts';
 import type { SyncJobs } from '../../src/application/run-tick.ts';
 import { mirrorCursorKey, readSyncRefusal } from '../../src/application/sync-meta.ts';
@@ -57,7 +59,7 @@ function worker(fixture: TickFixture, feed: FakeCoordination, login: string | nu
       clock: fixture.clock,
       logger: fixture.logger,
     }),
-    mirror: () => claims.execute(),
+    mirror: (lease) => claims.execute(lease),
   };
   return new RunTick({
     drain: fixture.drain,
@@ -215,6 +217,195 @@ describe('a tick that keeps the board in step', () => {
     assert.deepEqual(locked.sync?.forge, { skipped: 'the tick did not get to drain the queue, so nothing is read' });
   });
 
+  it('stops the whole tick once the drain found the lock taken: no report stamped, nothing read or sent after', async () => {
+    const fixture = tickFixture({ items: [seedItem(TWELVE, 'item-12', {})], issues: [{ ref: TWELVE }] });
+    await fixture.file({ id: 'mine', payload: setFields(12, { severity: 'S2' }) });
+    await writeLastAudit(fixture.repository, {
+      at: new Date(fixture.clock.now().getTime() - 7 * 60 * 60 * 1000),
+      notOnBoard: 0,
+      emptyFields: 0,
+      closedNotDone: 0,
+    });
+    fixture.board.onCall = (call): void => {
+      if (call === 'catalog') {
+        fixture.repository.takeTheLockAway();
+      }
+    };
+    const ran: string[] = [];
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      audit: () => {
+        ran.push('audit');
+        return Promise.resolve();
+      },
+      sync: {
+        owner: new SyncOwner({ identity: identity('alice'), sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        importer: () => {
+          ran.push('import');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+        forge: () => {
+          ran.push('forge');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.deepEqual(ran, []);
+    assert.match(report.stoppedBecause ?? '', /lock/);
+    assert.equal(await readLastAuditAttemptAt(fixture.repository), null, 'the holder\'s due report is not put off');
+  });
+
+  it('runs nothing more once a job before the drain found the lock taken', async () => {
+    const fixture = tickFixture({ items: [seedItem(TWELVE, 'item-12', {})], issues: [{ ref: TWELVE }] });
+    await fixture.file({ id: 'mine', payload: setFields(12, { severity: 'S2' }) });
+    const ran: string[] = [];
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      sync: {
+        owner: new SyncOwner({ identity: identity('alice'), sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        mirror: async (lease) => {
+          ran.push('mirror');
+          fixture.repository.takeTheLockAway();
+          if (!(await lease.stillHeld())) {
+            throw new TickLockLost();
+          }
+          return Promise.reject(new Error('the lease said the lock was still held'));
+        },
+        finish: () => {
+          ran.push('finish');
+          return Promise.reject(new Error('finish ran'));
+        },
+        forge: () => {
+          ran.push('forge');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.deepEqual(ran, ['mirror']);
+    assert.equal(report.executed, 0);
+    assert.match(report.skipped ?? '', /lock/);
+    assert.equal((await fixture.stored('mine')).state, 'queued');
+  });
+
+  it('runs nothing more once ending finished claims found the lock taken', async () => {
+    const fixture = tickFixture({ items: [seedItem(TWELVE, 'item-12', {})], issues: [{ ref: TWELVE }] });
+    await fixture.file({ id: 'mine', payload: setFields(12, { severity: 'S2' }) });
+    const ran: string[] = [];
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      sync: {
+        owner: new SyncOwner({ identity: identity('alice'), sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        finish: () => {
+          ran.push('finish');
+          return Promise.reject(new TickLockLost());
+        },
+        importer: () => {
+          ran.push('import');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+        forge: () => {
+          ran.push('forge');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.deepEqual(ran, ['finish']);
+    assert.equal(report.executed, 0);
+    assert.equal((await fixture.stored('mine')).state, 'queued', 'the queue is the holder\'s to drain');
+  });
+
+  it('runs nothing more once the import found the lock taken', async () => {
+    const fixture = tickFixture();
+    const ran: string[] = [];
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      sync: {
+        owner: new SyncOwner({ identity: identity('alice'), sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        importer: () => {
+          ran.push('import');
+          return Promise.reject(new TickLockLost());
+        },
+        forge: () => {
+          ran.push('forge');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.deepEqual(ran, ['import']);
+    assert.equal(report.lockLost, true);
+  });
+
+  it('runs nothing more once the board report found the lock taken, and gives its stamp back', async () => {
+    const fixture = tickFixture();
+    const lastAttempt = new Date(fixture.clock.now().getTime() - 8 * 60 * 60 * 1000);
+    await writeLastAudit(fixture.repository, { at: lastAttempt, notOnBoard: 0, emptyFields: 0, closedNotDone: 0 });
+    await writeLastAuditAttemptAt(fixture.repository, lastAttempt);
+    const ran: string[] = [];
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      audit: async (lease) => {
+        ran.push('audit');
+        fixture.repository.takeTheLockAway();
+        if (!(await lease.stillHeld())) {
+          throw new TickLockLost();
+        }
+      },
+      sync: {
+        owner: new SyncOwner({ identity: identity('alice'), sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        importer: () => {
+          ran.push('import');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+        forge: () => {
+          ran.push('forge');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.deepEqual(ran, ['audit']);
+    assert.equal(report.lockLost, true);
+    assert.equal(
+      (await readLastAuditAttemptAt(fixture.repository))?.getTime(),
+      lastAttempt.getTime(),
+      'the holder\'s report is not put off by a pass that never wrote one',
+    );
+  });
+
   it('does not run the mirror while another tick holds the lock', async () => {
     const fixture = tickFixture();
     fixture.repository.pretendAnotherTickHolds = true;
@@ -249,7 +440,7 @@ describe('a tick that keeps the board in step', () => {
       logger: fixture.logger,
       sync: {
         owner: new SyncOwner({ identity: bob, sync, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
-        mirror: () => mirrorFor(fixture, feed, sync, new OwnMoves(bob, SYNC.mirrorOwner)).execute(),
+        mirror: (lease) => mirrorFor(fixture, feed, sync, new OwnMoves(bob, SYNC.mirrorOwner)).execute(lease),
         mirrorScope: 'own',
         importer,
       },
@@ -287,7 +478,7 @@ describe('a tick that keeps the board in step', () => {
       logger: fixture.logger,
       sync: {
         owner: new SyncOwner({ identity: owner, sync, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
-        mirror: () => mirrorFor(fixture, feedWithAClaim(), sync, new OwnMoves(counted, SYNC.mirrorOwner)).execute(),
+        mirror: (lease) => mirrorFor(fixture, feedWithAClaim(), sync, new OwnMoves(counted, SYNC.mirrorOwner)).execute(lease),
         mirrorScope: 'own',
       },
     });

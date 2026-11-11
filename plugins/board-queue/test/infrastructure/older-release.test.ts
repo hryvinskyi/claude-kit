@@ -125,6 +125,11 @@ if (command === 'file') {
     now: new Date('2026-01-01T09:00:00.000Z'),
   }));
 }
+let lock = null;
+if (command === 'lock') {
+  // A pass of this release, started by hand while another may be running.
+  lock = await repository.withTickLock(async () => 'taken');
+}
 const listed = await repository.list({});
 const one = await repository.get(id);
 const counts = await repository.counts();
@@ -136,6 +141,7 @@ process.stdout.write(JSON.stringify({
   counts,
   statusCounts: status.counts,
   folded,
+  lock,
 }));
 `;
 
@@ -149,10 +155,16 @@ const OlderAnswer = z.object({
     done: z.number(),
     values: z.record(z.string(), z.string()),
   }).nullable(),
+  lock: z.string().nullable(),
 });
 
 type OlderRelease = {
-  run(command: 'file' | 'read' | 'reblock' | 'fold-and-run', file: string, id: string): z.infer<typeof OlderAnswer>;
+  run(
+    command: 'file' | 'read' | 'reblock' | 'fold-and-run' | 'lock',
+    file: string,
+    id: string,
+    environment?: Readonly<Record<string, string>>,
+  ): z.infer<typeof OlderAnswer>;
 };
 
 /** An older release's queue code, taken from history into a directory of its own. */
@@ -178,8 +190,12 @@ function olderRelease(t: TestContext, release: string): OlderRelease {
   const script = path.join(root, 'older.ts');
   fs.writeFileSync(script, OLDER_RELEASE_SCRIPT);
   return {
-    run: (command, file, id) => {
-      const ran = spawnSync(process.execPath, [script, command, file, id], { encoding: 'utf8', cwd: root });
+    run: (command, file, id, environment = {}) => {
+      const ran = spawnSync(process.execPath, [script, command, file, id], {
+        encoding: 'utf8',
+        cwd: root,
+        env: { ...process.env, ...environment },
+      });
       assert.equal(ran.status, 0, `the older release failed: ${ran.stderr}`);
       return OlderAnswer.parse(JSON.parse(ran.stdout));
     },
@@ -364,4 +380,28 @@ describe('going back to the release before the board guarded what it released', 
     assert.equal(ran?.state, 'done');
     assert.equal(ran.writeGuard, null);
   });
+});
+
+describe('an older release run beside this one', () => {
+  it('never takes the lock from a live pass of this version, whatever language and time zone it runs in',
+    async (t) => {
+      const older = olderRelease(t, THIRD_LAYOUT_RELEASE);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-roundtrip-'));
+      t.after(() => {
+        fs.rmSync(dir, { recursive: true, force: true });
+      });
+      const file = path.join(dir, 'queue.db');
+      const current = new SqliteActionRepository(file);
+      t.after(() => {
+        current.close();
+      });
+
+      const tried = await current.withTickLock(() => Promise.resolve([
+        older.run('lock', file, 'none', { LANG: 'uk_UA.UTF-8', LC_ALL: 'uk_UA.UTF-8', TZ: 'Asia/Tokyo' }),
+        older.run('lock', file, 'none', { LANG: 'C', LC_ALL: 'C', TZ: 'UTC' }),
+      ]));
+
+      assert.deepEqual(tried?.map((answer) => answer.lock), [null, null]);
+      assert.equal(older.run('lock', file, 'none').lock, 'taken', 'once this version let go, the older release takes it');
+    });
 });

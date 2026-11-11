@@ -113,6 +113,26 @@ export async function writeLastAuditAttemptAt(repository: ActionRepository, at: 
 }
 
 /**
+ * Puts back the attempt a pass found before it wrote its own, while the stamp is
+ * still the one it wrote. A pass that lost the tick lock wrote no report, and its
+ * stamp would put off the report the pass holding the lock is due to write.
+ */
+export async function giveBackLastAuditAttemptAt(
+  repository: ActionRepository,
+  ours: Date,
+  before: Date | null,
+): Promise<void> {
+  if ((await readLastAuditAttemptAt(repository))?.getTime() !== ours.getTime()) {
+    return;
+  }
+  if (before === null) {
+    await repository.deleteMeta(LAST_AUDIT_ATTEMPT_AT);
+  } else {
+    await writeLastAuditAttemptAt(repository, before);
+  }
+}
+
+/**
  * How many burst refusals have come in a row. It is counted here rather than
  * taken from the pause that is in force, because the pause expires and is cleared
  * while the doubling must survive into the next tick.

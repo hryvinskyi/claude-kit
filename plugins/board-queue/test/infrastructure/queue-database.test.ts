@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -348,6 +350,97 @@ describe('a queue file that is up to date', () => {
     opened(t, file);
 
     assert.equal(stateKey(file, 'layout_revision'), '5');
+  });
+});
+
+/**
+ * What each opener does, in a process of its own as every session, the worker and
+ * the command line do: open the queue, file an action, let it go, over and over.
+ * It reports the opens and writes that failed rather than stopping at the first.
+ */
+const OPENER_SCRIPT = `
+const { SqliteActionRepository } = await import(process.argv[1]);
+const { Action } = await import(process.argv[2]);
+const [, , , file, who, rounds] = process.argv;
+const failures = [];
+for (let round = 0; round < Number(rounds); round += 1) {
+  try {
+    const repository = new SqliteActionRepository(file);
+    try {
+      await repository.insert(Action.enqueue({
+        id: who + '-' + round, kind: 'issue.comment', payload: { repo: 'example-org/first-repo', issue: 12, body: 'x' },
+        issueRef: null, origin: who, now: new Date(),
+      }));
+    } finally {
+      repository.close();
+    }
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error));
+  }
+}
+process.stdout.write(JSON.stringify(failures));
+`;
+
+const SOURCE = path.join(import.meta.dirname, '..', '..', 'src');
+
+/** Runs the opener in as many processes at once, and answers every failure each of them met. */
+async function openTogether(file: string, processes: number, rounds: number): Promise<string[]> {
+  const runs = Array.from({ length: processes }, (_unused, index) => new Promise<string[]>((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      OPENER_SCRIPT,
+      pathToFileURL(path.join(SOURCE, 'infrastructure', 'sqlite-action-repository.ts')).href,
+      pathToFileURL(path.join(SOURCE, 'domain', 'action.ts')).href,
+      file,
+      `opener${String(index)}`,
+      String(rounds),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      err += chunk.toString();
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`an opener exited with ${String(code)}: ${err}`));
+        return;
+      }
+      const parsed: unknown = JSON.parse(out);
+      resolve(Array.isArray(parsed) ? parsed.map(String) : [`unreadable report: ${out}`]);
+    });
+  }));
+  return (await Promise.all(runs)).flat();
+}
+
+describe('a queue file many processes open at once', () => {
+  it('opens and takes a write in every process, none of them told the file is locked', async (t) => {
+    const dir = directory(t);
+    const file = path.join(dir, 'queue.db');
+
+    const failures = await openTogether(file, 6, 120);
+
+    assert.deepEqual(failures, [], `${String(failures.length)} opens or writes failed`);
+    const db = new DatabaseSync(file, { readOnly: true });
+    t.after(() => {
+      db.close();
+    });
+    assert.equal(db.prepare('SELECT COUNT(*) AS total FROM actions').get()?.['total'], 6 * 120);
+  });
+
+  it('is brought up to date once while the others wait for it, none of them failing', async (t) => {
+    const dir = directory(t);
+    const file = fileIn(dir, FIRST_LAYOUT);
+
+    const failures = await openTogether(file, 6, 20);
+
+    assert.deepEqual(failures, [], `${String(failures.length)} opens or writes failed`);
+    assert.equal(stateKey(file, 'layout_revision'), LAYOUT);
+    assert.deepEqual(backupsIn(dir), [BACKUP]);
   });
 });
 

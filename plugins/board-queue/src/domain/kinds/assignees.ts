@@ -44,8 +44,9 @@ const DESCRIBE = [
   'Change who an issue is assigned to. Name the repository as owner/name, the issue number, and the logins',
   'to add and to remove; everybody else stays assigned. The change is confirmed by reading the issue back: a',
   'login GitHub would not assign — somebody without access to the repository — blocks the action and says',
-  'so, rather than reading as done. Two of these waiting on the same issue merge into one, the later request',
-  'winning for any login both name.',
+  'so, rather than reading as done. A later one merges into the last action on the issue that may still',
+  'write to it (queued, held, running, failed or blocked) when that action is one of these and still waiting,',
+  'the later request winning for any login both name; with anything else filed after it, it is filed on its own.',
 ].join(' ');
 
 /** Adds and removes assignees on an issue and reads the issue back. */

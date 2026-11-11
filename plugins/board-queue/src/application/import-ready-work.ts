@@ -8,11 +8,13 @@ import type { Blocker, BoardWork, ImportPlan, PlannedBatch } from '../domain/syn
 import type { BoardLane, BoardRouter } from './board-router.ts';
 import type { BudgetPolicy } from './budget-policy.ts';
 import { describeUnknown } from './drain-queue.ts';
+import { confirmStillHeld, TickLockLost } from './leased-gateways.ts';
 import type { LimiterWait } from './limiter-wait.ts';
-import type { ActionRepository, Clock, Logger, Sleeper } from './ports.ts';
+import type { ActionRepository, Clock, Logger, Sleeper, TickLease } from './ports.ts';
 import { readLastBudget } from './queue-meta.ts';
 import {
   IMPORT_LAST_COMPLETE_OPEN,
+  giveBackImportAttemptAt,
   readCount,
   readImportAttemptAt,
   writeImportAttemptAt,
@@ -121,21 +123,41 @@ export class ImportReadyWork {
     this.#repos = new Set(deps.sync.repos.map((repo) => repo.toLowerCase()));
   }
 
-  async execute(): Promise<ImportReport> {
+  /**
+   * One run under the tick lock the lease stands for. Before each read it makes
+   * and each batch it sends, it confirms the lock is still its own; a run that
+   * finds it taken throws `TickLockLost`, reads and sends nothing more, keeps no
+   * report and puts back the stamp it found, for the run that holds the lock now
+   * does the work.
+   */
+  async execute(lease: TickLease): Promise<ImportReport> {
     const notYet = await this.#notYet();
     if (notYet !== null) {
       return { skipped: notYet };
     }
+    await confirmStillHeld(lease);
     const startedAt = this.#clock.now();
+    const before = await readImportAttemptAt(this.#repository);
     // Stamped before the reading rather than after it, so a run that fails — or
     // that the machine interrupts — still holds the cadence instead of reading the
     // board again at the next tick.
     await writeImportAttemptAt(this.#repository, startedAt);
+    try {
+      return await this.#run(startedAt, lease);
+    } catch (error) {
+      if (error instanceof TickLockLost) {
+        await giveBackImportAttemptAt(this.#repository, startedAt, before);
+      }
+      throw error;
+    }
+  }
 
-    const read = await this.#readBoards();
+  /** The reading and the sending of one run, once its start is stamped. */
+  async #run(startedAt: Date, lease: TickLease): Promise<ImportReport> {
+    const read = await this.#readBoards(lease);
     const spending: Spending = { requests: 0, notModified: 0, stoppedBecause: read.stoppedBecause };
     if (spending.stoppedBecause === null) {
-      await this.#refreshDependencies(read.work, spending);
+      await this.#refreshDependencies(read.work, spending, lease);
     }
     const plan = planImport({
       work: read.work,
@@ -152,7 +174,7 @@ export class ImportReadyWork {
         severityField: BOARD_FIELD_OF['severity'] ?? 'Severity',
       },
     });
-    const sent = await this.#send(plan);
+    const sent = await this.#send(plan, lease);
     const run: ImportRun = {
       at: startedAt.toISOString(),
       items: sent.items,
@@ -193,7 +215,7 @@ export class ImportReadyWork {
   }
 
   /** Every row of the repositories kept in step, from one walk of each board that carries them. */
-  async #readBoards(): Promise<{
+  async #readBoards(lease: TickLease): Promise<{
     work: BoardWork[];
     whole: boolean;
     unreadBecause: string | null;
@@ -207,6 +229,7 @@ export class ImportReadyWork {
     let cost: number | null = null;
     for (const lane of this.#lanesKeptInStep()) {
       let snapshot: BoardSnapshot;
+      await confirmStillHeld(lease);
       try {
         snapshot = await lane.board.readWork();
       } catch (error) {
@@ -253,7 +276,7 @@ export class ImportReadyWork {
    * never asked for. One whose answer carried no tag is asked for again only once
    * the issue changed, because asking would cost a request every time.
    */
-  async #refreshDependencies(work: readonly BoardWork[], spending: Spending): Promise<void> {
+  async #refreshDependencies(work: readonly BoardWork[], spending: Spending, lease: TickLease): Promise<void> {
     const due = (await this.#candidates(work))
       .filter((candidate) => isDue(candidate))
       .sort((one, other) => fetchedAt(one) - fetchedAt(other))
@@ -262,6 +285,7 @@ export class ImportReadyWork {
       if (spending.requests > 0) {
         await this.#sleeper.sleep(this.#importer.paceMs);
       }
+      await confirmStillHeld(lease);
       spending.requests += 1;
       try {
         await this.#fetch(candidate, spending);
@@ -340,7 +364,7 @@ export class ImportReadyWork {
    * take: the batch that says it is complete goes last, and must never go after a
    * batch that did not land.
    */
-  async #send(plan: ImportPlan): Promise<{
+  async #send(plan: ImportPlan, lease: TickLease): Promise<{
     items: number;
     batches: number;
     complete: boolean;
@@ -353,6 +377,7 @@ export class ImportReadyWork {
     let refusedEdges = 0;
     let complete = false;
     for (const batch of plan.batches) {
+      await confirmStillHeld(lease);
       try {
         const answer = await this.#target.putItems(this.#batchOf(batch));
         items += batch.items.length;

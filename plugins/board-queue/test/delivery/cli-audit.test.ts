@@ -7,6 +7,7 @@ import type { AuditReport } from '../../src/application/audit-board.ts';
 import { Flags, commands } from '../../src/delivery/cli.ts';
 import { buildContainer } from '../../src/delivery/container.ts';
 import type { Container } from '../../src/delivery/container.ts';
+import { RefusedByRule } from '../../src/domain/errors.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { FakeBoardGateway, seedItem } from '../fakes/fake-board-gateway.ts';
 import { FakeIssueGateway } from '../fakes/fake-issue-gateway.ts';
@@ -64,6 +65,22 @@ async function audit(container: Container, argv: readonly string[]): Promise<str
 }
 
 describe('board-queue audit', () => {
+  it('reads nothing while a scheduled pass holds the tick lock, and says to ask again', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'board-queue-cli-audit-'));
+    const container = wiredTo(directory);
+    try {
+      const refused = await container.repository.withTickLock(() => audit(container, []).then(
+        () => null,
+        (error: unknown) => error,
+      ));
+
+      assert.ok(refused instanceof RefusedByRule && /ask again/.test(refused.describe()));
+    } finally {
+      container.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('prints a short table a person can act on', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'board-queue-cli-audit-'));
     const container = wiredTo(directory);

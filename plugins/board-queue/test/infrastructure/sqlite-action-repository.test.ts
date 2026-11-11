@@ -213,13 +213,65 @@ describe('the queue on disk', () => {
     assert.equal(read.updatedAt.getTime(), at(1).getTime());
   });
 
-  it('offers the oldest waiting action of that sort on that issue', async (t) => {
+  it('offers the newest waiting action of that sort on that issue, never an older one', async (t) => {
     const repository = databaseIn(t)();
     await repository.insert(anAction({ id: 'older', createdAt: at(0) }));
     await repository.insert(anAction({ id: 'newer', createdAt: at(5) }));
 
     const found = await repository.findCoalescible('board.set-fields', IssueRef.of(FIRST, 12), at(10));
-    assert.equal(found?.id, 'older');
+    assert.equal(found?.id, 'newer', 'a request folded into the older one would run before the newer one');
+  });
+
+  it('offers nothing when any action that may still write to the issue was filed after the waiting one', async (t) => {
+    for (const after of ['queued', 'held', 'running', 'failed', 'blocked'] as const) {
+      const repository = databaseIn(t)();
+      await repository.insert(anAction({ id: 'waiting', createdAt: at(0) }));
+      await repository.insert(anAction({
+        id: 'after',
+        kind: 'issue.comment',
+        payload: { repo: FIRST, issue: 12, body: 'a note' },
+        createdAt: at(1),
+        hold: after === 'held',
+      }));
+      if (after === 'running' || after === 'failed' || after === 'blocked') {
+        // An action released after the one behind it ran can stand in front of a queued one.
+        const behind = await stored(repository, 'after');
+        behind.start(at(2));
+        if (after === 'failed') {
+          behind.failTransient(at(2), 'the API answered 502', 1, 30);
+        } else if (after === 'blocked') {
+          behind.block(at(2), new OptionNotFound('Severity', 'urgent', ['S2 · broken']));
+        }
+        await repository.update(behind);
+      }
+
+      assert.equal(
+        await repository.findCoalescible('board.set-fields', IssueRef.of(FIRST, 12), at(10)),
+        null,
+        `an action ${after} after it keeps a later request from being folded in front of it`,
+      );
+      assert.equal(
+        await repository.coalesceInto('waiting', { repo: FIRST, issue: 12, fields: { severity: 'S1' } }, at(10), 1),
+        false,
+        `the fold itself refuses a row with an action ${after} after it`,
+      );
+    }
+  });
+
+  it('offers the waiting action again once what was filed after it has ended', async (t) => {
+    const repository = databaseIn(t)();
+    await repository.insert(anAction({ id: 'waiting', createdAt: at(0) }));
+    await repository.insert(anAction({
+      id: 'after',
+      kind: 'issue.comment',
+      payload: { repo: FIRST, issue: 12, body: 'a note' },
+      createdAt: at(1),
+    }));
+    const cancelled = await stored(repository, 'after');
+    cancelled.cancel(at(2));
+    await repository.update(cancelled);
+
+    assert.equal((await repository.findCoalescible('board.set-fields', IssueRef.of(FIRST, 12), at(10)))?.id, 'waiting');
   });
 
   it('matches the repository however it is spelled', async (t) => {
@@ -746,5 +798,69 @@ describe('the queue on disk', () => {
 
     assert.equal(await alive.withTickLock(() => Promise.resolve('taken')), null);
     assert.equal(await gone.withTickLock(() => Promise.resolve('taken')), 'taken');
+  });
+
+  it('tells a holder its lease is lost once another pass took the lock, and keeps telling it', async (t) => {
+    const open = databaseIn(t);
+    const container = 'host:pid:[4026532200]';
+    const holder = open({ processes: table(container, () => '1000') });
+    // To this pass the holder's process looks restarted, so it takes the lock.
+    const thief = open({ processes: table(container, () => '2000') });
+
+    const seen = await holder.withTickLock(async (lease) => {
+      const before = await lease.stillHeld();
+      const stolen = await thief.withTickLock(async () => {
+        const after = await lease.stillHeld();
+        return { after, again: await lease.stillHeld() };
+      });
+      return { before, stolen, later: await lease.stillHeld() };
+    });
+
+    assert.deepEqual(seen, { before: true, stolen: { after: false, again: false }, later: false });
+    assert.equal(
+      await thief.withTickLock(() => Promise.resolve('free')),
+      'free',
+      'the holder that lost the lock did not release the other pass\'s holding',
+    );
+  });
+
+  it('renews the lease each time the holder asks, so a pass that keeps asking keeps the lock', async (t) => {
+    const clock = new FakeClock('2026-03-02T09:00:00.000Z');
+    const open = databaseIn(t);
+    const holder = open({ clock, lockRenewEveryMs: 60 * 60 * 1000, processes: table('host:pid:[1]', () => '1000') });
+    const elsewhere = open({ clock, processes: table('host:pid:[2]', () => null) });
+
+    const outcome = await holder.withTickLock(async (lease) => {
+      clock.advanceMinutes(4);
+      assert.equal(await lease.stillHeld(), true);
+      clock.advanceMinutes(4);
+      return elsewhere.withTickLock(() => Promise.resolve('taken from a holder that kept asking'));
+    });
+
+    assert.equal(outcome, null);
+  });
+
+  it('never takes the lock from a live holder of an older release, whatever language it wrote its start in', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-test-'));
+    const file = path.join(dir, 'queue.db');
+    const clock = new FakeClock('2026-03-02T09:00:00.000Z');
+    const here = new LocalProcessTable().here();
+    const current = new SqliteActionRepository(file, { clock });
+    const db = new DatabaseSync(file);
+    t.after(() => {
+      db.close();
+      current.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    // A live process — this one — that an older release ran under a Ukrainian locale.
+    db.prepare('INSERT INTO queue_state (key, value) VALUES (?, ?)').run('tick_lock', JSON.stringify({
+      pid: process.pid,
+      started: 'Вт 10 лист. 19:41:47 2026',
+      where: here,
+      lease: 'older-lease',
+      at: clock.now().toISOString(),
+    }));
+
+    assert.equal(await current.withTickLock(() => Promise.resolve('taken from a live holder')), null);
   });
 });

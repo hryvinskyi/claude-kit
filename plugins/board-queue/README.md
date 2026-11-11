@@ -71,8 +71,12 @@ board written to is the one that carries it.
 
 Wanted texts are matched against the board's live options: exactly, then ignoring case, then as a prefix
 that fits one option only — so `S2` reaches `S2 · broken · no workaround`. A text that fits nothing, or
-several, blocks the action and reports what the field accepts. Two of these waiting on the same issue merge
-into one, the later values winning.
+several, blocks the action and reports what the field accepts. A later one merges into the one already waiting
+on the same issue, the later values winning — but only into the last action on that issue that may still write
+to it: when an action of any kind that may (queued, held, running, failed or blocked) was filed after the
+waiting one, the later request is filed on its own and runs after it, so values asked for earlier never land
+over it. A request never merges past a held action; a held action, once released, writes after whatever ran
+meanwhile — that is what holding it means.
 
 **Whoever starts the work is assigned.** A `board.set-fields` whose status starts the work on an issue — the
 mirror's `claimed` or `takenOver` status, matched the way a write matches it — is filed with an `issue.assignees`
@@ -135,7 +139,8 @@ the prefix has been resolved.
 
 The issue is read back afterwards: a login GitHub would not assign — somebody without access to the
 repository — blocks the action instead of reading as done. Two of these waiting on one issue merge, the later
-request winning for a login both name.
+request winning for a login both name, on the same terms as a `board.set-fields`: only into the last action
+on the issue that may still write to it.
 
 A request piped in whole may carry `"dedupeKey"`: an action already filed under the same key is the answer,
 and nothing new is filed. A request with a key never merges with another.
@@ -222,6 +227,23 @@ that time every minute. Another pass takes the lock only when the lease has gone
 when the holder counts its id in the same place and that id is gone or now belongs to a process that started at
 another time — which is what a restarted container does with its first ids. A holder in another place, such as
 inside a container seen from the machine around it, cannot be looked up, so its lease alone decides.
+
+A process's start is read the same whatever language and time zone the reading process runs in (`/proc` on
+Linux; elsewhere `ps` asked in the C locale and universal time), so a pass started by hand from a shell in
+another locale does not mistake a live holder for a restarted one. It is written under `startMark`; releases
+before it wrote the start under `started`, in their own locale's words, and a holder written that way is taken
+as one whose start is unknown — it holds the lock while its process is there and its lease is fresh.
+
+A pass that lost the lock anyway — its machine slept through the lease, say — is not told by anyone, so it asks
+before every outward write, renewing the lease as it does: the drain before each write of an action (adding a
+row, setting a field, a comment, a close, an assignment), the forge pass before every request to GitHub or the
+coordination server, the import and the board report before each read and each batch sent, ending finished claims
+before each call, and the mirror before it files a page and moves its cursor. A pass that finds the lock taken
+reads and writes nothing more and keeps nothing of its own — no run report, no cursor, no sightings, and the
+attempt stamp of an import or a board report is put back as it found it: an action in hand goes back on the queue
+with its attempt given back, and the tick ends there with no job after it, its report naming the lock. The pass
+holding the lock does all of it. `board-queue audit` run by hand takes the same lock, and refuses while a
+scheduled pass holds it.
 
 ## The rate-limit policy
 
@@ -475,9 +497,13 @@ Each tick, after the queue is drained and under the same single lock, one pass r
   only when the state or description differs from the last written for that commit and context. A status this
   worker wrote and no longer stands behind is taken back: when the repository stops wanting one, its context
   changes, or the author is no longer a member, a head whose last status here was a failure gets one success,
-  "no longer checked by <context>", and the status is forgotten. Every write counts against GitHub's
-  content-creation limit, which the queue's own writes spend too: a pass writes at most `maxStatusWritesPerPass`
-  (at most 35), every pass together at most `maxStatusWritesPerHour`, and the rest wait for a later pass.
+  "no longer checked by <context>", and the status is forgotten. Only an answer takes a status back: the server's
+  `not_found` saying it knows no such repository or branch counts as wanting none, but a refusal, an answer of the
+  wrong shape, or a 404 that is not that answer (a proxy's, or a server without the route) leaves every status on
+  that base's pull requests as it is, a failure included, and counts in the pass's `failures`. Every write counts
+  against GitHub's content-creation limit, which the queue's own writes spend too: a pass writes at most
+  `maxStatusWritesPerPass` (at most 35), every pass together at most `maxStatusWritesPerHour`, and the rest wait for
+  a later pass.
 - **Footprints.** For each branch of a live claim in that repository, `GET …/compare/{base}...{branch}`
   (conditional; the base is that of the open pull request from the repository's own branch of that name, or the
   default branch) and `PUT /v1/items/{id}/footprint { repo, branch, base, base_sha, base_at, paths, truncated }`

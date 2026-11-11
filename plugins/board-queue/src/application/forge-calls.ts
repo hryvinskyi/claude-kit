@@ -2,8 +2,9 @@ import { BoardQueueError, NoAnswer } from '../domain/errors.ts';
 import type { ForgeConfig } from '../domain/sync-config.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { ForgeAllowance } from './forge-ports.ts';
+import { LOCK_LOST } from './leased-gateways.ts';
 import type { LimiterWait } from './limiter-wait.ts';
-import type { Clock, Logger, Sleeper } from './ports.ts';
+import type { Clock, Logger, Sleeper, TickLease } from './ports.ts';
 
 /** GitHub not answering this many requests of one job in a row is GitHub not answering that repository. */
 const UNANSWERED_IN_A_ROW = 3;
@@ -32,6 +33,8 @@ export class ForgeRepositoryStopped extends ForgeStop {}
 
 export type ForgeCallsDeps = {
   allowance: ForgeAllowance;
+  /** The tick lock the pass runs under, asked before every request goes out. */
+  lease: TickLease;
   wait: LimiterWait;
   settings: ForgeConfig;
   clock: Clock;
@@ -55,9 +58,16 @@ export type ForgeCallsDeps = {
  * service. The server not answering ends the pass: what was not kept is sent
  * again by the next one, and nothing is sent past an answer that did not come. A
  * refusal of one report is the caller's to record.
+ *
+ * Every request, to either, goes out only while the pass still holds the tick
+ * lock, asked at the moment it would go out. A pass that waited past its lease
+ * may have had the lock taken by another, which then writes the same statuses
+ * and reports from what it reads now; the pass that lost it ends where it stands
+ * rather than write over them with what it read before.
  */
 export class ForgeCalls {
   readonly #allowance: ForgeAllowance;
+  readonly #lease: TickLease;
   readonly #wait: LimiterWait;
   readonly #settings: ForgeConfig;
   readonly #clock: Clock;
@@ -68,9 +78,11 @@ export class ForgeCalls {
   #notModified = 0;
   #unansweredInARow = 0;
   #stoppedBecause: string | null = null;
+  #lostTheLock = false;
 
   constructor(deps: ForgeCallsDeps) {
     this.#allowance = deps.allowance;
+    this.#lease = deps.lease;
     this.#wait = deps.wait;
     this.#settings = deps.settings;
     this.#clock = deps.clock;
@@ -89,6 +101,11 @@ export class ForgeCalls {
 
   get stoppedBecause(): string | null {
     return this.#stoppedBecause;
+  }
+
+  /** Whether the pass ended because another pass took the tick lock from it. */
+  get lostTheLock(): boolean {
+    return this.#lostTheLock;
   }
 
   /** When the pass started, by this machine's clock. */
@@ -120,6 +137,7 @@ export class ForgeCalls {
     if (remaining !== null && remaining < this.#settings.minRemaining) {
       this.#stopPass(`the REST allowance is ${String(remaining)}, below the reserve of ${String(this.#settings.minRemaining)}`);
     }
+    await this.#refuseWithoutTheLock();
     this.#requests += 1;
     try {
       const answer = await call();
@@ -152,6 +170,7 @@ export class ForgeCalls {
    */
   async coordination<T>(what: string, call: () => Promise<T>, essential = false): Promise<T> {
     this.#refuseOnceStopped();
+    await this.#refuseWithoutTheLock();
     try {
       return await call();
     } catch (error) {
@@ -165,6 +184,13 @@ export class ForgeCalls {
   #refuseOnceStopped(): void {
     if (this.#stoppedBecause !== null) {
       throw new ForgePassStopped(this.#stoppedBecause);
+    }
+  }
+
+  async #refuseWithoutTheLock(): Promise<void> {
+    if (!(await this.#lease.stillHeld())) {
+      this.#lostTheLock = true;
+      this.#stopPass(LOCK_LOST);
     }
   }
 

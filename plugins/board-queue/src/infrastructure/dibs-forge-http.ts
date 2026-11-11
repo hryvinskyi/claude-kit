@@ -64,6 +64,10 @@ const PrStatusAnswer = z.object({
   description: z.string(),
 });
 
+const NotFoundAnswer = z.object({
+  error: z.object({ code: z.literal('not_found'), message: z.string() }),
+});
+
 const ReportAnswer = z.object({
   matched: z.boolean(),
   item: z.number().int().positive().optional(),
@@ -134,7 +138,7 @@ export class DibsForgeClient implements ForgeCoordination {
     const subject = `the status for ${repo} into ${base}`;
     const query = new URLSearchParams({ repo, base });
     const answer = await this.#http.call('GET', `/v1/pr-status?${query.toString()}`, subject);
-    if (answer.status === NOT_FOUND) {
+    if (answer.status === NOT_FOUND && namesAsUnknown(answer.json, [repo, base])) {
       return null;
     }
     const wanted = this.#http.decode(PrStatusAnswer, this.#http.ok(answer, subject), subject);
@@ -208,6 +212,17 @@ function reportAnswerOf(answer: z.infer<typeof ReportAnswer>, subject: string): 
     throw new TransientFailure(`${subject} answered a match without its item or its claim`);
   }
   return { matched: true, item: answer.item, claim: answer.claim };
+}
+
+/**
+ * Whether a 404 is the server saying it knows no such repository or branch: its
+ * `not_found` refusal, whose sentence quotes one of the names asked about. The
+ * server answers a path it has no route for with `not_found` too, quoting nothing,
+ * and a proxy's 404 is not its refusal at all; neither says what the server wants.
+ */
+function namesAsUnknown(json: unknown, asked: readonly string[]): boolean {
+  const refusal = NotFoundAnswer.safeParse(json);
+  return refusal.success && asked.some((name) => refusal.data.error.message.includes(`'${name}'`));
 }
 
 /** `host/owner/name` as the server writes a remote → `owner/name`. */

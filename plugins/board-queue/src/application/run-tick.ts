@@ -1,19 +1,21 @@
 import type { MirrorScope } from '../domain/sync-config.ts';
 import type { BudgetPolicy } from './budget-policy.ts';
-import { describeUnknown } from './drain-queue.ts';
+import { describeUnknown, notRun } from './drain-queue.ts';
 import type { DrainQueue, TickReport } from './drain-queue.ts';
 import type { FinishReport } from './finish-claims.ts';
 import type { ForgeReport } from './forge-pass.ts';
 import type { ImportReport } from './import-ready-work.ts';
+import { LOCK_LOST, TickLockLost } from './leased-gateways.ts';
 import type { MirrorReport } from './mirror-claims.ts';
 import type { OwnerRefusal, SyncOwner } from './sync-owner.ts';
 import {
+  giveBackLastAuditAttemptAt,
   readLastAudit,
   readLastAuditAttemptAt,
   readLastBudget,
   writeLastAuditAttemptAt,
 } from './queue-meta.ts';
-import type { ActionRepository, Clock, Logger } from './ports.ts';
+import type { ActionRepository, Clock, Logger, TickLease } from './ports.ts';
 
 /**
  * Keeping the boards in step with a coordination server, when this deployment
@@ -22,8 +24,12 @@ import type { ActionRepository, Clock, Logger } from './ports.ts';
  */
 export type SyncJobs = {
   owner: SyncOwner;
-  /** Carries claims onto the boards as filed work; runs before the queue is drained. */
-  mirror?: () => Promise<MirrorReport>;
+  /**
+   * Carries claims onto the boards as filed work; runs before the queue is drained.
+   * Each job is handed the lease of the tick lock it runs under, confirms it before
+   * every write, and throws `TickLockLost` once another pass has taken the lock.
+   */
+  mirror?: (lease: TickLease) => Promise<MirrorReport>;
   /**
    * Whose moves the mirror files: `all` runs it only in the owner's worker, `own`
    * in every worker, for the moves of the person it runs as. `all` unless named.
@@ -33,11 +39,11 @@ export type SyncJobs = {
    * Ends this worker's own person's claims whose issues the board calls finished;
    * runs in every worker, after the mirror, and asks GitHub nothing.
    */
-  finish?: () => Promise<FinishReport>;
+  finish?: (lease: TickLease) => Promise<FinishReport>;
   /** Reports the board's work to the server; runs after the queue and the report, when there is room. */
-  importer?: () => Promise<ImportReport>;
+  importer?: (lease: TickLease) => Promise<ImportReport>;
   /** Keeps GitHub's pull requests, statuses, branches and runs in step with the server; runs last, when there is room. */
-  forge?: () => Promise<ForgeReport>;
+  forge?: (lease: TickLease) => Promise<ForgeReport>;
 };
 
 /** What the tick did about keeping in step, beside what it did to the queue. */
@@ -65,7 +71,7 @@ export type RunTickDeps = {
    * is handed in rather than reached for, so the worker runs with or without it
    * and neither has to know about the other.
    */
-  audit?: () => Promise<void>;
+  audit?: (lease: TickLease) => Promise<void>;
   sync?: SyncJobs;
 };
 
@@ -91,7 +97,7 @@ export class RunTick {
   readonly #policy: BudgetPolicy;
   readonly #clock: Clock;
   readonly #logger: Logger;
-  readonly #audit: (() => Promise<void>) | null;
+  readonly #audit: ((lease: TickLease) => Promise<void>) | null;
   readonly #sync: SyncJobs | null;
 
   constructor(deps: RunTickDeps) {
@@ -114,6 +120,11 @@ export class RunTick {
    * the work somebody asked for. Any one of them failing is recorded and the rest
    * of the tick goes on. Each runs under the single tick lock, so a pass that is
    * still running when the next tick starts is never joined by a second.
+   *
+   * One thing ends the tick where it stands: finding that another pass took the
+   * lock from this one. Everything after — the drain, the report's stamp, the
+   * reads and what they send — is then the other pass's to do, and doing it here
+   * as well would write beside it, or put off what it is due to do.
    */
   async run(): Promise<WorkerReport> {
     const sync = this.#sync;
@@ -130,47 +141,87 @@ export class RunTick {
     }
     const mayKeepInStep = sync !== null && allowed !== null && allowed.ok;
     if (sync?.mirror !== undefined && (mayKeepInStep || !mirrorWaitsForOwner)) {
-      syncReport.mirror = await this.#locked('the claim mirror', sync.mirror);
+      const mirror = await this.#locked('the claim mirror', sync.mirror);
+      syncReport.mirror = mirror.report;
+      if (mirror.lockLost) {
+        return { ...notRun(LOCK_LOST), lockLost: true, sync: syncReport };
+      }
     }
     if (sync?.finish !== undefined) {
-      syncReport.finish = await this.#locked('ending finished claims', sync.finish);
+      const finish = await this.#locked('ending finished claims', sync.finish);
+      syncReport.finish = finish.report;
+      if (finish.lockLost) {
+        return { ...notRun(LOCK_LOST), lockLost: true, sync: syncReport };
+      }
     }
 
     const report = await this.#drain.run();
-    await this.#maybeAudit(report);
+    if (report.lockLost === true) {
+      return sync === null ? report : { ...report, sync: syncReport };
+    }
+    if (await this.#maybeAudit(report)) {
+      return sync === null ? { ...report, lockLost: true } : { ...report, lockLost: true, sync: syncReport };
+    }
 
     if (mayKeepInStep && sync.importer !== undefined) {
-      syncReport.import = await this.#queueIsFree(report)
-        ? await this.#locked('the import', sync.importer)
-        : { skipped: 'the tick did not get to drain the queue, so nothing is read' };
+      if (await this.#queueIsFree(report)) {
+        const imported = await this.#locked('the import', sync.importer);
+        syncReport.import = imported.report;
+        if (imported.lockLost) {
+          return { ...report, lockLost: true, sync: syncReport };
+        }
+      } else {
+        syncReport.import = { skipped: 'the tick did not get to drain the queue, so nothing is read' };
+      }
     }
     if (mayKeepInStep && sync.forge !== undefined) {
-      syncReport.forge = await this.#queueIsFree(report)
-        ? await this.#locked('the forge pass', sync.forge)
-        : { skipped: 'the tick did not get to drain the queue, so nothing is read' };
+      if (await this.#queueIsFree(report)) {
+        const forged = await this.#locked('the forge pass', sync.forge);
+        syncReport.forge = forged.report;
+        if (forged.lockLost) {
+          return { ...report, lockLost: true, sync: syncReport };
+        }
+      } else {
+        syncReport.forge = { skipped: 'the tick did not get to drain the queue, so nothing is read' };
+      }
     }
     return sync === null ? report : { ...report, sync: syncReport };
   }
 
   /**
-   * Runs one job under the single tick lock. A job that throws is logged and
-   * answered as skipped: keeping in step is never worth losing the tick's own
-   * account of what it did to the queue.
+   * Runs one job under the single tick lock, handing it the lease. A job that
+   * throws is logged and answered as skipped: keeping in step is never worth
+   * losing the tick's own account of what it did to the queue. A job that found
+   * the lock taken is answered as skipped for that reason, and said to have lost it.
    */
-  async #locked<T>(name: string, job: () => Promise<T>): Promise<T | { skipped: string }> {
-    const outcome = await this.#repository.withTickLock(async (): Promise<{ done: T } | { failed: string }> => {
+  async #locked<T>(
+    name: string,
+    job: (lease: TickLease) => Promise<T>,
+  ): Promise<{ report: T | { skipped: string }; lockLost: boolean }> {
+    type Outcome = { done: T } | { failed: string } | { lockLost: true };
+    const outcome = await this.#repository.withTickLock(async (lease): Promise<Outcome> => {
       try {
-        return { done: await job() };
+        return { done: await job(lease) };
       } catch (error) {
+        if (error instanceof TickLockLost) {
+          this.#logger.warn(`${name} stopped: another pass took the tick lock`);
+          return { lockLost: true };
+        }
         const reason = describeUnknown(error);
         this.#logger.error(`${name} failed`, { reason });
         return { failed: reason };
       }
     });
     if (outcome === null) {
-      return { skipped: 'another tick holds the lock' };
+      return { report: { skipped: 'another tick holds the lock' }, lockLost: false };
     }
-    return 'done' in outcome ? outcome.done : { skipped: `${name} failed: ${outcome.failed}` };
+    if ('lockLost' in outcome) {
+      return { report: { skipped: LOCK_LOST }, lockLost: true };
+    }
+    return {
+      report: 'done' in outcome ? outcome.done : { skipped: `${name} failed: ${outcome.failed}` },
+      lockLost: false,
+    };
   }
 
   /** Whether the queue ran and is not waiting out a refusal, which is when anything may read. */
@@ -182,31 +233,44 @@ export class RunTick {
     return pause === null || !pause.isActive(this.#clock.now());
   }
 
-  async #maybeAudit(report: TickReport): Promise<void> {
+  /** Writes the report when it is due; answers whether it found the lock taken by another pass. */
+  async #maybeAudit(report: TickReport): Promise<boolean> {
     const audit = this.#audit;
     if (audit === null || !(await this.#worthReading(report))) {
-      return;
+      return false;
     }
+    const before = await readLastAuditAttemptAt(this.#repository);
+    const attemptedAt = this.#clock.now();
     // Stamped before the pass rather than after it, so that a pass which fails —
     // or which the machine interrupts — still holds the cadence. A report that
     // could not be written is a report worth waiting for, not one worth asking
     // for again in five minutes out of the allowance the queue is pacing itself
     // against.
-    await writeLastAuditAttemptAt(this.#repository, this.#clock.now());
-    const read = await this.#repository.withTickLock(async () => {
+    await writeLastAuditAttemptAt(this.#repository, attemptedAt);
+    const read = await this.#repository.withTickLock(async (lease): Promise<'read' | 'lost'> => {
       try {
-        await audit();
+        await audit(lease);
       } catch (error) {
+        if (error instanceof TickLockLost) {
+          return 'lost';
+        }
         // A report that could not be written is worth a loud line and nothing
         // more: it changes nothing, and losing the tick's own account of the work
         // it did would cost more than the report is worth.
         this.#logger.error('the board report could not be written', { reason: describeUnknown(error) });
       }
-      return true;
+      return 'read';
     });
     if (read === null) {
       this.#logger.info('the board was not read: another tick holds the lock');
     }
+    if (read !== 'lost') {
+      return false;
+    }
+    // The pass that took the lock writes the report; this one's stamp would put it off.
+    await giveBackLastAuditAttemptAt(this.#repository, attemptedAt, before);
+    this.#logger.warn('the board report stopped: another pass took the tick lock');
+    return true;
   }
 
   /**

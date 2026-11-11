@@ -8,12 +8,13 @@ import type { IssueMove } from '../domain/sync/claim-moves.ts';
 import { issueRefOfExternal } from '../domain/sync/external-ref.ts';
 import type { MirrorConfig, SyncConfig } from '../domain/sync-config.ts';
 import { describeUnknown } from './drain-queue.ts';
+import { confirmStillHeld, TickLockLost } from './leased-gateways.ts';
 import { draftAction } from './enqueue-action.ts';
 import type { EnqueueRequest } from './enqueue-action.ts';
 import { everyone } from './mirror-audience.ts';
 import type { Audience, AudienceRefusal, LiveClaims, MirrorAudience } from './mirror-audience.ts';
 import { ItemRefs, LiveClaimsOnce, MemberLogins } from './mirror-lookups.ts';
-import type { ActionRepository, Clock, Logger, MetaWrite } from './ports.ts';
+import type { ActionRepository, Clock, Logger, MetaWrite, TickLease } from './ports.ts';
 import {
   mirrorCursorKey,
   mirrorCursorWrite,
@@ -159,7 +160,13 @@ export class MirrorClaims {
     this.#owned = statusesTheMirrorOwns(deps.mirror.status);
   }
 
-  async execute(): Promise<MirrorReport> {
+  /**
+   * One run under the tick lock the lease stands for. Each page's filings and the
+   * cursor that follows them are written only while the lock is still this run's;
+   * a run that finds it taken throws `TickLockLost` and keeps nothing, so the run
+   * holding the lock reads on from where the cursor stood.
+   */
+  async execute(lease: TickLease): Promise<MirrorReport> {
     const before = await readMirrorRun(this.#repository);
     const stored = await readMirrorCursor(this.#repository, this.#cursorKey);
     const report: MirrorReport = {
@@ -193,12 +200,16 @@ export class MirrorClaims {
           logins,
           audience: answer.audience,
           live: new LiveClaimsOnce(this.#feed),
+          lease,
         });
       } else {
         report.declined = answer.reason;
         refusal = answer.refusal;
       }
     } catch (error) {
+      if (error instanceof TickLockLost) {
+        throw error;
+      }
       report.error = error instanceof BoardQueueError ? error.describe() : describeUnknown(error);
       this.#logger.warn('the claim mirror stopped', { reason: report.error, cursor: report.cursor });
     }
@@ -380,6 +391,7 @@ export class MirrorClaims {
         value: String(filing.asOf),
       });
     }
+    await confirmStillHeld(lookups.lease);
     const written = await this.#repository.insertAll(
       drafted.actions,
       [...drafted.marks, mirrorCursorWrite(this.#cursorKey, cursor)],
@@ -442,4 +454,6 @@ type Lookups = {
   readonly audience: Audience;
   /** The live claims the moves are checked against. */
   readonly live: LiveClaims;
+  /** The tick lock the run holds, confirmed before anything is filed. */
+  readonly lease: TickLease;
 };

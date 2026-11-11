@@ -8,8 +8,9 @@ import type { CoordinationSnapshot, ForgeJob } from './forge-pass-state.ts';
 import type { Forge, ForgeCoordination, ForgeIdentity, ForgeLedger } from './forge-ports.ts';
 import { FollowPullRequests, PullEnds, PullReads, ReconcileReviews, ReportMergeability } from './forge-pulls.ts';
 import { WriteStatuses } from './forge-statuses.ts';
+import { TickLockLost } from './leased-gateways.ts';
 import type { LimiterWait } from './limiter-wait.ts';
-import type { ActionRepository, Clock, Logger, Sleeper } from './ports.ts';
+import type { ActionRepository, Clock, Logger, Sleeper, TickLease } from './ports.ts';
 import { writeForgeRun } from './sync-meta.ts';
 import type { ForgeRepositoryRun, ForgeRun } from './sync-meta.ts';
 
@@ -109,7 +110,12 @@ export class ForgePass {
     ];
   }
 
-  async execute(): Promise<ForgeReport> {
+  /**
+   * One pass under the tick lock the lease stands for. A pass that finds the lock
+   * taken stops where it stands and throws `TickLockLost`, keeping nothing of its
+   * own: the pass that holds the lock now forgets rows and writes the report.
+   */
+  async execute(lease: TickLease): Promise<ForgeReport> {
     const pause = await this.#repository.getPause();
     if (pause !== null && pause.isActive(this.#clock.now())) {
       return { skipped: `the queue is waiting out a refusal until ${pause.until.toISOString()}` };
@@ -130,6 +136,7 @@ export class ForgePass {
     }
     const calls = new ForgeCalls({
       allowance: this.#forge,
+      lease,
       wait: this.#wait,
       settings: this.#settings,
       clock: this.#clock,
@@ -148,6 +155,9 @@ export class ForgePass {
       if (!(error instanceof ForgePassStopped)) {
         throw error;
       }
+    }
+    if (calls.lostTheLock) {
+      throw new TickLockLost();
     }
     const pruned = await this.#ledger.prune(new Date(this.#clock.now().getTime() - KEPT_FOR_MS), PRUNED_PER_PASS);
     const run: ForgeRun = {

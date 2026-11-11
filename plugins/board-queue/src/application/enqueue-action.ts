@@ -209,6 +209,11 @@ export class EnqueueAction {
   /**
    * The waiting action this request became part of, or nothing.
    *
+   * Only the last action on the issue that may still write to it — a held one
+   * included — is a candidate: a request folded into an older one would run at
+   * that one's place in the line, ahead of whatever was filed since, and that work
+   * would then write its older values over it.
+   *
    * The merge is written as one conditional statement in the store, so a worker
    * claiming that very action in between is answered with "no row changed" and
    * this request becomes an action of its own. Reading the action and writing it

@@ -1,11 +1,17 @@
 import { emptyActionCounts } from '../../src/application/action-states.ts';
-import type { ActionCounts, ActionFilter, ActionRepository, MetaWrite } from '../../src/application/ports.ts';
+import type {
+  ActionCounts,
+  ActionFilter,
+  ActionRepository,
+  MetaWrite,
+  TickLease,
+} from '../../src/application/ports.ts';
 import { Action } from '../../src/domain/action.ts';
-import type { ActionProps } from '../../src/domain/action.ts';
+import type { ActionProps, ActionState } from '../../src/domain/action.ts';
 import type { BoardKey } from '../../src/domain/board-directory.ts';
 import type { CachedCatalog, FieldCatalog } from '../../src/domain/catalog.ts';
 import { StaleAction } from '../../src/domain/errors.ts';
-import { holdsItsIssue } from '../../src/domain/issue-order.ts';
+import { STILL_TO_RUN_STATES, holdsItsIssue } from '../../src/domain/issue-order.ts';
 import type { IssueRef } from '../../src/domain/issue-ref.ts';
 import type { QueuePause } from '../../src/domain/queue-pause.ts';
 
@@ -156,13 +162,23 @@ export class InMemoryActionRepository implements ActionRepository {
   }
 
   findCoalescible(kind: string, issueRef: IssueRef, now: Date): Promise<Action | null> {
-    const waiting = this.#ordered().filter((stored) => stored.props.kind === kind
-      && stored.props.state === 'queued'
-      && isPast(stored.props.notBefore, now)
-      && stored.props.issueRef !== null
-      && stored.props.issueRef.equals(issueRef));
-    const first = waiting[0];
-    return Promise.resolve(first === undefined ? null : rebuild(first));
+    const last = this.#lastStillToRunOn(issueRef);
+    if (last === undefined
+      || last.props.kind !== kind
+      || last.props.state !== 'queued'
+      || !isPast(last.props.notBefore, now)) {
+      return Promise.resolve(null);
+    }
+    return Promise.resolve(rebuild(last));
+  }
+
+  /** The last action filed on the issue that may still write to it, held ones included. */
+  #lastStillToRunOn(issueRef: IssueRef): StoredAction | undefined {
+    return this.#ordered()
+      .filter((stored) => stored.props.issueRef !== null
+        && stored.props.issueRef.equals(issueRef)
+        && isStillToRun(stored.props.state))
+      .at(-1);
   }
 
   async coalesceInto(
@@ -184,7 +200,9 @@ export class InMemoryActionRepository implements ActionRepository {
     if (stored === undefined
       || stored.props.state !== 'queued'
       || stored.props.version !== expectedVersion
-      || !isPast(stored.props.notBefore, now)) {
+      || !isPast(stored.props.notBefore, now)
+      || stored.props.issueRef === null
+      || this.#lastStillToRunOn(stored.props.issueRef) !== stored) {
       return Promise.resolve(false);
     }
     stored.props = {
@@ -262,6 +280,11 @@ export class InMemoryActionRepository implements ActionRepository {
     return Promise.resolve();
   }
 
+  deleteMeta(key: string): Promise<void> {
+    this.#meta.delete(key);
+    return Promise.resolve();
+  }
+
   getCatalog(board: BoardKey): Promise<CachedCatalog | null> {
     return Promise.resolve(this.#catalogs.get(board) ?? null);
   }
@@ -277,13 +300,24 @@ export class InMemoryActionRepository implements ActionRepository {
    */
   pretendAnotherTickHolds = false;
 
-  async withTickLock<T>(fn: () => Promise<T>): Promise<T | null> {
+  /**
+   * What another process does to the pass holding the lock when it takes the
+   * lock from it: the holder's lease answers that it is lost from now on.
+   */
+  takeTheLockAway(): void {
+    this.#lockTakenAway = true;
+  }
+
+  #lockTakenAway = false;
+
+  async withTickLock<T>(fn: (lease: TickLease) => Promise<T>): Promise<T | null> {
     if (this.pretendAnotherTickHolds || this.#lockHolders > 0) {
       return null;
     }
     this.#lockHolders += 1;
+    this.#lockTakenAway = false;
     try {
-      return await fn();
+      return await fn({ stillHeld: () => Promise.resolve(!this.#lockTakenAway) });
     } finally {
       this.#lockHolders -= 1;
     }
@@ -294,6 +328,11 @@ export class InMemoryActionRepository implements ActionRepository {
       (one, other) => one.props.createdAt.getTime() - other.props.createdAt.getTime() || one.seq - other.seq,
     );
   }
+}
+
+function isStillToRun(state: ActionState): boolean {
+  const stillToRun: readonly ActionState[] = STILL_TO_RUN_STATES;
+  return stillToRun.includes(state);
 }
 
 function isEarlier(one: StoredAction, other: StoredAction): boolean {

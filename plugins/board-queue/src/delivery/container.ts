@@ -260,8 +260,8 @@ export function buildContainer(options: BuildContainerOptions): Container {
       clock,
       logger,
       ...(config.audit.enabled ? {
-        audit: async () => {
-          await audit.execute();
+        audit: async (lease) => {
+          await audit.execute(lease);
         },
       } : {}),
       ...(syncJobs === undefined ? {} : { sync: syncJobs }),
@@ -342,13 +342,13 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
       logger,
       audience: MIRROR_AUDIENCES[mirror.scope](overrides.identity ?? localIdentity(identityDeps), sync.mirrorOwner),
     });
-    jobs.mirror = () => claims.execute();
+    jobs.mirror = (lease) => claims.execute(lease);
     jobs.mirrorScope = mirror.scope;
   }
   const finish = sync.finish;
   if (finish?.enabled === true) {
     const finishing = new FinishClaims({ claims: coordination, repository, sync, finish, clock, logger });
-    jobs.finish = () => finishing.execute();
+    jobs.finish = (lease) => finishing.execute(lease);
   }
   if (sync.importer.enabled) {
     const cache = new SqliteDependencyCache(dbPath(wiring.stateDir));
@@ -369,7 +369,7 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
       sleeper: wiring.sleeper,
       logger,
     });
-    jobs.importer = () => importer.execute();
+    jobs.importer = (lease) => importer.execute(lease);
   }
   if (sync.forge.enabled) {
     const ledger = new SqliteForgeLedger(dbPath(wiring.stateDir));
@@ -394,7 +394,7 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
       sleeper: wiring.sleeper,
       logger,
     });
-    jobs.forge = () => pass.execute();
+    jobs.forge = (lease) => pass.execute(lease);
   }
   return jobs;
 }

@@ -23,6 +23,9 @@ import { RecordingLogger } from '../fakes/wire-doubles.ts';
 import { boardCatalog } from '../fixtures/board.ts';
 import { syncConfig, syncOf } from '../fixtures/sync.ts';
 import { graphqlBudget } from './tick-fixture.ts';
+import { HELD, leaseLostWhen } from '../fixtures/lease.ts';
+import { TickLockLost } from '../../src/application/leased-gateways.ts';
+import { readImportAttemptAt, readImportRun, writeImportAttemptAt } from '../../src/application/sync-meta.ts';
 
 const FIRST = 'example-org/first-repo';
 const SECOND = 'Example-User/second-repo';
@@ -107,7 +110,7 @@ describe('reporting the board\'s work', () => {
     });
     await it_.ready();
 
-    const run = runOf(await it_.useCase.execute());
+    const run = runOf(await it_.useCase.execute(HELD));
 
     assert.equal(it_.target.batches.length, 1);
     assert.deepEqual(it_.target.batches[0], {
@@ -124,6 +127,34 @@ describe('reporting the board\'s work', () => {
     assert.equal(run.readCost, 1);
   });
 
+  it('sends nothing and keeps nothing once another pass took the tick lock', async () => {
+    const lostWhileReading = harness({ items: [row(12, { Status: 'Todo' }, { blockedByTotal: 1 })] });
+    await lostWhileReading.ready();
+    const lastAttempt = new Date(lostWhileReading.clock.now().getTime() - 24 * 60 * 60 * 1000);
+    await writeImportAttemptAt(lostWhileReading.repository, lastAttempt);
+    // The lock is taken while the board is read, before anything is sent.
+    const lease = leaseLostWhen(() => lostWhileReading.board.calls.includes('readWork'));
+
+    await assert.rejects(() => lostWhileReading.useCase.execute(lease), TickLockLost);
+
+    assert.deepEqual(lostWhileReading.dependencies.asked, [], 'nothing more is read, so no allowance is spent');
+    assert.deepEqual(lostWhileReading.target.batches, []);
+    assert.equal(await readImportRun(lostWhileReading.repository), null);
+    assert.equal(
+      (await readImportAttemptAt(lostWhileReading.repository))?.getTime(),
+      lastAttempt.getTime(),
+      'the stamp is the one the holder left, so its import is not put off',
+    );
+
+    const lostBefore = harness({ items: [row(12, { Status: 'Todo' })] });
+    await lostBefore.ready();
+
+    await assert.rejects(() => lostBefore.useCase.execute(leaseLostWhen(() => true)), TickLockLost);
+
+    assert.equal(await readImportAttemptAt(lostBefore.repository), null, 'the holder\'s import is not put off');
+    assert.deepEqual(lostBefore.board.calls, [], 'nothing is read either');
+  });
+
   it('files nothing in the board queue and writes nothing to the board', async () => {
     const it_ = harness({ items: [row(12, { Status: 'Todo' }, { blockedByTotal: 1 })] });
     it_.dependencies.set('blocked_by', IssueRef.of(FIRST, 12), [
@@ -131,7 +162,7 @@ describe('reporting the board\'s work', () => {
     ]);
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     const counts = await it_.repository.counts();
     assert.equal(Object.values(counts).reduce((sum, count) => sum + count, 0), 0);
@@ -142,7 +173,7 @@ describe('reporting the board\'s work', () => {
     const it_ = harness({ items: [row(12, {}), row(13, {}, { blockedByTotal: 0, subIssuesTotal: 0 })] });
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.deepEqual(it_.dependencies.asked, []);
   });
@@ -151,7 +182,7 @@ describe('reporting the board\'s work', () => {
     const it_ = harness({ items: [row(12, {}, { blockedByTotal: null, subIssuesTotal: null })] });
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.deepEqual(it_.dependencies.asked.map((asked) => asked.list), ['blocked_by', 'sub_issues']);
   });
@@ -163,7 +194,7 @@ describe('reporting the board\'s work', () => {
     ]);
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     const items = it_.target.batches[0]?.items ?? [];
     assert.deepEqual(items[0]?.listing?.blockedBy, ['gh:acme/api#9']);
@@ -178,7 +209,7 @@ describe('reporting the board\'s work', () => {
     ]);
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.deepEqual(it_.target.batches[0]?.items[0]?.listing?.blockedBy, ['gh:example-org/first-repo#20']);
   });
@@ -189,10 +220,10 @@ describe('reporting the board\'s work', () => {
       { ref: IssueRef.of(FIRST, 13), title: 'issue 13', state: 'open' },
     ]);
     await it_.ready();
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
     it_.clock.advanceMinutes(16);
 
-    const second = runOf(await it_.useCase.execute());
+    const second = runOf(await it_.useCase.execute(HELD));
 
     assert.deepEqual(it_.dependencies.asked.map((asked) => asked.etag), [null, '"v1"']);
     assert.equal(second.notModified, 1);
@@ -204,10 +235,10 @@ describe('reporting the board\'s work', () => {
     it_.dependencies.untagged.add(`blocked_by:${IssueRef.of(FIRST, 12).key()}`);
     it_.dependencies.set('blocked_by', IssueRef.of(FIRST, 12), []);
     await it_.ready();
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
     it_.clock.advanceMinutes(16);
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.equal(it_.dependencies.asked.length, 1, 'the issue did not change, so nothing was asked');
   });
@@ -217,9 +248,9 @@ describe('reporting the board\'s work', () => {
     const it_ = harness({ items, importer: { maxRequestsPerTick: 3 } });
     await it_.ready();
 
-    const first = runOf(await it_.useCase.execute());
+    const first = runOf(await it_.useCase.execute(HELD));
     it_.clock.advanceMinutes(16);
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.equal(first.requests, 3);
     assert.deepEqual(it_.dependencies.asked.map((asked) => asked.ref), [
@@ -237,7 +268,7 @@ describe('reporting the board\'s work', () => {
     const it_ = harness({ items });
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.deepEqual(it_.sleeper.slept, [1000]);
   });
@@ -248,7 +279,7 @@ describe('reporting the board\'s work', () => {
     it_.dependencies.failNext(new SecondaryRateLimited(60));
     await it_.ready();
 
-    const run = runOf(await it_.useCase.execute());
+    const run = runOf(await it_.useCase.execute(HELD));
 
     assert.equal(it_.dependencies.asked.length, 1);
     assert.match(run.stoppedBecause ?? '', /burst limiter/);
@@ -262,7 +293,7 @@ describe('reporting the board\'s work', () => {
     it_.dependencies.failNext(new IssueNotFound('example-org/first-repo#1'));
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.equal(it_.dependencies.asked.length, 2);
     assert.equal(await it_.repository.getPause(), null);
@@ -273,7 +304,7 @@ describe('reporting the board\'s work', () => {
     it_.board.fail('readWork', new TransientFailure('the board\'s work answered 502'));
     await it_.ready();
 
-    const run = runOf(await it_.useCase.execute());
+    const run = runOf(await it_.useCase.execute(HELD));
 
     assert.equal(run.complete, false);
     assert.ok(it_.target.batches.every((batch) => !batch.complete));
@@ -284,7 +315,7 @@ describe('reporting the board\'s work', () => {
     it_.board.unreadable = 1;
     await it_.ready();
 
-    const run = runOf(await it_.useCase.execute());
+    const run = runOf(await it_.useCase.execute(HELD));
 
     assert.equal(run.complete, false);
     assert.match(run.incompleteBecause ?? '', /could not be read/);
@@ -294,7 +325,7 @@ describe('reporting the board\'s work', () => {
     const it_ = harness({ items: [] });
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.deepEqual(it_.target.batches[0]?.items, []);
   });
@@ -303,7 +334,7 @@ describe('reporting the board\'s work', () => {
     const it_ = harness({ items: [row(12, {})], remaining: 900 });
     await it_.ready();
 
-    const report = await it_.useCase.execute();
+    const report = await it_.useCase.execute(HELD);
 
     assert.ok('skipped' in report && /reserve/.test(report.skipped));
     assert.deepEqual(it_.board.calls, []);
@@ -312,10 +343,10 @@ describe('reporting the board\'s work', () => {
   it('waits out its own cadence', async () => {
     const it_ = harness({ items: [row(12, {})] });
     await it_.ready();
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
     it_.clock.advanceMinutes(10);
 
-    const report = await it_.useCase.execute();
+    const report = await it_.useCase.execute(HELD);
 
     assert.ok('skipped' in report && /15 minutes/.test(report.skipped));
     assert.equal(it_.target.batches.length, 1);
@@ -333,7 +364,7 @@ describe('reporting the board\'s work', () => {
     });
     await it_.ready();
 
-    const run = runOf(await it_.useCase.execute());
+    const run = runOf(await it_.useCase.execute(HELD));
 
     assert.equal(run.refusedEdges, 1);
     assert.equal(run.complete, true);
@@ -345,7 +376,7 @@ describe('reporting the board\'s work', () => {
     it_.target.fail('putItems', new TransientFailure('the import was refused by the coordination server: 503'));
     await it_.ready();
 
-    const run = runOf(await it_.useCase.execute());
+    const run = runOf(await it_.useCase.execute(HELD));
 
     assert.equal(run.complete, false);
     assert.match(run.stoppedBecause ?? '', /could not be reported/);
@@ -356,7 +387,7 @@ describe('reporting the board\'s work', () => {
     await shrunk.ready();
     await shrunk.repository.setMeta('import.lastCompleteOpen', '3');
 
-    const run = runOf(await shrunk.useCase.execute());
+    const run = runOf(await shrunk.useCase.execute(HELD));
 
     assert.equal(run.complete, false);
     assert.equal(run.open, 1);
@@ -368,7 +399,7 @@ describe('reporting the board\'s work', () => {
     const it_ = harness({ items: [row(1, {}), row(2, {})] });
     await it_.ready();
 
-    await it_.useCase.execute();
+    await it_.useCase.execute(HELD);
 
     assert.equal(await it_.repository.getMeta('import.lastCompleteOpen'), '2');
   });

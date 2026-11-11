@@ -78,14 +78,32 @@ describe('reading the coordination server for the forge jobs', () => {
     assert.deepEqual(await dibs.runHolds(), [{ slot: 'deploy', workflow: 'deploy.yml', sha: 'abc1234def' }]);
   });
 
-  it('takes a repository or base the server does not know as wanting no status', async () => {
+  it('takes a repository or base the server says it does not know as wanting no status', async () => {
     const { dibs, fetcher } = client([
-      { status: 404, body: { error: { code: 'not_found', message: 'No such repository.' } } },
+      { status: 404, body: { error: { code: 'not_found', message: 'The project lists no repository \'web\'.' } } },
+      { status: 404, body: { error: { code: 'not_found', message: '\'release/2\' is not a branch.' } } },
     ]);
 
     assert.equal(await dibs.wantedStatus('web', 'release/2'), null);
     assert.equal(fetcher.calls[0]?.url, `${SERVER}/v1/pr-status?repo=web&base=release%2F2`);
+    assert.equal(await dibs.wantedStatus('web', 'release/2'), null);
   });
+
+  for (const [what, response] of [
+    ['a 404 with no body', { status: 404, bodyText: '' }],
+    ['a proxy\'s page', { status: 404, headers: { 'content-type': 'text/html' }, bodyText: '<html><body>Not Found</body></html>' }],
+    ['a proxy\'s JSON', { status: 404, body: { message: 'Not Found' } }],
+    ['a server without the route', { status: 404, body: { error: { code: 'not_found', message: 'There is no such route.' } } }],
+    ['another refusal answered as 404', { status: 404, body: { error: { code: 'no_such_project', message: 'There is no project \'web\'.' } } }],
+    ['a not_found naming neither', { status: 404, body: { error: { code: 'not_found', message: 'There is no work item 7.' } } }],
+  ] as const) {
+    it(`reads ${what} as a failure, never as wanting no status`, async () => {
+      const { dibs } = client([response]);
+
+      await assert.rejects(() => dibs.wantedStatus('web', 'release/2'), (error: unknown) =>
+        error instanceof TransientFailure && /404/.test(error.message));
+    });
+  }
 
   it('refuses a refusal of another kind, naming the server\'s code', async () => {
     const { dibs } = client([{ status: 403, body: { error: { code: 'forbidden', message: 'Your role does not allow this.' } } }]);

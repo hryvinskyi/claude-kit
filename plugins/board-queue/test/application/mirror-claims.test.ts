@@ -12,6 +12,8 @@ import { InMemoryActionRepository } from '../fakes/in-memory-action-repository.t
 import { FakeClock } from '../fakes/in-memory-time.ts';
 import { RecordingLogger } from '../fakes/wire-doubles.ts';
 import { SERVER, syncConfig, syncOf } from '../fixtures/sync.ts';
+import { HELD, leaseLostWhen } from '../fixtures/lease.ts';
+import { TickLockLost } from '../../src/application/leased-gateways.ts';
 
 const SYNC = syncOf();
 const CURSOR = mirrorCursorKey(SYNC.server, SYNC.project);
@@ -83,7 +85,7 @@ describe('following the claim log', () => {
     await following();
     feed.log(claim(3, 'claimed', 41, 'alice'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     const actions = await repository.list({});
     assert.deepEqual(actions.map((action) => [action.kind, action.payload]), [
@@ -99,14 +101,26 @@ describe('following the claim log', () => {
     assert.equal(await repository.getMeta(CURSOR), '3');
   });
 
+  it('files nothing and moves no cursor once another pass took the tick lock', async () => {
+    const { repository, feed, mirrorClaims, following } = harness();
+    await following();
+    feed.log(claim(3, 'claimed', 41, 'alice'));
+
+    await assert.rejects(() => mirrorClaims.execute(leaseLostWhen(() => true)), TickLockLost);
+
+    assert.deepEqual(await repository.list({}), []);
+    assert.equal(await repository.getMeta(CURSOR), '0', 'the pass that holds the lock reads from where it stood');
+    assert.equal(await readMirrorRun(repository), null);
+  });
+
   it('files nothing new when the same page is read again', async () => {
     const { repository, feed, mirrorClaims, following } = harness();
     await following();
     feed.log(claim(3, 'claimed', 41, 'alice'));
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
     await following();
 
-    const replay = await mirrorClaims.execute();
+    const replay = await mirrorClaims.execute(HELD);
 
     assert.equal((await repository.list({})).length, 2);
     assert.equal(replay.filed, 0);
@@ -116,12 +130,12 @@ describe('following the claim log', () => {
     const { repository, feed, mirrorClaims, mirrorWith, following } = harness();
     await following();
     feed.log(claim(1, 'claimed', 41, 'alice'), claim(2, 'released', 41, 'alice'), claim(3, 'claimed', 41, 'bob'));
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
     await following();
 
     // The same log read again, two events a page: the first page ends on the
     // release, a state older than the one already filed.
-    const replay = await mirrorWith(2).execute();
+    const replay = await mirrorWith(2).execute(HELD);
 
     const statuses = (await repository.list({ kind: 'board.set-fields' })).map((action) => action.payload);
     assert.deepEqual(statuses, [status(12, 'In Progress')], 'the release in the middle was not filed');
@@ -132,10 +146,10 @@ describe('following the claim log', () => {
     const { repository, feed, mirrorClaims, following } = harness();
     await following();
     feed.log(claim(3, 'claimed', 41, 'alice'));
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
     feed.log(claim(4, 'released', 41, 'alice'));
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     assert.deepEqual(feed.pagesAskedFrom, [0, 3, 3, 4], 'each run asks once more and finds the cursor still');
     const keys = (await repository.list({ kind: 'board.set-fields' })).map((action) => action.dedupeKey);
@@ -151,7 +165,7 @@ describe('following the claim log', () => {
       claim(3, 'claimed', 41, 'bob'),
     );
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     const actions = await repository.list({});
     assert.deepEqual(actions.map((action) => action.payload), [
@@ -165,7 +179,7 @@ describe('following the claim log', () => {
     await following();
     feed.log({ id: 1, kind: 'hidden' }, { id: 2, kind: 'hidden' }, { id: 3, kind: 'hidden' }, claim(4, 'claimed', 41, 'alice'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.deepEqual(feed.pagesAskedFrom, [0, 2, 4]);
     assert.equal(report.cursor, 4);
@@ -177,7 +191,7 @@ describe('following the claim log', () => {
     await following();
     feed.log({ id: 1, kind: 'hidden' }, { id: 2, kind: 'other' });
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.equal(report.events, 1);
     assert.equal(report.filed, 0);
@@ -189,7 +203,7 @@ describe('following the claim log', () => {
     await following();
     feed.log(claim(1, 'claimed', 42, 'alice'), claim(2, 'claimed', 43, 'alice'), claim(3, 'claimed', 44, 'alice'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.equal((await repository.list({})).length, 0);
     assert.equal(report.ignored, 3);
@@ -202,7 +216,7 @@ describe('following the claim log', () => {
     feed.log(claim(1, 'claimed', 46, 'alice'), claim(2, 'claimed', 41, 'alice'));
     feed.fail('itemRef', new TransientFailure('the work item 46 answered 500'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.equal(report.unresolved, 1);
     assert.equal(report.filed, 2);
@@ -213,10 +227,10 @@ describe('following the claim log', () => {
     const { feed, mirrorClaims, following } = harness();
     await following();
     feed.log(claim(1, 'claimed', 41, 'alice'), claim(2, 'claimed', 45, 'bob'));
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
     feed.log(claim(3, 'released', 41, 'alice'));
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     assert.equal(feed.calls.filter((call) => call === 'itemRef').length, 2);
   });
@@ -226,7 +240,7 @@ describe('following the claim log', () => {
     await following();
     feed.log(claim(1, 'claimed', 41, 'carol'));
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     assert.deepEqual((await repository.list({})).map((action) => action.kind), ['board.set-fields']);
     assert.ok(logger.lines.some((line) => /names no GitHub login/.test(line.message)));
@@ -236,11 +250,11 @@ describe('following the claim log', () => {
     const { repository, feed, mirrorClaims, following } = harness();
     await following();
     feed.log(claim(1, 'claimed', 41, 'bob'));
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
     feed.forget('bob');
     feed.log(claim(2, 'taken_over', 41, 'alice', 'bob'));
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     const assignments = await repository.list({ kind: 'issue.assignees' });
     assert.deepEqual(assignments[1]?.payload, {
@@ -255,10 +269,10 @@ describe('following the claim log', () => {
     const { repository, feed, mirrorClaims, following } = harness();
     await following();
     feed.log(claim(1, 'claimed', 41, 'bob'));
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
     feed.log(claim(2, 'released', 41, 'bob'));
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     assert.deepEqual((await repository.list({})).map((action) => action.payload), [
       status(12, 'In Progress'),
@@ -272,7 +286,7 @@ describe('following the claim log', () => {
     await following();
     feed.log(claim(1, 'claimed', 41, 'alice'));
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     assert.deepEqual((await repository.list({})).map((action) => action.kind), ['board.set-fields']);
     assert.equal(feed.calls.includes('members'), false);
@@ -284,7 +298,7 @@ describe('following the claim log', () => {
     feed.log(claim(1, 'claimed', 41, 'alice'));
     feed.fail('page', new TransientFailure('the event log could not be reached: no answer within the deadline'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.match(report.error ?? '', /could not be reached/);
     assert.equal((await repository.list({})).length, 0);
@@ -298,12 +312,12 @@ describe('following the claim log', () => {
     feed.log(claim(1, 'claimed', 41, 'alice'));
     repository.failNextBatchWith = new Error('the disk is full');
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.match(report.error ?? '', /disk is full/);
     assert.equal((await repository.list({})).length, 0);
     assert.equal(await repository.getMeta(CURSOR), '0');
-    const again = await mirrorClaims.execute();
+    const again = await mirrorClaims.execute(HELD);
     assert.equal(again.filed, 2, 'the next run files the page it could not file before');
   });
 
@@ -313,7 +327,7 @@ describe('following the claim log', () => {
     feed.log(...Array.from({ length: 500 }, (_, index) => ({ id: index + 1, kind: 'other' as const })));
     feed.log(claim(501, 'claimed', 41, 'alice'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.deepEqual(feed.pagesAskedFrom, [0, 500, 501]);
     assert.equal(report.events, 501);
@@ -325,7 +339,7 @@ describe('following the claim log', () => {
     await repository.setMeta(CURSOR, 'forty-two');
     feed.log(claim(1, 'claimed', 41, 'alice'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.match(report.error ?? '', /reads "forty-two", which is not a position in the log/);
     assert.deepEqual(feed.calls, []);
@@ -339,7 +353,7 @@ describe('starting from the head of the log', () => {
     feed.log(claim(1, 'claimed', 41, 'alice'), claim(2, 'released', 41, 'alice'), claim(3, 'claimed', 45, 'bob'));
     feed.holds(45, 'bob', true);
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     const actions = await repository.list({});
     assert.deepEqual(actions.map((action) => [action.dedupeKey, action.payload]), [
@@ -357,7 +371,7 @@ describe('starting from the head of the log', () => {
     });
     feed.holds(41, 'alice', true);
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     const [first] = await repository.list({ kind: 'board.set-fields' });
     assert.deepEqual(first?.payload, {
@@ -372,10 +386,10 @@ describe('starting from the head of the log', () => {
     const { repository, feed, mirrorClaims } = harness();
     feed.log(claim(1, 'claimed', 41, 'alice'));
     feed.holds(41, 'alice');
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
     feed.log(claim(2, 'released', 41, 'alice'));
 
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
 
     const statuses = (await repository.list({ kind: 'board.set-fields' })).map((action) => action.payload);
     assert.deepEqual(statuses, [status(12, 'In Progress'), status(12, 'Todo')]);
@@ -388,7 +402,7 @@ describe('starting from the head of the log', () => {
     feed.prunedThrough = 5;
     feed.holds(45, 'bob');
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.equal(report.cursorExpired, null);
     assert.equal(report.startedFromHead?.event, 11);
@@ -404,7 +418,7 @@ describe('starting from the head of the log', () => {
     feed.prunedThrough = 5;
     feed.fail('liveClaims', new TransientFailure('the live claims could not be reached'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.deepEqual(report.cursorExpired, { at: '2026-03-02T09:00:00.000Z', prunedThrough: 5 });
     assert.equal(await repository.getMeta(CURSOR), '2');
@@ -418,7 +432,7 @@ describe('filing only the moves of the person this worker runs as', () => {
     await following();
     feed.log(claim(3, 'claimed', 41, 'alice'), claim(4, 'claimed', 45, 'bob')).holds(41, 'alice').holds(45, 'bob');
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     const actions = await repository.list({});
     assert.deepEqual(actions.map((action) => [action.kind, action.payload]), [
@@ -440,8 +454,8 @@ describe('filing only the moves of the person this worker runs as', () => {
       worker.feed.log(...events).holds(41, 'bob');
     }
 
-    await alice.mirrorClaims.execute();
-    await bob.mirrorClaims.execute();
+    await alice.mirrorClaims.execute(HELD);
+    await bob.mirrorClaims.execute(HELD);
 
     assert.deepEqual(await alice.repository.list({}), []);
     assert.deepEqual((await bob.repository.list({})).map((action) => action.payload), [
@@ -459,8 +473,8 @@ describe('filing only the moves of the person this worker runs as', () => {
       worker.feed.log(forcedRelease(3, 41, 'alice', 'carol'), forcedRelease(4, 45, 'alice', null));
     }
 
-    await admin.mirrorClaims.execute();
-    await holder.mirrorClaims.execute();
+    await admin.mirrorClaims.execute(HELD);
+    await holder.mirrorClaims.execute(HELD);
 
     assert.deepEqual((await admin.repository.list({ kind: 'board.set-fields' })).map((action) => action.payload), [
       status(12, 'Todo'),
@@ -474,7 +488,7 @@ describe('filing only the moves of the person this worker runs as', () => {
     const { repository, feed, mirrorClaims } = harness({ ownLogin: 'bob-gh' });
     feed.log(claim(3, 'claimed', 41, 'alice'), claim(4, 'claimed', 45, 'bob')).holds(41, 'alice').holds(45, 'bob');
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.deepEqual((await repository.list({ kind: 'board.set-fields' })).map((action) => action.payload), [
       status(13, 'In Progress'),
@@ -488,8 +502,8 @@ describe('filing only the moves of the person this worker runs as', () => {
     await following();
     feed.log(claim(3, 'claimed', 41, 'alice'));
 
-    const first = await mirrorClaims.execute();
-    const second = await mirrorClaims.execute();
+    const first = await mirrorClaims.execute(HELD);
+    const second = await mirrorClaims.execute(HELD);
 
     assert.match(first.declined ?? '', /this worker runs as dave-gh, and no member of the project names that GitHub login/);
     assert.equal(second.declined, first.declined);
@@ -508,9 +522,9 @@ describe('filing only the moves of the person this worker runs as', () => {
     twice.feed.member('alicia', 'ALICE-gh');
 
     const [unreadRun, nobodyRun, twiceRun] = await Promise.all([
-      unread.mirrorClaims.execute(),
-      nobody.mirrorClaims.execute(),
-      twice.mirrorClaims.execute(),
+      unread.mirrorClaims.execute(HELD),
+      nobody.mirrorClaims.execute(HELD),
+      twice.mirrorClaims.execute(HELD),
     ]);
 
     assert.match(unreadRun.declined ?? '', /could not be read: gh is not installed/);
@@ -524,7 +538,7 @@ describe('filing only the moves of the person this worker runs as', () => {
     const { feed, mirrorClaims } = harness({ ownLogin: 'bob-gh' });
     feed.fail('members', new TransientFailure('the members could not be reached'));
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.match(report.error ?? '', /the members could not be reached/);
     assert.equal(report.declined, null);
@@ -539,7 +553,7 @@ describe('filing only the moves of the person this worker runs as', () => {
     await following();
     feed.log(claim(3, 'claimed', 41, 'bob'), forcedRelease(4, 41, 'bob', 'carol'));
 
-    const report = await mirrorWith(1).execute();
+    const report = await mirrorWith(1).execute(HELD);
 
     assert.deepEqual(await repository.list({}), []);
     assert.equal(report.staleMoves, 1);
@@ -557,8 +571,8 @@ describe('filing only the moves of the person this worker runs as', () => {
       worker.feed.log(forcedRelease(6, 41, 'dave', null));
     }
 
-    const filed = await owner.mirrorClaims.execute();
-    const passed = await bob.mirrorClaims.execute();
+    const filed = await owner.mirrorClaims.execute(HELD);
+    const passed = await bob.mirrorClaims.execute(HELD);
 
     assert.deepEqual((await owner.repository.list({})).map((action) => action.payload), [
       status(12, 'Todo'),
@@ -573,7 +587,7 @@ describe('filing only the moves of the person this worker runs as', () => {
     await following();
     feed.log(claim(3, 'claimed', 41, 'carol'), claim(4, 'claimed', 45, 'carol')).holds(41, 'carol');
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.deepEqual((await repository.list({ kind: 'board.set-fields' })).map((action) => action.payload), [
       status(12, 'In Progress'),
@@ -586,8 +600,8 @@ describe('filing only the moves of the person this worker runs as', () => {
     const { logger, mirrorClaims, following } = harness({ ownLogin: 'bob-gh', owner: 'alcie-gh' });
     await following();
 
-    const first = await mirrorClaims.execute();
-    await mirrorClaims.execute();
+    const first = await mirrorClaims.execute(HELD);
+    await mirrorClaims.execute(HELD);
 
     assert.match(first.ownerWarning ?? '', /no member of the project names alcie-gh, the configured owner/);
     assert.equal(logger.lines.filter((line) => line.message === 'the configured owner is no member of the project').length, 2);
@@ -596,8 +610,8 @@ describe('filing only the moves of the person this worker runs as', () => {
   it('logs a login that cannot be read at every run', async () => {
     const { logger, mirrorClaims } = harness({ ownLogin: null });
 
-    await mirrorClaims.execute();
-    await mirrorClaims.execute();
+    await mirrorClaims.execute(HELD);
+    await mirrorClaims.execute(HELD);
 
     assert.equal(logger.lines.filter((line) => line.message === 'the claim mirror files nothing on this worker').length, 2);
   });

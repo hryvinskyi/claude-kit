@@ -16,12 +16,24 @@ import os from 'node:os';
 export interface ProcessTable {
   /** The place process ids are counted in: this machine and, where the system has them, its pid namespace. */
   here(): string;
-  /** When the process started, as the system words it; null when no such process is visible here. */
+  /**
+   * When the process started, worded the same by every process on this machine
+   * whatever its language or time zone, so two readings of one process compare
+   * equal; null when no such process is visible here.
+   */
   startOf(pid: number): string | null;
 }
 
 /** A start time the system would not say, for a process it does say is there. */
 export const UNKNOWN_START = 'unknown';
+
+/**
+ * How `ps` is asked for a start time: in the C locale and in universal time. Its
+ * answer is a date spelled in the asking process's language and time zone, so a
+ * pass run from a shell in another locale, or by a scheduler that sets none,
+ * would otherwise read one live process as started at another moment.
+ */
+const PS_ENVIRONMENT = { LC_ALL: 'C', LANG: 'C', TZ: 'UTC' } as const;
 
 /**
  * The machine's own process table. On Linux both answers come from `/proc`; on a
@@ -52,6 +64,7 @@ export class LocalProcessTable implements ProcessTable {
       const started = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        env: { ...process.env, ...PS_ENVIRONMENT },
       }).trim();
       return started === '' ? null : started;
     } catch {

@@ -9,6 +9,8 @@ import { InMemoryActionRepository } from '../fakes/in-memory-action-repository.t
 import { FakeClock } from '../fakes/in-memory-time.ts';
 import { RecordingLogger } from '../fakes/wire-doubles.ts';
 import { SERVER, syncOf } from '../fixtures/sync.ts';
+import { HELD, leaseLostWhen } from '../fixtures/lease.ts';
+import { TickLockLost } from '../../src/application/leased-gateways.ts';
 
 const SYNC = syncOf();
 const SIGHTINGS = finishSightingsKey(SYNC.server, SYNC.project);
@@ -48,10 +50,10 @@ describe('letting claims go as the board moves their work on', () => {
     server.heldBy('alice', heldClaim(41, 'In Progress'))
       .heldBy('alice', heldClaim(42, 'In Progress'))
       .heldBy('bob', heldClaim(43, 'In Progress'));
-    await finish.execute();
+    await finish.execute(HELD);
 
     server.heldBy('alice', heldClaim(41, 'Ready for QA')).heldBy('bob', heldClaim(43, 'Ready for QA'));
-    const report = await finish.execute();
+    const report = await finish.execute(HELD);
 
     assert.deepEqual(server.givenUp, [[41, AREAS]], 'bob\'s claim is left to bob\'s worker');
     assert.deepEqual(server.completed, [], 'the item stays held, so the work can be taken up again');
@@ -65,25 +67,42 @@ describe('letting claims go as the board moves their work on', () => {
   it('completes the claim once its issue is done or closed, after its areas were given up', async () => {
     const { repository, server, finish } = harness();
     server.heldBy('alice', heldClaim(41, 'In Progress')).heldBy('alice', heldClaim(42, 'In Progress'));
-    await finish.execute();
+    await finish.execute(HELD);
     server.heldBy('alice', heldClaim(41, 'Ready for QA'));
-    await finish.execute();
+    await finish.execute(HELD);
 
     server.heldBy('alice', heldClaim(41, 'Done', { areas: [] }))
       .heldBy('alice', heldClaim(42, 'In Progress', { closed: true }));
-    const report = await finish.execute();
+    const report = await finish.execute(HELD);
 
     assert.deepEqual(server.completed, [41, 42]);
     assert.deepEqual(report.completed, ['gh:example-org/first-repo#41', 'gh:example-org/first-repo#42']);
     assert.equal((await readSightings(repository, SIGHTINGS)).size, 0);
   });
 
+  it('lets nothing more go, and keeps nothing it saw, once another pass took the tick lock', async () => {
+    const { repository, server, finish } = harness();
+    server.heldBy('alice', heldClaim(41, 'In Progress')).heldBy('alice', heldClaim(42, 'In Progress'));
+    await finish.execute(HELD);
+    const runBefore = await readFinishRun(repository);
+    const seenBefore = await readSightings(repository, SIGHTINGS);
+    server.heldBy('alice', heldClaim(41, 'Ready for QA')).heldBy('alice', heldClaim(42, 'Ready for QA'));
+    // The lock is taken the moment the first claim was let go.
+    const lease = leaseLostWhen(() => server.givenUp.length > 0);
+
+    await assert.rejects(() => finish.execute(lease), TickLockLost);
+
+    assert.deepEqual(server.givenUp, [[41, AREAS]], 'the second claim is left to the pass that holds the lock');
+    assert.deepEqual(await readFinishRun(repository), runBefore);
+    assert.deepEqual(await readSightings(repository, SIGHTINGS), seenBefore);
+  });
+
   it('lets nothing go the first time it sees a claim, so work taken up again after QA keeps its areas', async () => {
     const { server, finish } = harness();
     server.heldBy('alice', heldClaim(41, 'Ready for QA'));
 
-    await finish.execute();
-    const again = await finish.execute();
+    await finish.execute(HELD);
+    const again = await finish.execute(HELD);
 
     assert.deepEqual(server.givenUp, []);
     assert.deepEqual(again.handedOn, []);
@@ -92,10 +111,10 @@ describe('letting claims go as the board moves their work on', () => {
   it('counts a claim its holder let go of in the meantime, and forgets it', async () => {
     const { repository, server, finish } = harness();
     server.heldBy('alice', heldClaim(41, 'In Progress'));
-    await finish.execute();
+    await finish.execute(HELD);
     server.heldBy('alice', heldClaim(41, 'Ready for QA')).goneOnCompletion.add(41);
 
-    const report = await finish.execute();
+    const report = await finish.execute(HELD);
 
     assert.deepEqual(report.handedOn, []);
     assert.equal(report.gone, 1);
@@ -105,11 +124,11 @@ describe('letting claims go as the board moves their work on', () => {
   it('makes a call the server could not answer again at the next run', async () => {
     const { server, finish } = harness();
     server.heldBy('alice', heldClaim(41, 'In Progress'));
-    await finish.execute();
+    await finish.execute(HELD);
     server.heldBy('alice', heldClaim(41, 'Ready for QA')).fail('giveUpAreas', new TransientFailure('the server did not answer'));
 
-    const failed = await finish.execute();
-    const retried = await finish.execute();
+    const failed = await finish.execute(HELD);
+    const retried = await finish.execute(HELD);
 
     assert.match(failed.error ?? '', /did not answer/);
     assert.deepEqual(retried.handedOn, ['gh:example-org/first-repo#41']);
@@ -120,7 +139,7 @@ describe('letting claims go as the board moves their work on', () => {
     const { server, finish } = harness();
     server.tokenHolder = null;
 
-    const report = await finish.execute();
+    const report = await finish.execute(HELD);
 
     assert.match(report.declined ?? '', /integration, not a person/);
     assert.deepEqual(server.calls, ['holder']);
@@ -130,7 +149,7 @@ describe('letting claims go as the board moves their work on', () => {
     const { repository, server, finish } = harness();
     server.fail('held', new TransientFailure(`${SERVER} could not be reached`));
 
-    const report = await finish.execute();
+    const report = await finish.execute(HELD);
 
     assert.match(report.error ?? '', /could not be reached/);
     assert.equal((await readFinishRun(repository))?.error, report.error);

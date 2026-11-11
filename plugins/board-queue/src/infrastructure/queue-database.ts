@@ -13,6 +13,15 @@ export const READER_GENERATION = 1;
 /** The layout this version writes; it only ever grows, and older readers never look at it. */
 export const LAYOUT_REVISION = 4;
 
+/** How long a statement waits for another process's lock on the file before it fails. */
+const BUSY_TIMEOUT_MS = 5000;
+
+/** How long to wait before asking again to switch the log on, after SQLite said the file was locked. */
+const SWITCH_RETRY_MS = 20;
+
+/** SQLite's primary result code for a lock another connection holds. */
+const SQLITE_BUSY = 5;
+
 const READER_GENERATION_KEY = 'schema_version';
 const LAYOUT_REVISION_KEY = 'layout_revision';
 
@@ -184,14 +193,16 @@ type Found = {
  * one copy, taken before either of them changed anything.
  */
 export function openQueueDatabase(file: string): DatabaseSync {
-  const db = new DatabaseSync(file);
+  // The wait is set as the connection is made, before it runs a single statement:
+  // switching the log on, reading the layout and every step of bringing it up to
+  // date each meet another process's lock now and then — a writer, or the last
+  // connection to close checkpointing the log — and without a wait the first such
+  // meeting fails the open outright instead of waiting its turn.
+  const db = new DatabaseSync(file, { timeout: BUSY_TIMEOUT_MS });
   narrowTo(file);
-  // Several processes read and write this file; the log lets them do so at once,
-  // and the timeout makes a writer wait for the current one instead of failing.
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA busy_timeout = 5000');
-  db.exec('PRAGMA foreign_keys = ON');
   try {
+    switchOnTheLog(db);
+    db.exec('PRAGMA foreign_keys = ON');
     const found = readFound(db);
     refuseNewer(found);
     if (isDue(found)) {
@@ -209,6 +220,49 @@ export function openQueueDatabase(file: string): DatabaseSync {
   narrowTo(`${file}-wal`);
   narrowTo(`${file}-shm`);
   return db;
+}
+
+/**
+ * Puts the file in write-ahead-log mode, which lets several processes read and
+ * write it at once.
+ *
+ * A file already in that mode is left alone. Switching one that is not needs the
+ * file to itself, and SQLite answers "locked" at once, without the wait, when
+ * another process is in the middle of the same switch or of a read the switch
+ * would upset — which is what several processes opening an older file at the same
+ * moment do. Such an answer is waited out here, for as long as any other lock is.
+ */
+function switchOnTheLog(db: DatabaseSync): void {
+  const deadline = Date.now() + BUSY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      if (journalMode(db) !== 'wal') {
+        db.exec('PRAGMA journal_mode = WAL');
+      }
+      return;
+    } catch (error) {
+      if (!isBusy(error) || Date.now() >= deadline) {
+        throw error;
+      }
+      pause(SWITCH_RETRY_MS);
+    }
+  }
+}
+
+function journalMode(db: DatabaseSync): string | null {
+  const mode = db.prepare('PRAGMA journal_mode').get()?.['journal_mode'];
+  return typeof mode === 'string' ? mode.toLowerCase() : null;
+}
+
+/** SQLite's "busy" and every extended code built on it. */
+function isBusy(error: unknown): boolean {
+  return error instanceof Error && 'errcode' in error && typeof error.errcode === 'number'
+    && (error.errcode & 0xff) === SQLITE_BUSY;
+}
+
+/** Waits without returning to the event loop: the open it serves is synchronous, as SQLite's own wait is. */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function migrate(db: DatabaseSync): void {

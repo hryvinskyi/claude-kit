@@ -10,6 +10,7 @@ import { InMemoryActionRepository } from '../fakes/in-memory-action-repository.t
 import { FakeClock } from '../fakes/in-memory-time.ts';
 import { RecordingLogger } from '../fakes/wire-doubles.ts';
 import { SERVER, syncConfig, syncOf } from '../fixtures/sync.ts';
+import { HELD } from '../fixtures/lease.ts';
 
 const SYNC = syncOf();
 
@@ -73,7 +74,7 @@ describe('following the real shapes of the coordination server\'s log', () => {
       logger: new RecordingLogger(),
     });
 
-    const report = await mirrorClaims.execute();
+    const report = await mirrorClaims.execute(HELD);
 
     assert.deepEqual(fetcher.calls.map((call) => `${call.method} ${call.url.slice(SERVER.length)}`), [
       'GET /v1/events?after=6&limit=500',

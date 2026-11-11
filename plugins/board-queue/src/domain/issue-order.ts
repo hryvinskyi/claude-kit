@@ -14,8 +14,22 @@ import type { Action, ActionState } from './action.ts';
  * queue, often a deploy days away, and it was filed knowing that; it starts to
  * hold its issue once it is released and becomes queued. Done, skipped and
  * cancelled have ended and hold nothing.
+
  */
 export const ISSUE_HOLDING_STATES = ['queued', 'running', 'failed', 'blocked'] as const satisfies readonly ActionState[];
+
+/**
+ * The states of an action that may still write to its issue: those that hold it,
+ * and held, which writes once it is released.
+ *
+ * A request folded into an older action runs at that action's place in the line,
+ * so it is folded only into the last action on its issue in one of these states:
+ * folding it past one would let that one's older values land after the request's.
+ * That includes a held action: released before the next drain, it takes its place
+ * in the line between the two requests it was filed between. Released later, it
+ * writes after whatever ran meanwhile — which is what holding it means.
+ */
+export const STILL_TO_RUN_STATES = [...ISSUE_HOLDING_STATES, 'held'] as const satisfies readonly ActionState[];
 
 /** The states that hold an issue until a person retries or cancels the action. */
 const STOPPED_STATES: readonly ActionState[] = ['failed', 'blocked'];

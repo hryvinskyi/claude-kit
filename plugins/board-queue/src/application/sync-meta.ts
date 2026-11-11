@@ -293,6 +293,22 @@ export async function writeImportAttemptAt(repository: ActionRepository, at: Dat
   await repository.setMeta(IMPORT_LAST_ATTEMPT_AT, at.toISOString());
 }
 
+/**
+ * Puts back the stamp a run found before it wrote its own, while the stamp is
+ * still the one it wrote. A run that lost the tick lock imported nothing, and its
+ * stamp would put off the import the pass holding the lock is due to make.
+ */
+export async function giveBackImportAttemptAt(repository: ActionRepository, ours: Date, before: Date | null): Promise<void> {
+  if ((await readImportAttemptAt(repository))?.getTime() !== ours.getTime()) {
+    return;
+  }
+  if (before === null) {
+    await repository.deleteMeta(IMPORT_LAST_ATTEMPT_AT);
+  } else {
+    await writeImportAttemptAt(repository, before);
+  }
+}
+
 /** Why this worker declined to keep in step at its last tick, or nothing when it did not decline. */
 export async function readSyncRefusal(repository: ActionRepository): Promise<SyncRefusal | null> {
   return readJson(repository, SYNC_REFUSED, RefusalSchema);

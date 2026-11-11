@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 import { CancelAction } from '../../src/application/cancel-action.ts';
 import { RetryAction } from '../../src/application/retry-action.ts';
+import { BoardRouter } from '../../src/application/board-router.ts';
 import { DrainQueue } from '../../src/application/drain-queue.ts';
+import type { TickReport } from '../../src/application/drain-queue.ts';
+import type { IssueCommentView } from '../../src/application/ports.ts';
 import { EnqueueAction } from '../../src/application/enqueue-action.ts';
 import { BoardDirectory } from '../../src/domain/board-directory.ts';
 import { readLastTickAt, readSecondaryHits } from '../../src/application/queue-meta.ts';
@@ -19,11 +25,35 @@ import {
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { marker } from '../../src/domain/kinds/posts.ts';
 import { QueuePause } from '../../src/domain/queue-pause.ts';
+import { Action } from '../../src/domain/action.ts';
+import type { ProcessTable } from '../../src/infrastructure/process-table.ts';
+import { SqliteActionRepository } from '../../src/infrastructure/sqlite-action-repository.ts';
+import { FakeIssueGateway } from '../fakes/fake-issue-gateway.ts';
 import { seedItem } from '../fakes/fake-board-gateway.ts';
 import { FIRST, RESET, graphqlBudget, setFields, tickFixture } from './tick-fixture.ts';
 import type { TickFixture } from './tick-fixture.ts';
 
 const twelve = IssueRef.of(FIRST, 12);
+
+/** This process, seen as having started at the moment given. */
+function table(startOf: () => string): ProcessTable {
+  return { here: () => 'host:pid:[1]', startOf };
+}
+
+/** Issues whose comment listing lets something else happen after it answers, once. */
+class ListingThenWaiting extends FakeIssueGateway {
+  afterListing: (() => Promise<void>) | null = null;
+
+  override async listComments(ref: IssueRef, since: Date | null): Promise<IssueCommentView[]> {
+    const seen = await super.listComments(ref, since);
+    const after = this.afterListing;
+    this.afterListing = null;
+    if (after !== null) {
+      await after();
+    }
+    return seen;
+  }
+}
 const thirteen = IssueRef.of(FIRST, 13);
 const fourteen = IssueRef.of(FIRST, 14);
 
@@ -356,6 +386,96 @@ describe('DrainQueue and the one lock', () => {
     assert.equal(report.done, 1);
     assert.equal(await tick.repository.getPause(), null);
     assert.equal(await readSecondaryHits(tick.repository), 0);
+  });
+
+  it('stops without writing once another pass took the lock, and puts the action it claimed back', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', {}), seedItem(thirteen, 'item-8', {})] });
+    await tick.file({ id: 'a-1', payload: setFields(12, { severity: 'S2' }) });
+    await tick.file({ id: 'a-2', payload: setFields(13, { severity: 'S2' }) });
+    // The pass reads before it writes; another pass takes the lock in between.
+    tick.board.onCall = (call): void => {
+      if (call === 'catalog') {
+        tick.repository.takeTheLockAway();
+      }
+    };
+
+    const report = await tick.drain.run();
+
+    assert.deepEqual(tick.board.ensured, [], 'nothing was written after the lock was lost');
+    assert.deepEqual(tick.board.written, []);
+    assert.match(report.stoppedBecause ?? '', /lock/);
+    assert.equal(report.done, 0);
+    const claimed = await tick.stored('a-1');
+    assert.equal(claimed.state, 'queued', 'the action goes back for the pass that holds the lock now');
+    assert.equal(claimed.attempts, 0, 'the attempt the claim charged is given back');
+    assert.equal((await tick.stored('a-2')).state, 'queued', 'nothing more is claimed');
+  });
+
+  it('claims nothing at all once the lock is gone before the first action', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', {})] });
+    await tick.file({ id: 'a-1', payload: setFields(12, { severity: 'S2' }) });
+    tick.board.onCall = (call): void => {
+      if (call === 'probeBudget') {
+        tick.repository.takeTheLockAway();
+      }
+    };
+
+    const report = await tick.drain.run();
+
+    assert.equal(report.executed, 0);
+    assert.match(report.stoppedBecause ?? '', /lock/);
+    const waiting = await tick.stored('a-1');
+    assert.equal(waiting.state, 'queued');
+    assert.equal(waiting.version, 1, 'the action was never claimed');
+  });
+
+  it('posts one comment when a second pass takes the lock from a live first one mid-action', async (t) => {
+    const tick = tickFixture({ issues: [{ ref: twelve }] });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-queue-lease-'));
+    const file = path.join(dir, 'queue.db');
+    // The second pass sees the first one's process as started at another moment —
+    // as a reading of the start in another locale did — and takes the lock from it.
+    const first = new SqliteActionRepository(file, { clock: tick.clock, processes: table(() => '1000') });
+    const second = new SqliteActionRepository(file, { clock: tick.clock, processes: table(() => '2000') });
+    t.after(() => {
+      first.close();
+      second.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    const issues = new ListingThenWaiting([{ ref: twelve }]);
+    const passOn = (repository: SqliteActionRepository): DrainQueue => new DrainQueue({
+      repository,
+      boards: new BoardRouter(BoardDirectory.of(tick.config.boards), () => ({ board: tick.board, issues })),
+      kinds: defaultKindRegistry(tick.config),
+      policy: tick.policy,
+      clock: tick.clock,
+      sleeper: tick.sleeper,
+      logger: tick.logger,
+      config: tick.config,
+    });
+    const kind = defaultKindRegistry(tick.config).get('issue.comment');
+    const payload = { repo: FIRST, issue: 12, body: 'the fix is live' };
+    await first.insert(Action.enqueue({
+      id: 'c-1',
+      kind: kind.name,
+      payload,
+      issueRef: kind.issueRefOf(payload),
+      origin: 'a session',
+      now: tick.clock.now(),
+    }));
+    const reports: { second: TickReport | null } = { second: null };
+    // The first pass has looked for its comment and found none; before it posts,
+    // the second pass starts, puts the action back, looks, finds none and posts it.
+    issues.afterListing = async (): Promise<void> => {
+      reports.second = await passOn(second).run();
+    };
+
+    const firstReport = await passOn(first).run();
+
+    assert.equal(reports.second?.done, 1, 'the pass that took the lock did the work');
+    assert.equal(issues.posted.length, 1, 'the comment was posted once');
+    assert.match(firstReport.stoppedBecause ?? '', /lock/);
+    assert.equal((await second.get('c-1'))?.state, 'done');
   });
 
   it('counts an action another writer changed under it, and carries on with the next', async () => {
