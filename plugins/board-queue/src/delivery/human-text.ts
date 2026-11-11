@@ -42,10 +42,15 @@ export function enqueueLines(outcome: EnqueueOutcome): string[] {
   return lines;
 }
 
-/** One action, one line: what it is, where it stands, and what stopped it. */
+/**
+ * One action, one line: what it is, where it stands, and what stopped it — or,
+ * once it has ended done or skipped, what it did, since an error it got past on
+ * the way is no longer what anybody reading the line needs.
+ */
 export function actionLine(action: ActionView): string {
   const line = `${action.id} ${action.state} ${action.kind} ${action.ref ?? NO_ISSUE}`;
-  const note = action.lastError ?? action.result;
+  const ended = action.state === 'done' || action.state === 'skipped';
+  const note = ended ? action.result ?? action.lastError : action.lastError ?? action.result;
   return note === null ? line : `${line} — ${oneLine(note)}`;
 }
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { CatalogField, CatalogOption, FieldCatalog } from '../catalog.ts';
+import type { CatalogField, CatalogOption, FieldCatalog, FieldReading, ReadItemResult } from '../catalog.ts';
 import { findCatalogField, resolveOption } from '../catalog.ts';
 import type { Config } from '../config.ts';
 import { BoardQueueError, PreconditionUnmet, ReadbackMismatch, RefusedByRule } from '../errors.ts';
@@ -24,7 +24,7 @@ export const BOARD_FIELD_OF: Record<string, string> = {
 
 const optional = z.string().trim().min(1).optional();
 
-export const FieldShapeSchema = z
+const FieldValuesSchema = z
   .object({
     status: optional,
     severity: optional,
@@ -32,7 +32,12 @@ export const FieldShapeSchema = z
     environment: optional,
     type: optional,
   })
-  .strict()
+  .strict();
+
+/** Every key a payload may name a board field by. */
+export const FIELD_KEYS = FieldValuesSchema.keyof().options;
+
+export const FieldShapeSchema = FieldValuesSchema
   .refine(
     (shape) => Object.values(shape).some((value) => value !== undefined),
     'name at least one field',
@@ -58,6 +63,20 @@ export const BodyTextSchema = z.string().min(1).max(MAX_BODY_LENGTH);
  * a row whose status is not set at all.
  */
 export const StatusPreconditionSchema = z.array(z.string().trim().max(200)).min(1);
+
+/** A field value a guarded write left as it was, because the row no longer read as the guard said. */
+export type LeftAsItWas = {
+  field: string;
+  wanted: string;
+  expected: string;
+  actual: string;
+};
+
+/** What a write landed, as the row reads it back, and what it left alone. */
+export type AppliedFields = {
+  readback: Record<string, string>;
+  leftAsItWas: LeftAsItWas[];
+};
 
 const BUILD: Record<FieldRequestMode, (wanted: Record<string, string>, config: Config) => FieldRequest> = {
   write: FieldRequest.forWrite,
@@ -192,37 +211,117 @@ function refuseForbiddenStatus(resolved: readonly ResolvedField[], ctx: Executio
  * included, so a burst never looks like one. The write is finished only when
  * reading the row back agrees with it; a value that reads differently is reported
  * with both texts rather than recorded as a success.
+ *
+ * A guard names, per board field, what the row must still read for that field to
+ * be written. The row is read afresh right before the writes — once, the same
+ * read a status condition takes — and a guarded field that reads otherwise is
+ * left as it is: somebody moved it, and that move is theirs. The rest is written.
+ * When the guard leaves nothing to write, the action ends without a write.
  */
 export async function applyFields(
   ref: IssueRef,
   request: FieldRequest,
   ctx: ExecutionContext,
   onlyIfStatusIn: readonly string[] | null = null,
-): Promise<Record<string, string>> {
+  guard: ReadonlyMap<string, FieldReading> = new Map<string, FieldReading>(),
+): Promise<AppliedFields> {
   const resolved = await resolveWanted(request, ctx);
   refuseForbiddenStatus(resolved, ctx);
-  const itemId = onlyIfStatusIn === null
-    ? await ctx.board.ensureItem(ref)
+  const target = onlyIfStatusIn === null
+    ? { itemId: await ctx.board.ensureItem(ref), row: null }
     : await requireStatusIn(ref, onlyIfStatusIn, ctx);
-  for (const { field, option } of resolved) {
-    await ctx.sleeper.sleep(ctx.paceMs);
-    await ctx.board.setSingleSelect(itemId, field.id, option.id);
+  const { toWrite, leftAsItWas } = guard.size === 0
+    ? { toWrite: [...resolved], leftAsItWas: [] }
+    : await guarded(resolved, guard, target.row ?? await ctx.board.readItemById(target.itemId), ctx);
+  if (toWrite.length === 0) {
+    throw new PreconditionUnmet(
+      'changed_since',
+      `${leftAsItWas.map(describeLeft).join('; ')}, so the row was left as it is`,
+    );
   }
-  const row = await ctx.board.readItemById(itemId);
+  for (const { field, option } of toWrite) {
+    await ctx.sleeper.sleep(ctx.paceMs);
+    await ctx.board.setSingleSelect(target.itemId, field.id, option.id);
+  }
+  const row = await ctx.board.readItemById(target.itemId);
   const readback: Record<string, string> = {};
-  for (const { field, option } of resolved) {
+  for (const { field, option } of toWrite) {
     const actual = row.values[field.name] ?? '';
     if (actual !== option.name) {
       throw new ReadbackMismatch(field.name, option.name, actual === '' ? 'nothing' : actual);
     }
     readback[field.name] = actual;
   }
-  return readback;
+  return { readback, leftAsItWas };
+}
+
+/**
+ * The resolved values the guard lets through against the row as it reads now, and
+ * the ones it holds back. A field reads unchanged when it holds the same option it
+ * held when the guard was taken: the same id, so a renamed option is no change. A
+ * name the cached catalog does not know earns one fresh look, as a wanted text
+ * does; a name nothing knows can only be compared as a name.
+ */
+async function guarded(
+  resolved: readonly ResolvedField[],
+  guard: ReadonlyMap<string, FieldReading>,
+  row: ReadItemResult,
+  ctx: ExecutionContext,
+): Promise<{ toWrite: ResolvedField[]; leftAsItWas: LeftAsItWas[] }> {
+  let catalog = await ctx.board.catalog();
+  const unknown = resolved.some(({ field }) => {
+    const current = row.values[field.name] ?? '';
+    return current !== '' && optionIdIn(catalog, field.name, current) === null;
+  });
+  if (unknown) {
+    catalog = await ctx.board.catalog(true);
+  }
+  const toWrite: ResolvedField[] = [];
+  const leftAsItWas: LeftAsItWas[] = [];
+  for (const one of resolved) {
+    const expected = guard.get(one.field.name.trim().toLowerCase());
+    const actual = row.values[one.field.name] ?? '';
+    const optionId = actual === '' ? null : optionIdIn(catalog, one.field.name, actual);
+    const now: FieldReading = { name: actual, optionId };
+    if (expected === undefined || sameReading(expected, now)) {
+      toWrite.push(one);
+    } else {
+      leftAsItWas.push({ field: one.field.name, wanted: one.option.name, expected: expected.name, actual });
+    }
+  }
+  return { toWrite, leftAsItWas };
+}
+
+/** The id of the option a row shows under this name, when the catalog knows it. */
+export function optionIdIn(catalog: FieldCatalog, fieldName: string, optionName: string): string | null {
+  const field = findCatalogField(catalog, fieldName);
+  return field?.options.find((option) => option.name === optionName)?.id ?? null;
+}
+
+/** Whether a field holds what it held: the same option by id when both ids are known, by name otherwise. */
+function sameReading(before: FieldReading, now: FieldReading): boolean {
+  if (before.name === '' || now.name === '') {
+    return before.name === now.name;
+  }
+  if (before.optionId !== null && now.optionId !== null) {
+    return before.optionId === now.optionId;
+  }
+  return before.name === now.name;
+}
+
+/** `Status was not set to "In Review": it has been changed on the board since (from "Todo" to "In Progress")`. */
+export function describeLeft(left: LeftAsItWas): string {
+  return `${left.field} was not set to "${left.wanted}": it has been changed on the board since (from `
+    + `${shownValue(left.expected)} to ${shownValue(left.actual)})`;
+}
+
+function shownValue(value: string): string {
+  return value === '' ? 'nothing' : `"${value}"`;
 }
 
 /**
  * Lets a write go ahead only while the row's status is one the writer owns, and
- * answers the row to write to.
+ * answers the row to write to, as it was just read.
  *
  * A writer that copies another system's state onto the board can arrive late —
  * its machine slept, its source was slow — and by then somebody else may have
@@ -238,7 +337,11 @@ export async function applyFields(
  * row carries, so it is passed over rather than stopping a write that never
  * needed it.
  */
-async function requireStatusIn(ref: IssueRef, allowed: readonly string[], ctx: ExecutionContext): Promise<string> {
+async function requireStatusIn(
+  ref: IssueRef,
+  allowed: readonly string[],
+  ctx: ExecutionContext,
+): Promise<{ itemId: string; row: ReadItemResult }> {
   const field = findCatalogField(await ctx.board.catalog(), STATUS_FIELD);
   if (field === null) {
     throw new RefusedByRule(`the board has no field called "${STATUS_FIELD}", so no status can be required of a row`);
@@ -261,7 +364,7 @@ async function requireStatusIn(ref: IssueRef, allowed: readonly string[], ctx: E
       + `${from}, so the row was left as it is`,
     );
   }
-  return listed.itemId;
+  return { itemId: listed.itemId, row };
 }
 
 /** The option a listed text stands for, an empty text for no status, or nothing when it fits no option. */

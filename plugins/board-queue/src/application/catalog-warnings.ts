@@ -19,12 +19,29 @@ import { isRecord } from './json-values.ts';
  * taught the value it was waiting for.
  */
 export function catalogWarnings(payload: unknown, catalog: FieldCatalog): string[] {
-  const warnings: string[] = [];
+  return catalogMisses(payload, catalog).map((miss) => miss.warning);
+}
+
+/**
+ * The payload's field keys whose wanted text the catalog has no option for — a
+ * field the board lacks altogether included. Asked of an action the moment it is
+ * blocked for a missing option, against the catalog that refused it, this is the
+ * record of what the action is waiting for.
+ */
+export function unansweredOptions(payload: unknown, catalog: FieldCatalog): string[] {
+  return catalogMisses(payload, catalog).map((miss) => miss.key);
+}
+
+/** One wanted value the catalog cannot answer for: its payload key, and why, in a sentence. */
+type CatalogMiss = { key: string; warning: string };
+
+function catalogMisses(payload: unknown, catalog: FieldCatalog): CatalogMiss[] {
+  const misses: CatalogMiss[] = [];
   for (const [key, wanted] of wantedOptions(payload)) {
     const boardField = BOARD_FIELD_OF[key] ?? key;
     const field = findCatalogField(catalog, boardField);
     if (field === null) {
-      warnings.push(`the board's fields, as they were last read, do not include ${boardField}`);
+      misses.push({ key, warning: `the board's fields, as they were last read, do not include ${boardField}` });
       continue;
     }
     try {
@@ -33,10 +50,10 @@ export function catalogWarnings(payload: unknown, catalog: FieldCatalog): string
       if (!(error instanceof BoardQueueError)) {
         throw error;
       }
-      warnings.push(`as the board was last read, ${error.describe()}`);
+      misses.push({ key, warning: `as the board was last read, ${error.describe()}` });
     }
   }
-  return warnings;
+  return misses;
 }
 
 /**
@@ -45,7 +62,7 @@ export function catalogWarnings(payload: unknown, catalog: FieldCatalog): string
  * expectation. They are recognised by their keys, so this stays true for any kind
  * that speaks about board fields without naming a single one of them here.
  */
-function wantedOptions(payload: unknown): [string, string][] {
+export function wantedOptions(payload: unknown): [string, string][] {
   if (!isRecord(payload)) {
     return [];
   }

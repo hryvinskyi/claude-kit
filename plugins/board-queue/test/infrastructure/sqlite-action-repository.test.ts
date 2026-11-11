@@ -137,6 +137,63 @@ describe('the queue on disk', () => {
     assert.match(read.lastError ?? '', /has no option matching "urgent"/);
   });
 
+  it('remembers which wanted values the board lacked, and stores the narrower payload a release resumes with',
+    async (t) => {
+      const repository = databaseIn(t)();
+      const filed = anAction({
+        id: 'one',
+        payload: { repo: FIRST, issue: 12, fields: { status: 'In Progress', severity: 'S4' } },
+        createdAt: at(0),
+      });
+      await repository.insert(filed);
+      filed.start(at(1));
+      const todo = { name: 'Todo', optionId: 'option-todo' };
+      filed.block(at(1), new OptionNotFound('Severity', 'S4', ['S1 · blocking']), ['severity'], { status: todo });
+      await repository.update(filed);
+
+      const blocked = await stored(repository, 'one');
+      assert.deepEqual(blocked.missingOptions, ['severity']);
+      assert.deepEqual(blocked.rowAtBlock, { status: { name: 'Todo', optionId: 'option-todo' } });
+
+      const narrowed = { repo: FIRST, issue: 12, fields: { status: 'In Progress', severity: 'S4' } };
+      blocked.resumeWith(at(2), narrowed, 'status only if unchanged', { status: todo });
+      await repository.update(blocked);
+
+      const resumed = await stored(repository, 'one');
+      assert.equal(resumed.state, 'queued');
+      assert.deepEqual(resumed.missingOptions, []);
+      assert.equal(resumed.rowAtBlock, null);
+      assert.deepEqual(resumed.payload, narrowed, 'the guard is kept beside the payload, never in it');
+      assert.deepEqual(resumed.writeGuard, { status: todo });
+      assert.match(resumed.result ?? '', /status only if unchanged/);
+
+      resumed.start(at(3));
+      await repository.update(resumed);
+      assert.deepEqual((await stored(repository, 'one')).writeGuard, { status: todo }, 'a claim keeps the guard');
+    });
+
+  it('reads a guard that a merge by another writer has outlived as no guard', async (t) => {
+    const repository = databaseIn(t)();
+    const filed = anAction({
+      id: 'one',
+      payload: { repo: FIRST, issue: 12, fields: { status: 'In Progress', severity: 'S4' } },
+      createdAt: at(0),
+    });
+    await repository.insert(filed);
+    filed.start(at(1));
+    filed.block(at(1), new OptionNotFound('Severity', 'S4', ['S1 · blocking']), ['severity'], {});
+    filed.resumeWith(at(2), filed.payload, 'note', { status: { name: 'Todo', optionId: 'option-todo' } });
+    await repository.update(filed);
+
+    // What a release that knows nothing of the guard does when it folds a request in.
+    const merged = { repo: FIRST, issue: 12, fields: { status: 'In Progress', severity: 'S4', module: 'Checkout' } };
+    assert.equal(await repository.coalesceInto('one', merged, at(3), filed.version), true);
+
+    const after = await stored(repository, 'one');
+    assert.deepEqual(after.payload, merged);
+    assert.equal(after.writeGuard, null);
+  });
+
   it('refuses a write taken on facts another writer has already changed', async (t) => {
     const repository = databaseIn(t)();
     await repository.insert(anAction({ id: 'one', createdAt: at(0) }));

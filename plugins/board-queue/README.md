@@ -176,8 +176,32 @@ and nothing new is filed. A request with a key never merges with another.
 - **Blocked** means a person has to change something outside this system — add the option to the board,
   restore a missing issue. Nothing retries a blocked action on its own; `retry` gives it its attempts back
   and keeps the error, which is the record of what was fixed. The one exception is an option that appears
-  in a fresh catalog of its own board: the decision was made when somebody added it, and pressing the button again is not a
-  second decision.
+  in a fresh catalog of its own board: the decision was made when somebody added it, and writing that value
+  now is not a second decision. An action blocked for a missing option records which of its values the
+  board lacked and, for a `board.set-fields`, what its row held for every other field it wants. Once a fresh
+  catalog offers everything it lacked, it goes back on the queue — the release itself reads nothing from the
+  board — with those values, and every other one guarded by that reading. The guard is kept with the action,
+  never in its payload. When the action runs, the row is read once right before the write (the same read an
+  `onlyIfStatusIn` takes), and a field that no longer holds the option it held when the action blocked has
+  been changed on the board since, by a person or a writer this queue never hears from: it is not written,
+  the rest is, and the result says which field was left and what it reads. If every guarded field moved and
+  nothing is left, the action ends **skipped** (`changed_since`). Options are compared by id, looked up in
+  the catalog, so an option renamed since the block is the same option; only a name neither catalog knows
+  is compared as text, and then a rename reads as a change. A value the board no longer offers is left out
+  at the release, and so is every other value when the row could not be read at the block (a value nobody
+  knows the reading of cannot be guarded): only the values the board lacked are written, and the result
+  says why. A read that fails right before the write is a fault of the moment and the action is tried again,
+  never narrowed. A limit or a credential refusing the read at the block puts the action back and pauses the
+  queue, as any refusal for the queue's sake does. An action released and blocked again keeps its first
+  guard, for the value it lacked as well, and a guarded action takes no later request into itself: that one
+  is filed on its own. The action carries the narrowed payload for good; a `retry` writes it, unguarded, as a
+  person's own decision. The cost is, at the block, finding the row in the board's listing (a walk of the
+  board, unless one is still fresh) and one read of it — nothing when the action wants no other field or is
+  not a `board.set-fields` — and, for a guarded write, one read of the row before writing. An action blocked
+  before the queue kept that record, or whose record an older release's write has outlived, is not released
+  by the board at all; it waits for a `retry` or a `cancel`. An older release sharing the file runs a
+  guarded action unguarded, as it always ran actions. An action whose remaining values the configuration no
+  longer accepts stays blocked with that reason, for a person.
 - `notBefore` pushes an action into the future, up to thirty days; beyond that it is refused, because work
   nothing will touch for a year is work nobody sees again. `status` and the session brief list what is
   waiting and when it comes round, so a delay is never silent.

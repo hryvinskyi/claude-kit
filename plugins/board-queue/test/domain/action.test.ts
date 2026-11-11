@@ -133,6 +133,91 @@ describe('Action', () => {
     assert.ok(action.lastError?.includes('Cart, Catalog'));
   });
 
+  it('remembers which wanted values the board lacked, and forgets them once it leaves the block', () => {
+    const blocked = running();
+    blocked.block(now, new OptionNotFound('Severity', 'S4', ['S1']), ['severity']);
+    assert.deepEqual(blocked.missingOptions, ['severity']);
+    assert.deepEqual(new Action(blocked.props()).missingOptions, ['severity']);
+
+    blocked.retry(later);
+    assert.deepEqual(blocked.missingOptions, []);
+
+    const cancelled = running();
+    cancelled.block(now, new OptionNotFound('Severity', 'S4', ['S1']), ['severity']);
+    cancelled.cancel(later);
+    assert.deepEqual(cancelled.missingOptions, []);
+  });
+
+  it('is resumed by the board with the part of its work that waited for the options', () => {
+    const action = running();
+    action.block(now, new OptionNotFound('Severity', 'S4', ['S1']), ['severity']);
+    const narrowed = { repo: 'example-org/first-repo', issue: 12, fields: { severity: 'S4' } };
+
+    action.resumeWith(later, narrowed, 'status "In Progress" was not written', null);
+
+    assert.equal(action.state, 'queued');
+    assert.equal(action.attempts, 0);
+    assert.equal(action.blockedReason, null);
+    assert.deepEqual(action.missingOptions, []);
+    assert.deepEqual(action.payload, narrowed);
+    assert.match(action.result ?? '', /was not written/);
+    assert.match(action.lastError ?? '', /S4/, 'the error stays as the record of what was fixed');
+  });
+
+  it('carries the guard a release sets until it ends, takes no merge while guarded, and a retry drops it', () => {
+    const guard = { status: { name: 'Todo', optionId: 'option-todo' } };
+    const released = running();
+    released.block(now, new OptionNotFound('Severity', 'S4', ['S1']), ['severity'], { status: guard.status });
+    released.resumeWith(later, released.payload, 'note', guard);
+    assert.deepEqual(released.writeGuard, guard);
+    assert.deepEqual(new Action(released.props()).writeGuard, guard);
+    assert.equal(released.isCoalescible(later), false, 'a merge would put its values under this guard');
+
+    released.start(later);
+    released.block(later, new OptionNotFound('Severity', 'S4', ['S1']), ['severity'], { status: guard.status });
+    assert.deepEqual(released.writeGuard, guard, 'a second block keeps the older reading');
+    released.retry(later);
+    assert.equal(released.writeGuard, null);
+    assert.equal(released.isCoalescible(later), true);
+
+    const done = running();
+    done.block(now, new OptionNotFound('Severity', 'S4', ['S1']), ['severity'], {});
+    done.resumeWith(later, done.payload, 'note', guard);
+    done.start(later);
+    done.succeed(later, 'written');
+    assert.equal(done.writeGuard, null);
+
+    const unguarded = running();
+    unguarded.block(now, new OptionNotFound('Severity', 'S4', ['S1']), ['severity'], {});
+    unguarded.resumeWith(later, unguarded.payload, 'note', {});
+    assert.equal(unguarded.writeGuard, null, 'an empty guard guards nothing');
+  });
+
+  it('stays blocked for a person when the board cannot release it, saying why, and is not offered again', () => {
+    const action = running();
+    action.block(now, new OptionNotFound('Severity', 'S4', ['S1']), ['severity']);
+    const version = action.version;
+
+    action.refuseRelease(later, 'the values left to write are no longer accepted');
+
+    assert.equal(action.state, 'blocked');
+    assert.equal(action.blockedReason, 'option-not-found');
+    assert.deepEqual(action.missingOptions, []);
+    assert.match(action.lastError ?? '', /could not be released: the values left to write are no longer accepted/);
+    assert.ok(action.version > version, 'the change is guarded like every other');
+    assert.throws(() => action.refuseRelease(later, 'again'), IllegalTransition);
+    assert.throws(() => inState('queued').refuseRelease(later, 'x'), IllegalTransition);
+  });
+
+  it('is never resumed by the board without a record of what it waited for, or from another state', () => {
+    const unrecorded = inState('blocked');
+    assert.throws(() => unrecorded.resumeWith(later, unrecorded.payload, 'x', null), IllegalTransition);
+    for (const state of ['queued', 'failed', 'done'] as const) {
+      const action = inState(state);
+      assert.throws(() => action.resumeWith(later, action.payload, 'x', null), IllegalTransition);
+    }
+  });
+
   it('comes back from blocked and from failed with its attempts restored', () => {
     for (const state of ['blocked', 'failed'] as const) {
       const action = inState(state);

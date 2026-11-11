@@ -222,7 +222,7 @@ export class EnqueueAction {
   ): Promise<Action | null> {
     for (let attempt = 0; attempt < FOLD_ATTEMPTS; attempt += 1) {
       const waiting = await this.#repository.findCoalescible(kind.name, ref, now);
-      if (waiting === null) {
+      if (waiting === null || !waiting.isCoalescible(now)) {
         return null;
       }
       const merged: unknown = kind.coalesce(waiting.payload, payload);

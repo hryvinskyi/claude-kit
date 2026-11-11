@@ -1,6 +1,7 @@
-import type { Action, ActionState } from '../domain/action.ts';
+import type { Action, ActionState, RowAtBlock } from '../domain/action.ts';
 import type { BoardKey } from '../domain/board-directory.ts';
 import type { FieldCatalog } from '../domain/catalog.ts';
+import type { IssueRef } from '../domain/issue-ref.ts';
 import type { Config } from '../domain/config.ts';
 import { BoardQueueError, RefusedByRule, StaleAction, TransientFailure } from '../domain/errors.ts';
 import type { ErrorCategory } from '../domain/errors.ts';
@@ -10,8 +11,10 @@ import type { QueuePause } from '../domain/queue-pause.ts';
 import type { RateBudget } from '../domain/rate-budget.ts';
 import type { BoardRouter } from './board-router.ts';
 import type { BudgetPolicy } from './budget-policy.ts';
-import { catalogWarnings } from './catalog-warnings.ts';
+import { catalogWarnings, unansweredOptions, wantedOptions } from './catalog-warnings.ts';
 import { LimiterWait } from './limiter-wait.ts';
+import { planReplay, replayNote, rowReadingsOf } from './option-wait.ts';
+import type { ReplayPlan } from './option-wait.ts';
 import { writeLastBudget, writeLastTickAt, writeSecondaryHits } from './queue-meta.ts';
 import type { ActionRepository, Clock, Logger, Sleeper } from './ports.ts';
 
@@ -71,7 +74,20 @@ type SettleContext = {
   now: Date;
   policy: BudgetPolicy;
   maxAttempts: number;
+  /** What the board lacked and how the row read, when the plan keeps that record. */
+  wait: OptionWait;
 };
+
+/** Which wanted values the board lacked when an action blocked, and how its row read then. */
+type OptionWait = {
+  missing: readonly string[];
+  row: RowAtBlock | null;
+};
+
+const NO_WAIT: OptionWait = { missing: [], row: null };
+
+/** The release plan of a kind that runs its payload as it is. */
+const NOTHING_NARROWED: ReplayPlan = { keys: [], guard: {}, leftOut: new Map() };
 
 type FailurePlan = {
   /** What becomes of the action that met this failure. */
@@ -80,6 +96,8 @@ type FailurePlan = {
   readonly pausesQueue: boolean;
   /** Whether anything else may run in this tick afterwards. */
   readonly stopsTick: boolean;
+  /** Whether the action is to remember which wanted values the board lacked an option for. */
+  readonly recordsMissingOptions: boolean;
 };
 
 /**
@@ -94,6 +112,7 @@ const QUEUE_LEVEL: FailurePlan = {
   },
   pausesQueue: true,
   stopsTick: true,
+  recordsMissingOptions: false,
 };
 
 /** A dead end: nothing this system can do again will change the answer. */
@@ -103,6 +122,21 @@ const NEEDS_A_PERSON: FailurePlan = {
   },
   pausesQueue: false,
   stopsTick: false,
+  recordsMissingOptions: false,
+};
+
+/**
+ * A dead end only until somebody adds an option to the board. The action keeps
+ * which of its values the board lacked, because that is all the board learning
+ * them answers for: the rest of the action was answerable all along.
+ */
+const AWAITS_AN_OPTION: FailurePlan = {
+  settle: (action, error, ctx) => {
+    action.block(ctx.now, error, ctx.wait.missing, ctx.wait.row);
+  },
+  pausesQueue: false,
+  stopsTick: false,
+  recordsMissingOptions: true,
 };
 
 /**
@@ -116,6 +150,7 @@ const NO_LONGER_APPLIES: FailurePlan = {
   },
   pausesQueue: false,
   stopsTick: false,
+  recordsMissingOptions: false,
 };
 
 /** A moment's fault: it waits out the policy's curve and comes back, a few times. */
@@ -125,6 +160,7 @@ const WORTH_ANOTHER_GO: FailurePlan = {
   },
   pausesQueue: false,
   stopsTick: false,
+  recordsMissingOptions: false,
 };
 
 /**
@@ -138,7 +174,7 @@ const PLAN_BY_CATEGORY: ReadonlyMap<ErrorCategory, FailurePlan> = new Map<ErrorC
   ['primary-rate-limited', QUEUE_LEVEL],
   ['secondary-rate-limited', QUEUE_LEVEL],
   ['credential-rejected', QUEUE_LEVEL],
-  ['option-not-found', NEEDS_A_PERSON],
+  ['option-not-found', AWAITS_AN_OPTION],
   ['ambiguous-option', NEEDS_A_PERSON],
   ['issue-not-found', NEEDS_A_PERSON],
   ['refused-by-rule', NEEDS_A_PERSON],
@@ -388,12 +424,28 @@ export class DrainQueue {
       this.#logger.info('action done', { action: action.id, kind: action.kind, summary: outcome.summary });
       step = { state: action.state, stopsTick: false };
     } else {
-      const error = asBoardQueueError(failure);
-      const plan = PLAN_BY_CATEGORY.get(error.category) ?? WORTH_ANOTHER_GO;
+      let error = asBoardQueueError(failure);
+      let plan = planFor(error);
+      let wait = NO_WAIT;
+      if (plan.recordsMissingOptions) {
+        try {
+          wait = await this.#whatTheBoardLacks(action);
+        } catch (refusal) {
+          if (!(refusal instanceof BoardQueueError)) {
+            throw refusal;
+          }
+          // Reading the row was refused for the queue's sake — a limit, a
+          // credential — so the action goes back as any work stopped by that
+          // refusal does, and meets its missing option again after the wait.
+          error = refusal;
+          plan = planFor(refusal);
+        }
+      }
       plan.settle(action, error, {
         now,
         policy: this.#policy,
         maxAttempts: this.#config.worker.maxAttempts,
+        wait,
       });
       const pause = plan.pausesQueue ? await this.#wait.after(error, now) : null;
       this.#logger.warn('action stopped', {
@@ -424,6 +476,63 @@ export class DrainQueue {
     return step;
   }
 
+  /**
+   * Which of the action's wanted values its board offers no option for, measured
+   * against the catalog that just refused it — a miss is only final after a fresh
+   * read, which leaves that read in the store — and, for a kind a release
+   * narrows, how the row reads for every other value the action wants, so the
+   * release can guard each of them by that reading. With no catalog to measure
+   * against the answer is empty, and the action waits for a person like any other
+   * block.
+   *
+   * The row costs finding it in the board's listing (a walk of the board, unless
+   * one is still fresh) and one read of it by its id; nothing when the action
+   * wants no other value or its kind does not narrow. A refusal that belongs to
+   * the queue is thrown, so the tick stops spending; any other failure to read
+   * leaves no reading, and the release then guards nothing it cannot.
+   */
+  async #whatTheBoardLacks(action: Action): Promise<OptionWait> {
+    if (action.issueRef === null) {
+      return NO_WAIT;
+    }
+    const board = this.#boards.directory.find(action.issueRef.repoFullName());
+    const cached = board === null ? null : await this.#repository.getCatalog(board.key);
+    if (cached === null) {
+      return NO_WAIT;
+    }
+    const missing = unansweredOptions(action.payload, cached.catalog);
+    if (missing.length === 0) {
+      return NO_WAIT;
+    }
+    const others = wantedKeys(action.payload).filter((key) => !missing.includes(key));
+    const narrows = this.#kinds.has(action.kind) && this.#kinds.get(action.kind).narrowsOnRelease;
+    if (!narrows || others.length === 0) {
+      return { missing, row: {} };
+    }
+    return { missing, row: await this.#readRow(action, action.issueRef, others, cached.catalog) };
+  }
+
+  /** The row's values for these payload keys, or null when the board did not answer for a reason of the moment. */
+  async #readRow(
+    action: Action,
+    ref: IssueRef,
+    keys: readonly string[],
+    catalog: FieldCatalog,
+  ): Promise<RowAtBlock | null> {
+    try {
+      const board = this.#boards.laneOf(ref).board;
+      const listed = await board.findItem(ref);
+      const row = listed === null ? null : await board.readItemById(listed.itemId);
+      return rowReadingsOf(keys, catalog, row);
+    } catch (error) {
+      if (error instanceof BoardQueueError && planFor(error).pausesQueue) {
+        throw error;
+      }
+      this.#logger.warn('the row could not be read', { action: action.id, reason: describeUnknown(error) });
+      return null;
+    }
+  }
+
   /** When each board's catalog was last fetched, before this tick spends anything. */
   async #catalogMoments(): Promise<Map<BoardKey, number | null>> {
     const moments = new Map<BoardKey, number | null>();
@@ -439,10 +548,22 @@ export class DrainQueue {
    *
    * An action blocked because its board had no such option is waiting on one
    * thing: somebody adding it. When a tick reads a fresh catalog of that board and
-   * the option is there, the decision has been made — pressing the button again is
-   * not a second decision, it is the rest of the first one. Nothing else leaves the
-   * blocked state on its own. Each board's options are its own, so an action is
-   * only ever measured against the catalog of the board that carries its issue.
+   * the option is there, the decision has been made — writing that value now is
+   * not a second decision, it is the rest of the first one. The action's other
+   * values were not written when it blocked, and the row may be moved on by a
+   * person on the board or a writer this queue never hears from, before the
+   * release or after it: each goes back guarded by what the row read at the
+   * block, and the write leaves alone any field that reads otherwise when it is
+   * about to happen. A value with no such reading, or one the board no longer
+   * offers, is left out, and the note names each one and why. The action carries
+   * that payload from then on, so a later retry runs it too. The release itself
+   * reads nothing from the board.
+   *
+   * An action blocked without a record of which values were missing — blocked
+   * before the queue kept one, or by a release that does not keep it — is left
+   * for a person. Nothing else leaves the blocked state on its own. Each board's
+   * options are its own, so an action is only ever measured against the catalog
+   * of the board that carries its issue.
    */
   async #unblockWhatTheBoardsCanNowAnswer(fetchedBefore: ReadonlyMap<BoardKey, number | null>): Promise<string[]> {
     const fresh = new Map<BoardKey, FieldCatalog>();
@@ -462,15 +583,42 @@ export class DrainQueue {
     const now = this.#clock.now();
     const freed: string[] = [];
     for (const action of await this.#repository.list({ states: ['blocked'] })) {
-      if (action.blockedReason !== 'option-not-found' || action.issueRef === null) {
+      const ref = action.issueRef;
+      if (action.blockedReason !== 'option-not-found' || ref === null) {
         continue;
       }
-      const board = this.#boards.directory.find(action.issueRef.repoFullName());
+      const board = this.#boards.directory.find(ref.repoFullName());
       const catalog = board === null ? undefined : fresh.get(board.key);
-      if (catalog === undefined || catalogWarnings(action.payload, catalog).length > 0) {
+      if (catalog === undefined || action.missingOptions.length === 0 || !this.#kinds.has(action.kind)) {
         continue;
       }
-      action.retry(now);
+      const unanswered = new Set(unansweredOptions(action.payload, catalog));
+      if (action.missingOptions.some((key) => unanswered.has(key))) {
+        continue;
+      }
+      const kind = this.#kinds.get(action.kind);
+      try {
+        const plan = kind.narrowsOnRelease
+          ? planReplay({
+            missing: action.missingOptions,
+            wanted: wantedKeys(action.payload),
+            unanswered,
+            atBlock: action.rowAtBlock,
+            earlier: action.writeGuard,
+          })
+          : NOTHING_NARROWED;
+        const replay: unknown = kind.replayFor(action.payload, plan.keys);
+        // The release is judged on what will run, not on what was filed: a value
+        // the replay leaves out cannot keep it waiting.
+        if (replay === null || replay === undefined || catalogWarnings(replay, catalog).length > 0) {
+          continue;
+        }
+        action.resumeWith(now, replay, replayNote(action.payload, replay, plan), plan.guard);
+      } catch (error) {
+        const reason = error instanceof BoardQueueError ? error.describe() : describeUnknown(error);
+        this.#logger.warn('a blocked action could not be released', { action: action.id, kind: action.kind, reason });
+        action.refuseRelease(now, reason);
+      }
       try {
         await this.#repository.update(action);
       } catch (error) {
@@ -479,9 +627,13 @@ export class DrainQueue {
         }
         continue;
       }
+      if (action.state !== 'queued') {
+        continue;
+      }
       this.#logger.info('requeued: the board now offers the option it was waiting for', {
         action: action.id,
         kind: action.kind,
+        note: action.result,
       });
       freed.push(action.id);
     }
@@ -507,8 +659,14 @@ export class DrainQueue {
       refusedStatus: this.#config.refusedStatus,
       actionId: action.id,
       enqueuedAt: action.createdAt,
+      writeGuard: action.writeGuard ?? {},
     };
   }
+}
+
+/** What a failure costs, by its category; a failure nobody named is a moment's fault. */
+function planFor(error: BoardQueueError): FailurePlan {
+  return PLAN_BY_CATEGORY.get(error.category) ?? WORTH_ANOTHER_GO;
 }
 
 function emptyTally(): Tally {
@@ -534,6 +692,11 @@ function count(tally: Tally, state: ActionState | null): void {
   if (bucket !== undefined) {
     tally[bucket] += 1;
   }
+}
+
+/** The payload keys of every board value the payload wants. */
+function wantedKeys(payload: unknown): string[] {
+  return wantedOptions(payload).map(([key]) => key);
 }
 
 /** The summary a person reads, and under it the values the board actually holds. */

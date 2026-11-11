@@ -3,15 +3,21 @@ import type { Config } from '../config.ts';
 import { IssueRef } from '../issue-ref.ts';
 import type { ActionKind, ActionResult, ExecutionContext } from './action-kind.ts';
 import {
+  BOARD_FIELD_OF,
+  FIELD_KEYS,
   FieldShapeSchema,
   IssueNumberSchema,
   RepoSchema,
   StatusPreconditionSchema,
   applyFields,
   checkFields,
+  describeLeft,
   describeValues,
   fieldRequestFrom,
 } from './fields.ts';
+import type { FieldShape } from './fields.ts';
+import type { FieldReading } from '../catalog.ts';
+import { validatedReplay } from './replay.ts';
 
 const shape = z
   .object({
@@ -82,15 +88,52 @@ export class SetFieldsKind implements ActionKind {
     } satisfies SetFieldsPayload;
   }
 
+  readonly narrowsOnRelease = true;
+
+  /**
+   * Only the values named. Which ones those are, and on what condition each is
+   * written, is the release's to decide; this narrows the payload to them, read
+   * from its shape alone, and then judges the narrowed payload as a whole by the
+   * rules as they stand now, so a value the configuration has come to refuse
+   * stops the replay only when the replay still carries it.
+   */
+  replayFor(payload: unknown, keys: readonly string[]): unknown {
+    const parsed = shape.parse(payload);
+    const named = new Set(keys);
+    const fields: FieldShape = {};
+    for (const key of FIELD_KEYS) {
+      const wanted = parsed.fields[key];
+      if (wanted !== undefined && named.has(key)) {
+        fields[key] = wanted;
+      }
+    }
+    if (Object.keys(fields).length === 0) {
+      return null;
+    }
+    return validatedReplay(this.payloadSchema, { ...parsed, fields } satisfies SetFieldsPayload);
+  }
+
   async execute(payload: unknown, ctx: ExecutionContext): Promise<ActionResult> {
     const parsed = this.payloadSchema.parse(payload);
     const ref = IssueRef.of(parsed.repo, parsed.issue);
-    const readback = await applyFields(
+    const applied = await applyFields(
       ref,
       fieldRequestFrom(parsed.fields, this.#config, 'write'),
       ctx,
       parsed.onlyIfStatusIn ?? null,
+      guardOf(ctx.writeGuard),
     );
-    return { summary: `${ref.toString()}: ${describeValues(readback)}`, readback };
+    const left = applied.leftAsItWas.map(describeLeft);
+    const summary = [`${ref.toString()}: ${describeValues(applied.readback)}`, ...left].join('; ');
+    return { summary, readback: applied.readback };
   }
+}
+
+/** The guard under the board's own field names, compared without regard to case. */
+function guardOf(writeGuard: Readonly<Record<string, FieldReading>>): ReadonlyMap<string, FieldReading> {
+  const guard = new Map<string, FieldReading>();
+  for (const [key, reading] of Object.entries(writeGuard)) {
+    guard.set((BOARD_FIELD_OF[key] ?? key).toLowerCase(), reading);
+  }
+  return guard;
 }

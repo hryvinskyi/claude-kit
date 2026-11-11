@@ -2,10 +2,16 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { CancelAction } from '../../src/application/cancel-action.ts';
 import { RetryAction } from '../../src/application/retry-action.ts';
-import { readSecondaryHits } from '../../src/application/queue-meta.ts';
+import { DrainQueue } from '../../src/application/drain-queue.ts';
+import { EnqueueAction } from '../../src/application/enqueue-action.ts';
+import { BoardDirectory } from '../../src/domain/board-directory.ts';
+import { readLastTickAt, readSecondaryHits } from '../../src/application/queue-meta.ts';
+import type { Config } from '../../src/domain/config.ts';
+import { defaultKindRegistry } from '../../src/domain/kinds/default-kinds.ts';
 import {
   CredentialRejected,
   IssueNotFound,
+  OptionNotFound,
   PrimaryRateLimited,
   SecondaryRateLimited,
   TransientFailure,
@@ -452,7 +458,7 @@ describe('DrainQueue and a board that caught up', () => {
     const tick = tickFixture({
       items: [seedItem(twelve, 'item-7', {}), seedItem(thirteen, 'item-8', {}), seedItem(fourteen, 'item-9', {})],
     });
-    await tick.file({ id: 'waiting', payload: setFields(12, { severity: 'S4' }) });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
     await tick.file({ id: 'still-waiting', payload: setFields(13, { severity: 'S9' }) });
     await tick.drain.run();
     assert.equal((await tick.stored('waiting')).state, 'blocked');
@@ -467,8 +473,344 @@ describe('DrainQueue and a board that caught up', () => {
     assert.equal(report.unblocked, 1);
     assert.equal((await tick.stored('waiting')).state, 'queued');
     assert.equal((await tick.stored('waiting')).attempts, 0);
+    assert.deepEqual((await tick.stored('waiting')).payload, setFields(12, { status: 'In Progress', severity: 'S4' }));
+    assert.deepEqual((await tick.stored('waiting')).writeGuard, { status: { name: '', optionId: null } });
     assert.equal((await tick.stored('still-waiting')).state, 'blocked');
     assert.ok(tick.logger.lines.some((line) => line.message.includes('requeued')));
+  });
+
+  it('writes the status nobody touched beside the value the board lacked, reading nothing to release it', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Review', severity: 'S4' }) });
+    await tick.drain.run();
+    assert.equal((await tick.stored('waiting')).state, 'blocked');
+    assert.deepEqual((await tick.stored('waiting')).rowAtBlock, {
+      status: { name: 'Todo', optionId: 'option-status-todo' },
+    });
+
+    tick.board.addOption('Severity', { id: 'option-S4', name: 'S4 · trivial' });
+    tick.clock.advance(tick.config.worker.catalogTtlSec * 1000 + 1000);
+    await tick.file({ id: 'teaching-14', payload: setFields(14, { severity: 'S2' }) });
+    const readsBefore = tick.board.calls.filter((call) => call === 'readItemById').length;
+    await tick.drain.run();
+    const readsByTheTick = tick.board.calls.filter((call) => call === 'readItemById').length - readsBefore;
+    assert.equal(readsByTheTick, 1, 'the one read confirms the teaching write; the release reads nothing');
+    assert.equal((await tick.stored('waiting')).state, 'queued');
+    await tick.drain.run();
+
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'In Review', Severity: 'S4 · trivial' });
+    const replayed = await tick.stored('waiting');
+    assert.equal(replayed.state, 'done');
+    assert.match(replayed.result ?? '', /runs again with status "In Review", severity "S4"; status only if the row still reads/);
+    assert.doesNotMatch(replayed.result ?? '', /was not (written|set)/);
+  });
+
+  it('never writes a status a person moved the row to before the release, and says so', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+    await tick.drain.run();
+    assert.equal((await tick.stored('waiting')).state, 'blocked');
+
+    tick.board.setByHand(twelve, 'Status', 'In Review');
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+    const report = await tick.drain.run();
+
+    assert.equal(report.done, 1);
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'In Review', Severity: 'S4 · trivial' });
+    const replayed = await tick.stored('waiting');
+    assert.equal(replayed.state, 'done');
+    assert.match(
+      replayed.result ?? '',
+      /Status was not set to "In Progress": it has been changed on the board since \(from "Todo" to "In Review"\)/,
+    );
+  });
+
+  it('never writes a status a person moved the row to after the release, before the write', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+    await tick.drain.run();
+
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+    assert.equal((await tick.stored('waiting')).state, 'queued');
+    tick.board.setByHand(twelve, 'Status', 'In Review');
+    await tick.drain.run();
+
+    assert.equal((await tick.stored('waiting')).state, 'done');
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'In Review', Severity: 'S4 · trivial' });
+  });
+
+  it('writes a status whose option was only renamed since the action blocked', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Review', severity: 'S4' }) });
+    await tick.drain.run();
+
+    tick.board.renameOption('Status', 'Todo', 'Backlog');
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+    await tick.drain.run();
+
+    assert.equal((await tick.stored('waiting')).state, 'done');
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'In Review', Severity: 'S4 · trivial' });
+  });
+
+  it('keeps the first guard when a released action blocks again, for the value it lacked as well', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'In Progress' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4', type: 'Chore' }) });
+    await tick.drain.run();
+    assert.deepEqual((await tick.stored('waiting')).missingOptions, ['severity', 'type']);
+
+    // The board learns one of the two values; what a first release and a second
+    // block on the other leave on the action is set down by hand, readings and all.
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+    assert.equal((await tick.stored('waiting')).state, 'blocked');
+    const first = await tick.stored('waiting');
+    first.retry(tick.clock.now());
+    first.start(tick.clock.now());
+    first.block(tick.clock.now(), new OptionNotFound('Defect type', 'Chore', ['Bug']), ['type'], {
+      status: { name: 'In Progress', optionId: 'option-status-in-progress' },
+      severity: { name: '', optionId: null },
+    });
+    first.resumeWith(tick.clock.now(), first.payload, 'note', {
+      type: { name: '', optionId: null },
+      status: { name: 'In Progress', optionId: 'option-status-in-progress' },
+    });
+    first.start(tick.clock.now());
+    first.block(tick.clock.now(), new OptionNotFound('Defect type', 'Chore', ['Bug']), ['type'], {
+      status: { name: 'In Progress', optionId: 'option-status-in-progress' },
+      severity: { name: '', optionId: null },
+    });
+    await tick.repository.update(first);
+
+    tick.board.setByHand(twelve, 'Defect type', 'Bug');
+    tick.board.setByHand(twelve, 'Status', 'Done');
+    await teach(tick, [['Defect type', 'Chore']], 15);
+    await tick.drain.run();
+
+    const values = tick.board.valuesOf(twelve);
+    assert.equal(values?.['Defect type'], 'Bug', 'the type it lacked was guarded by the first release, and was moved');
+    assert.equal(values?.['Status'], 'Done', 'nothing writes over the move to Done');
+    assert.equal(values?.['Severity'], 'S4 · trivial');
+  });
+
+  it('files a later request on its own rather than folding it into a guarded action', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Review', severity: 'S4' }) });
+    await tick.drain.run();
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+    assert.notEqual((await tick.stored('waiting')).writeGuard, null);
+
+    const enqueue = new EnqueueAction({
+      repository: tick.repository,
+      kinds: defaultKindRegistry(tick.config),
+      directory: BoardDirectory.of(tick.config.boards),
+      clock: tick.clock,
+    });
+    const outcome = await enqueue.execute({
+      kind: 'board.set-fields',
+      payload: setFields(12, { module: 'Checkout' }),
+      origin: 'a session',
+    });
+
+    assert.equal(outcome.coalescedInto, undefined);
+    assert.deepEqual((await tick.stored('waiting')).payload, setFields(12, { status: 'In Review', severity: 'S4' }));
+  });
+
+  it('tries again later, writing nothing, when the row cannot be read right before the guarded write', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+    await tick.drain.run();
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+
+    tick.board.fail('readItemById', new TransientFailure('the API answered 502'));
+    await tick.drain.run();
+    const waiting = await tick.stored('waiting');
+    assert.equal(waiting.state, 'queued', 'a fault of the moment, not a dropped value');
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'Todo' });
+
+    tick.clock.advance(3600 * 1000);
+    await tick.drain.run();
+    assert.equal((await tick.stored('waiting')).state, 'done');
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'In Progress', Severity: 'S4 · trivial' });
+  });
+
+  it('puts the action back and waits when reading the row as it blocks is refused by a limit', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(thirteen, 'item-8', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+    await tick.file({ id: 'next', payload: setFields(13, { severity: 'S2' }) });
+    tick.board.fail('snapshot', new SecondaryRateLimited(60));
+
+    const report = await tick.drain.run();
+
+    assert.equal(report.executed, 1, 'nothing more is spent once the limit refused');
+    assert.ok(report.pausedUntil !== undefined);
+    const waiting = await tick.stored('waiting');
+    assert.equal(waiting.state, 'queued');
+    assert.equal(waiting.attempts, 0);
+    assert.equal((await tick.stored('next')).state, 'queued');
+  });
+
+  it('reads no row when a verification blocks, since its release asks the whole question again', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })] });
+    await tick.file({
+      id: 'question',
+      kind: 'board.verify',
+      payload: { repo: FIRST, issue: 12, expect: { status: 'Todo', severity: 'S4' } },
+    });
+
+    await tick.drain.run();
+
+    assert.equal((await tick.stored('question')).state, 'blocked');
+    assert.deepEqual((await tick.stored('question')).missingOptions, ['severity']);
+    assert.deepEqual(
+      tick.board.calls.filter((call) => call === 'readItemById' || call === 'snapshot'),
+      ['snapshot'],
+      'the verification\'s own walk, and nothing read for the block',
+    );
+  });
+
+  it('writes only the value the board lacked when the row could not be read as the action blocked, and says so',
+    async () => {
+      const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+      await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+      tick.board.fail('readItemById', new TransientFailure('the API answered 502'));
+      await tick.drain.run();
+      assert.equal((await tick.stored('waiting')).state, 'blocked');
+      assert.equal((await tick.stored('waiting')).rowAtBlock, null);
+
+      await teach(tick, [['Severity', 'S4 · trivial']]);
+      await tick.drain.run();
+
+      assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'Todo', Severity: 'S4 · trivial' });
+      assert.match(
+        (await tick.stored('waiting')).result ?? '',
+        /status "In Progress" was not written: the row could not be read when the action blocked/,
+      );
+    });
+
+  it('releases on what the replay asks, leaving out a value the board no longer offers', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({
+      id: 'waiting',
+      payload: setFields(12, { status: 'In Progress', module: 'Checkout', severity: 'S4' }),
+    });
+    await tick.drain.run();
+    assert.equal((await tick.stored('waiting')).state, 'blocked');
+
+    tick.board.renameOption('Status', 'In Progress', 'Doing');
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+    assert.equal((await tick.stored('waiting')).state, 'queued');
+    await tick.drain.run();
+
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'Todo', Module: 'Checkout', Severity: 'S4 · trivial' });
+    const replayed = await tick.stored('waiting');
+    assert.equal(replayed.state, 'done');
+    assert.match(replayed.result ?? '', /status "In Progress" was not written: the board no longer offers it in Status/);
+  });
+
+  it('releases what is left when the configuration has come to refuse a value the release leaves out', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+    await tick.drain.run();
+    tick.board.renameOption('Status', 'In Progress', 'Doing');
+    const changed = drainUnder(tick, { ...tick.config, refusedStatus: ['Done', 'In Progress'] });
+
+    await teach(tick, [['Severity', 'S4 · trivial']], 14, changed);
+    await changed.run();
+
+    assert.equal((await tick.stored('waiting')).state, 'done');
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'Todo', Severity: 'S4 · trivial' });
+  });
+
+  it('keeps for a person an action whose guarded value the configuration has come to refuse', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+    await tick.drain.run();
+    const changed = drainUnder(tick, { ...tick.config, refusedStatus: ['Done', 'In Progress'] });
+
+    await teach(tick, [['Severity', 'S4 · trivial']], 14, changed);
+
+    const kept = await tick.stored('waiting');
+    assert.equal(kept.state, 'blocked');
+    assert.match(kept.lastError ?? '', /could not be released/);
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'Todo' });
+  });
+
+  it('keeps for a person an action the configuration no longer lets run, and still frees the next one', async () => {
+    const tick = tickFixture({
+      items: [seedItem(twelve, 'item-7', {}), seedItem(thirteen, 'item-8', {}), seedItem(fourteen, 'item-9', {})],
+    });
+    await tick.file({ id: 'unmanaged-now', payload: setFields(12, { severity: 'S4' }) });
+    await tick.file({ id: 'still-fine', payload: setFields(13, { module: 'Billing' }) });
+    await tick.drain.run();
+    assert.equal((await tick.stored('unmanaged-now')).state, 'blocked');
+    assert.equal((await tick.stored('still-fine')).state, 'blocked');
+    const changed = drainUnder(tick, {
+      ...tick.config,
+      fields: tick.config.fields.filter((field) => field !== 'Severity'),
+    });
+
+    tick.board.addOption('Module', { id: 'option-module-billing', name: 'Billing' });
+    await teach(tick, [['Severity', 'S4 · trivial']], 14, changed, { status: 'Todo' });
+
+    const kept = await tick.stored('unmanaged-now');
+    assert.equal(kept.state, 'blocked');
+    assert.deepEqual(kept.missingOptions, []);
+    assert.match(kept.lastError ?? '', /could not be released/);
+    assert.match(kept.lastError ?? '', /Severity/);
+    assert.equal((await tick.stored('still-fine')).state, 'queued');
+    assert.deepEqual(await readLastTickAt(tick.repository), tick.clock.now());
+    assert.ok(tick.logger.lines.some((line) => line.message.includes('could not be released')));
+
+    const later = await changed.run();
+    assert.equal(later.unblocked, 0);
+    assert.equal((await tick.stored('unmanaged-now')).state, 'blocked');
+  });
+
+  it('replays every value the board lacked, once it offers all of them', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4', type: 'Chore' }) });
+    await tick.drain.run();
+    tick.board.setByHand(twelve, 'Status', 'In Review');
+
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+    assert.equal((await tick.stored('waiting')).state, 'blocked', 'one of the two values is still missing');
+    await teach(tick, [['Defect type', 'Chore']], 15);
+    await tick.drain.run();
+
+    assert.deepEqual(tick.board.valuesOf(twelve), {
+      Status: 'In Review',
+      Severity: 'S4 · trivial',
+      'Defect type': 'Chore',
+    });
+  });
+
+  it('leaves for a person an action blocked without a record of the values the board lacked', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' }), seedItem(fourteen, 'item-9', {})] });
+    const filed = await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+    // What a queue file kept from before the block recorded which values were missing.
+    filed.start(tick.clock.now());
+    filed.block(tick.clock.now(), new OptionNotFound('Severity', 'S4', ['S1 · blocking']));
+    await tick.repository.update(filed);
+
+    await teach(tick, [['Severity', 'S4 · trivial']]);
+    const report = await tick.drain.run();
+
+    assert.equal(report.executed, 0);
+    assert.equal((await tick.stored('waiting')).state, 'blocked');
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'Todo' });
+  });
+
+  it('replays the whole action when a person retries it, the status they asked for included', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', { Status: 'Todo' })] });
+    await tick.file({ id: 'waiting', payload: setFields(12, { status: 'In Progress', severity: 'S4' }) });
+    await tick.drain.run();
+    tick.board.setByHand(twelve, 'Status', 'In Review');
+    tick.board.addOption('Severity', { id: 'option-severity-s4', name: 'S4 · trivial' });
+
+    await new RetryAction(tick.repository, tick.clock).execute('waiting');
+    const report = await tick.drain.run();
+
+    assert.equal(report.done, 1);
+    assert.deepEqual(tick.board.valuesOf(twelve), { Status: 'In Progress', Severity: 'S4 · trivial' });
   });
 
   it('leaves a blocked action alone while the board still cannot answer for it', async () => {
@@ -634,4 +976,37 @@ async function failTheComment(tick: TickFixture): Promise<void> {
     assert.equal(report.executed, 1, `only the comment runs on attempt ${String(attempt)}`);
     tick.clock.advanceMinutes(60);
   }
+}
+
+/**
+ * Somebody adds options in the board's own interface, and the next tick that has
+ * work on another issue reads the catalog afresh once the cached one has aged out.
+ */
+async function teach(
+  tick: TickFixture,
+  options: readonly [string, string][],
+  otherIssue = 14,
+  drain: DrainQueue = tick.drain,
+  otherWork: Record<string, string> = { severity: 'S2' },
+): Promise<void> {
+  for (const [field, name] of options) {
+    tick.board.addOption(field, { id: `option-${name}`, name });
+  }
+  tick.clock.advance(tick.config.worker.catalogTtlSec * 1000 + 1000);
+  await tick.file({ id: `teaching-${String(otherIssue)}`, payload: setFields(otherIssue, otherWork) });
+  await drain.run();
+}
+
+/** The same queue and board, worked by a worker that reads a configuration changed since. */
+function drainUnder(tick: TickFixture, config: Config): DrainQueue {
+  return new DrainQueue({
+    repository: tick.repository,
+    boards: tick.boards,
+    kinds: defaultKindRegistry(config),
+    policy: tick.policy,
+    clock: tick.clock,
+    sleeper: tick.sleeper,
+    logger: tick.logger,
+    config,
+  });
 }
