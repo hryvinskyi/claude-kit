@@ -199,4 +199,4 @@ deptrac:
 - [ ] Controllers/view objects/handlers are humble; business rules sit in use cases/entities.
 - [ ] Top-level packages read as domain capabilities, not framework folders.
 - [ ] Boundaries are enforced by tooling (Deptrac / `Api/`-only rule / `@api`), not just convention.
-- [ ] Each abstraction protects a *real* axis of change (no single-impl ceremony). Factories are not ceremony: they are interfaces the container implements, and nothing else may create an object (`solid.md` §DIP).
+- [ ] Each abstraction protects a *real* axis of change (no single-impl ceremony). Factories are not ceremony: they are interfaces whose implementation holds no `new` a person wrote, and nothing else may create an object (`solid.md` §DIP).

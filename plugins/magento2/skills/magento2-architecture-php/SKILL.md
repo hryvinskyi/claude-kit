@@ -70,7 +70,31 @@ class PlaceOrder implements PlaceOrderInterface   // Api/ port
     ) {}
 }
 ```
-The generated `…Factory` is the factory the no-`new` rule asks for (`solid.md` §DIP): a new instance is `$this->orderFactory->create()`, never `new Order()` and never a static named constructor. A value object gets one the same way: Magento generates a `…Factory` for any class a constructor asks for, so nobody writes a factory class by hand. Publish a `…FactoryInterface` of its own, bound by `<preference>` to the generated factory, only when other modules must hold it.
+The generated `…Factory` is the factory the no-`new` rule asks for (`solid.md` §DIP): a new instance is `$this->orderFactory->create()`, never `new Order()` and never a static named constructor. A value object gets one the same way: Magento generates a `…Factory` for any class a constructor asks for, so nobody writes a factory class by hand. Ask for the factory of the **interface** (`OrderInterfaceFactory`, not `OrderFactory`): it creates whatever the `<preference>` for `OrderInterface` names, so that preference is the seam that keeps the concrete class substitutable, and another module may hold the generated factory of an `Api/Data` interface as it holds the interface.
+
+The generated factory has Magento's shape, not yours: it implements no interface, and its one method is `create(array $data = [])`, keyed by the constructor's parameter names. A `<preference>` from a `…FactoryInterface` of your own to a generated factory therefore does not work: the object injected is no instance of the interface, and its `create()` has another signature. When a module needs the typed factory port of `solid.md` §DIP — typed parameters, the contract as return type — a thin adapter implements it by delegating to the generated factory. It holds no `new` and computes nothing, so it is not the hand-written factory the rule forbids:
+```php
+// Api/MoneyFactoryInterface.php — the port: typed arguments, the contract returned
+interface MoneyFactoryInterface
+{
+    public function create(int $minorUnits, string $currency): MoneyInterface;
+}
+
+// Model/MoneyFactoryAdapter.php — implements the port over the generated Api\Data\MoneyInterfaceFactory
+class MoneyFactoryAdapter implements MoneyFactoryInterface
+{
+    public function __construct(private readonly MoneyInterfaceFactory $generated) {}
+
+    public function create(int $minorUnits, string $currency): MoneyInterface
+    {
+        return $this->generated->create(['minorUnits' => $minorUnits, 'currency' => $currency]);
+    }
+}
+```
+```xml
+<preference for="Acme\Sales\Api\MoneyFactoryInterface" type="Acme\Sales\Model\MoneyFactoryAdapter"/>
+```
+The adapter's name does not end in `Factory`: Magento generates a class named `<Class>Factory` on demand, and a hand-written class of that name would collide with it. Write the port only when the untyped `create(array)` would otherwise spread constructor parameter names through callers — another module that must hold it, or a domain service creating values from typed arguments; elsewhere the generated factory is enough.
 
 ### No `final` classes
 Magento classes are never `final`, and the core skill's `final` in its examples does not carry over. Magento builds every plugin as a generated `…\Interceptor` that extends the intercepted class, and every lazy `…\Proxy` the same way: a `final` class cannot take a plugin or a proxy — the generated subclass is a fatal error — so it closes the extension point to every module that would add one. Encapsulation comes from `private` members and `private readonly` dependencies instead; a `final` in new or edited Magento code is a review finding.
@@ -232,7 +256,7 @@ Keep controllers and Blocks humble and push logic into a **ViewModel** (`Argumen
 
 ### No `new`, in Magento's vocabulary
 
-- **Factories:** Magento generates a `…Factory` for any class, and its `create()` asks the ObjectManager (§2).
+- **Factories:** Magento generates a `…Factory` for any class, and its `create()` asks the ObjectManager (§2). The core's typed `…FactoryInterface` is implemented by a thin adapter that delegates to the generated factory, never by a `<preference>` to it: the generated class implements no interface (§2).
 - **The composition root** is Magento's bootstrap.
 
 ### DDD
@@ -263,7 +287,7 @@ Read with the core skill's `references/implementer-checklist.md`.
 
 - Inner code names no `Magento\Framework` class and no `ObjectManager`.
 - What crosses a boundary: `Api/` + `Api/Data/` contracts, never `AbstractModel`s. Wiring is a `di.xml` preference or plugin; a class that is built but never wired ships nothing, so a test resolves it through the real container.
-- Factories: Magento generates `…Factory`, whose `create()` asks the ObjectManager; nobody writes one by hand. The composition root is Magento's bootstrap.
+- Factories: Magento generates `…Factory`, whose `create()` asks the ObjectManager; nobody writes one by hand. A typed `…FactoryInterface` is implemented by an adapter that delegates to the generated factory and holds no `new`; a `<preference>` from it to the generated factory fails at injection (§2). The composition root is Magento's bootstrap.
 - No class is `final`: Magento's plugins and proxies are generated subclasses of it (§2).
 - Declared dependencies are the `module.xml` sequence and the composer require; a neighbour's name appears in neither the code nor the wiring unless it is declared there.
 - The browser seam: the ViewModel builds the config, the template prints it escaped and asks the renderer for the asset (§8). JS/TS source is written against `architecture:clean-architecture-js` and `magento2:magento2-architecture-frontend`.

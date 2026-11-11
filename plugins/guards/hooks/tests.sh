@@ -379,10 +379,19 @@ cat > "$TMP/other.jsonl" <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"journal"}}]}}
 EOF
 gate() { printf '{"tool_name":"%s","cwd":"%s","transcript_path":"%s","tool_input":{"file_path":"%s"}}' "$1" "$2" "$3" "$4"; }
+# a PHP plan is Plan mode, whose blast-radius audit runs against clean-architecture.md, solid.md and ddd.md:
+# every plan transcript below reads them, so each case still tests what it names
+plan_refs() { # transcript -> the same transcript with the PHP plan references read
+  for ref in solid.md ddd.md clean-architecture.md; do
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/root/.claude/skills/clean-architecture-php/references/%s"}}]}}\n' "$ref" >> "$1"
+  done
+}
+cp "$TMP/loaded.jsonl" "$TMP/loaded-plan.jsonl" && plan_refs "$TMP/loaded-plan.jsonl"
+for f in read catfile lsdir other; do plan_refs "$TMP/$f.jsonl"; done
 expect_exit "plan gate: php plan write without skill blocked" 2 \
   "$(gate Write "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
-expect_exit "plan gate: php plan write after Skill allowed" 0 \
-  "$(gate Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
+expect_exit "plan gate: php plan write after Skill and the plan references allowed" 0 \
+  "$(gate Write "$TMP/php" "$TMP/loaded-plan.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
 expect_exit "plan gate: SKILL.md read satisfies gate" 0 \
   "$(gate Edit "$TMP/php" "$TMP/read.jsonl" "$TMP/php/.claude/plans/x/task-1.md")" "$P"
 expect_exit "plan gate: cat of SKILL.md satisfies gate" 0 \
@@ -397,6 +406,7 @@ EOF
 cat > "$TMP/other-ns.jsonl" <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"qa:tighten"}}]}}
 EOF
+plan_refs "$TMP/loaded-ns.jsonl" && plan_refs "$TMP/other-ns.jsonl"
 expect_exit "plan gate: the namespaced plugin skill counts as loaded" 0 \
   "$(gate Write "$TMP/php" "$TMP/loaded-ns.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
 expect_exit "plan gate: another plugin's namespaced skill does not" 2 \
@@ -410,12 +420,26 @@ expect_exit "plan gate: missing transcript never blocks" 0 \
   "$(gate Write "$TMP/php" "$TMP/nope.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
 expect_exit "plan gate: non-write tool untouched" 0 \
   "$(gate Read "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
+# the Skill call alone is not the rubric for a plan either
+expect_exit "plan gate: a PHP plan with the Skill call alone blocked" 2 \
+  "$(gate Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
+expect_exit "plan gate: a PHP plan with the skill and its plan references allowed" 0 \
+  "$(gate Write "$TMP/php" "$TMP/loaded-plan.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
+for ref in solid.md ddd.md clean-architecture.md; do
+  grep -v "references/$ref" "$TMP/loaded-plan.jsonl" > "$TMP/plan-no-$ref.jsonl"
+  expect_exit "plan gate: a PHP plan without $ref blocked" 2 \
+    "$(gate Edit "$TMP/php" "$TMP/plan-no-$ref.jsonl" "$TMP/php/.claude/plans/x/task-1.md")" "$P"
+done
+OUT=$(gate Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/x/_plan.md" | python3 "$P" 2>&1)
+case "$OUT" in *"a plan file"*"clean-architecture-php/references/clean-architecture.md"*"clean-architecture-php/references/ddd.md"*"clean-architecture-php/references/solid.md"*) ok ;;
+  *) ko "plan gate: the denial names every missing plan reference"; echo "$OUT" ;; esac
+case "$OUT" in *"the clean-architecture-php skill itself"*) ko "plan gate: the denial asks for a skill already loaded"; echo "$OUT" ;; *) ok ;; esac
 # a subagent logs to <session>/subagents/agent-*.jsonl but its hooks are handed the
 # parent's <session>.jsonl — the gate must see the whole family, either way round
 mkdir -p "$TMP/proj/sess-a/subagents" "$TMP/proj/sess-b/subagents"
 : > "$TMP/proj/sess-a.jsonl"
-cp "$TMP/loaded.jsonl" "$TMP/proj/sess-a/subagents/agent-1.jsonl"
-cp "$TMP/loaded.jsonl" "$TMP/proj/sess-b.jsonl"
+cp "$TMP/loaded-plan.jsonl" "$TMP/proj/sess-a/subagents/agent-1.jsonl"
+cp "$TMP/loaded-plan.jsonl" "$TMP/proj/sess-b.jsonl"
 : > "$TMP/proj/sess-b/subagents/agent-1.jsonl"
 mkdir -p "$TMP/proj/sess-c/subagents"
 : > "$TMP/proj/sess-c.jsonl"
@@ -494,6 +518,14 @@ expect_exit "source gate: a domain directory with ddd.md allowed" 0 \
   "$(gate Write "$TMP/php" "$TMP/t-ddd.jsonl" "$TMP/php/src/Domain/SurveyOptIn.php")" "$P"
 expect_exit "source gate: Api/Data needs ddd.md with no stack registered" 2 \
   "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/Api/Data/SurveyOptIn.php")" "$P"
+# a domain directory of several segments matches whole directory names, nested or not, never a fragment of one
+mkdir -p "$TMP/php/src/LegacyApi/Data" "$TMP/php/src/Api/DataMapper" "$TMP/php/src/Api/Data/Line"
+expect_exit "source gate: Api/Data nested a level deeper needs ddd.md" 2 \
+  "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/Api/Data/Line/Amount.php")" "$P"
+expect_exit "source gate: a directory ending in Api followed by Data needs no ddd.md" 0 \
+  "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/LegacyApi/Data/Row.php")" "$P"
+expect_exit "source gate: Api followed by a directory starting with Data needs no ddd.md" 0 \
+  "$(gate Write "$TMP/php" "$TMP/t-skill-solid.jsonl" "$TMP/php/src/Api/DataMapper/RowMapper.php")" "$P"
 # a domain directory is one of the project's own: a directory above the project root never counts
 mkdir -p "$TMP/Model/shop/src/Service" "$TMP/Model/shop/src/Api/Data" "$TMP/Model/shop/src/Model"
 echo '{}' > "$TMP/Model/shop/composer.json"
@@ -569,7 +601,7 @@ tj "$TMP/tj-skill-only.jsonl" skill
 cat > "$TMP/tj-cat.jsonl" <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat ~/.claude/skills/clean-architecture-js/SKILL.md ~/.claude/skills/clean-architecture-js/references/solid.md ~/.claude/skills/clean-architecture-js/references/javascript.md"}}]}}
 EOF
-cat "$TMP/loaded.jsonl" "$TMP/tj-plan-js.jsonl" > "$TMP/t-plan-php-js.jsonl"
+cat "$TMP/loaded-plan.jsonl" "$TMP/tj-plan-js.jsonl" > "$TMP/t-plan-php-js.jsonl"
 expect_exit "js gate: js source write without rubric blocked" 2 \
   "$(gate Write "$TMP/js" "$TMP/empty.jsonl" "$TMP/js/src/widgets/coupon.js")" "$P"
 expect_exit "js gate: the PHP rubric does not stand in for the JS one" 2 \
@@ -654,14 +686,14 @@ expect_exit "js plan: React project plan needs react.md" 2 \
 expect_exit "js plan: React project plan with skill + react.md allowed" 0 \
   "$(gate Write "$TMP/react" "$TMP/tj-plan-react.jsonl" "$TMP/react/.claude/plans/x/_plan.md")" "$P"
 expect_exit "js plan: PHP plan naming a JS file needs the JS skill too" 2 \
-  "$(gatec Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 2: add web/js/coupon.js")" "$P"
+  "$(gatec Write "$TMP/php" "$TMP/loaded-plan.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 2: add web/js/coupon.js")" "$P"
 expect_exit "js plan: PHP plan naming a JS file with both skills allowed" 0 \
   "$(gatec Write "$TMP/php" "$TMP/t-plan-php-js.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 2: add web/js/coupon.js")" "$P"
 expect_exit "js plan: PHP plan naming no JS needs only the PHP skill" 0 \
-  "$(gatec Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 2: add Api/CouponInterface.php")" "$P"
+  "$(gatec Write "$TMP/php" "$TMP/loaded-plan.jsonl" "$TMP/php/.claude/plans/x/_plan.md" "Task 2: add Api/CouponInterface.php")" "$P"
 printf '# Plan\n| 1 | `web/js/coupon-gap.ts` pure module |\n' > "$TMP/php/.claude/plans/y/_plan.md"
 expect_exit "js plan: a sibling plan file naming a .ts file brings the JS skill into an Edit" 2 \
-  "$(gatec Edit "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/y/task-1.md" "reword")" "$P"
+  "$(gatec Edit "$TMP/php" "$TMP/loaded-plan.jsonl" "$TMP/php/.claude/plans/y/task-1.md" "reword")" "$P"
 expect_exit "js plan: python project plan untouched even when it names a .js file" 0 \
   "$(gatec Write "$TMP/py" "$TMP/empty.jsonl" "$TMP/py/.claude/plans/x/_plan.md" "static/app.js")" "$P"
 
@@ -800,11 +832,11 @@ expect_exit "stacks: a registered stack's PHP domain directory needs ddd.md on a
   "$(gate Write "$TMP/php" "$TMP/st/s-type.jsonl" "$TMP/php/src/Contracts/Data/Line.php")" "$P"
 expect_exit "stacks: that directory is no domain directory when the stack is not registered" 0 \
   "$(gate Write "$TMP/php" "$TMP/st/s-core.jsonl" "$TMP/php/src/Contracts/Data/Line.php")" "$P"
-tr_ "$TMP/st/p-php.jsonl" skill=clean-architecture-php
-tr_ "$TMP/st/p-php-unreg.jsonl" skill=clean-architecture-php
-tr_ "$TMP/st/p-a.jsonl" skill=clean-architecture-php "$A_CLONE/SKILL.md"
-tr_ "$TMP/st/p-a-js.jsonl" skill=clean-architecture-php "$A_CLONE/SKILL.md" skill=clean-architecture-js /r/clean-architecture-js/references/javascript.md
-tr_ "$TMP/st/p-a-front.jsonl" skill=clean-architecture-php "$A_CLONE/SKILL.md" skill=clean-architecture-js "$A_CACHE/../alpha-architecture-frontend/SKILL.md"
+tr_ "$TMP/st/p-php.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md"
+tr_ "$TMP/st/p-php-unreg.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md"
+tr_ "$TMP/st/p-a.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md" "$A_CLONE/SKILL.md"
+tr_ "$TMP/st/p-a-js.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md" "$A_CLONE/SKILL.md" skill=clean-architecture-js /r/clean-architecture-js/references/javascript.md
+tr_ "$TMP/st/p-a-front.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md" "$A_CLONE/SKILL.md" skill=clean-architecture-js "$A_CACHE/../alpha-architecture-frontend/SKILL.md"
 for s in p-php p-a p-a-js p-a-front; do reg "$s" "$TMP/decl/alpha.json"; done
 expect_exit "stacks: a plan on a registered stack's project needs its skill" 2 \
   "$(gatec Write "$TMP/pa" "$TMP/st/p-php.jsonl" "$TMP/pa/.claude/plans/x/_plan.md" "Task 1: add Api/Foo.php")" "$P"
@@ -1053,7 +1085,7 @@ EOF" "$TMP/js" "$TMP/tj-ts.jsonl")" "$B"
 expect_exit "bash write: heredoc plan naming a .ts file on a PHP project needs the JS skill" 2 \
   "$(bash_json "cat > .claude/plans/x/_plan.md <<'EOF'
 | 1 | web/js/gap.ts |
-EOF" "$TMP/php" "$TMP/loaded.jsonl")" "$B"
+EOF" "$TMP/php" "$TMP/loaded-plan.jsonl")" "$B"
 expect_exit "bash write: heredoc carrying ts-expect-error into ts source blocked" 2 \
   "$(bash_json "cat > src/widgets/coupon.ts <<'EOF'
 // @ts-expect-error legacy

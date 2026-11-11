@@ -246,9 +246,12 @@ Boundaries cost indirection. Add one only where the benefit is real. Before reco
 9. **`new` in written code.** Code never instantiates a class with `new`.
    - An object comes from the **container**, as an injected service typed on its interface.
    - Or it comes from an injected **factory** (`…FactoryInterface`), when a genuinely new instance is needed.
-   - **A factory is an interface; the container writes its implementation, never a person.** How the
-     container generates it is the framework's: the stack skill names the mechanism, or the project's
-     docs do. If the project has none, that is a plan decision, not a licence to hand-write `new`.
+   - **A factory is an interface, and no person writes the `new` behind it.** The build generates its
+     implementation; or, where the framework generates factories of its own shape (implementing no
+     interface of yours), a thin adapter implements the interface by delegating to the generated
+     factory, with no `new` and no computation of its own. Which one applies is the framework's: the
+     stack skill names the mechanism, or the project's docs do. If the project has none, that is a plan
+     decision, not a licence to hand-write `new`.
    - Exempt: `throw new …Exception`, attribute metadata, tests, and the **composition root**: the one
      place that builds the container, before any exists (the front controller or console entry point
      that boots the kernel). It is not wiring code in general.
@@ -295,7 +298,7 @@ final class PlaceOrderHandler
 }
 ```
 
-**Never `new` a class.** Services come from the container, and new instances come from an injected `…FactoryInterface` whose implementation the container writes (the stack skill names how; none is a plan decision, not a licence). Nothing a person writes says `new`, not even a factory. `throw new …Exception`, attribute metadata, tests and the composition root (the one place that builds the container, before any exists) are exempt.
+**Never `new` a class.** Services come from the container, and new instances come from an injected `…FactoryInterface` whose implementation the build generates, or a thin adapter delegates to the factory the framework generates (the stack skill names how; none is a plan decision, not a licence). Nothing a person writes says `new`, not even a factory. `throw new …Exception`, attribute metadata, tests and the composition root (the one place that builds the container, before any exists) are exempt.
 
 ## References
 - Robert C. Martin, *The Clean Architecture* — https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html

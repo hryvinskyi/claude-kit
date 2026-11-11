@@ -91,7 +91,10 @@ t "$TMP/t-mag-cache.jsonl" php p:solid.md "$STACK_CACHE/magento2-architecture-ph
 t "$TMP/tj-base.jsonl" js j:solid.md j:javascript.md
 t "$TMP/tj-mag.jsonl" js j:solid.md j:javascript.md mf
 t "$TMP/tj-mag-ddd.jsonl" js j:solid.md j:javascript.md mf j:ddd.md
-t "$TMP/t-plan-php-js.jsonl" php mp js mf
+t "$TMP/t-plan-php-js.jsonl" php mp p:solid.md p:ddd.md p:clean-architecture.md js mf
+# Plan mode audits the blast radius against clean-architecture.md, solid.md and ddd.md
+t "$TMP/t-plan-mag.jsonl" php mp p:solid.md p:ddd.md p:clean-architecture.md
+t "$TMP/t-plan-plain.jsonl" php p:solid.md p:ddd.md p:clean-architecture.md
 t "$TMP/t-both-mag.jsonl" php p:solid.md mp js j:solid.md j:javascript.md mf
 t "$TMP/t-php-for-other.jsonl" php p:solid.md
 
@@ -123,23 +126,25 @@ case "$OUT" in *"references/ddd.md"*"references/solid.md"*"Skill tool with \`mag
 # ---------- plans ----------
 expect_exit "plan gate: magento plan needs the stack skill" 2 \
   "$(gate Write "$TMP/mag" "$TMP/loaded.jsonl" "$TMP/mag/.claude/plans/x/_plan.md")" "$P"
-expect_exit "plan gate: magento plan with skill+stack skill allowed (solid not required for plans)" 0 \
+expect_exit "plan gate: magento plan with skill+stack skill but no plan references blocked" 2 \
   "$(gate Write "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md")" "$P"
+expect_exit "plan gate: magento plan with skill+stack skill+plan references allowed" 0 \
+  "$(gate Write "$TMP/mag" "$TMP/t-plan-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md")" "$P"
 expect_exit "js plan: magento plan naming a JS file needs the JS skill too" 2 \
-  "$(gatec Write "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md" "Task 2: add view/frontend/web/js/coupon.js")" "$P"
+  "$(gatec Write "$TMP/mag" "$TMP/t-plan-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md" "Task 2: add view/frontend/web/js/coupon.js")" "$P"
 expect_exit "js plan: magento plan naming a JS file with both skills allowed" 0 \
   "$(gatec Write "$TMP/mag" "$TMP/t-plan-php-js.jsonl" "$TMP/mag/.claude/plans/x/_plan.md" "Task 2: add view/frontend/web/js/coupon.js")" "$P"
 expect_exit "js plan: magento plan naming no JS needs only the PHP skill" 0 \
-  "$(gatec Write "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md" "Task 2: add Api/CouponInterface.php")" "$P"
+  "$(gatec Write "$TMP/mag" "$TMP/t-plan-mag.jsonl" "$TMP/mag/.claude/plans/x/_plan.md" "Task 2: add Api/CouponInterface.php")" "$P"
 printf '# Plan\n| 1 | `web/js/coupon-gap.ts` pure module |\n' > "$TMP/mag/.claude/plans/y/_plan.md"
 expect_exit "js plan: a sibling plan file naming a .ts file brings the JS skill into an Edit" 2 \
-  "$(gatec Edit "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/y/task-1.md" "reword")" "$P"
+  "$(gatec Edit "$TMP/mag" "$TMP/t-plan-mag.jsonl" "$TMP/mag/.claude/plans/y/task-1.md" "reword")" "$P"
 for word in RequireJS Knockout uiComponent AssetRendererInterface x-magento-init data-mage-init Alpine.data; do
   expect_exit "js plan: a plan naming $word orders browser work" 2 \
-    "$(gatec Write "$TMP/mag" "$TMP/t-skill-mag.jsonl" "$TMP/mag/.claude/plans/z/_plan.md" "Task 3: the $word part")" "$P"
+    "$(gatec Write "$TMP/mag" "$TMP/t-plan-mag.jsonl" "$TMP/mag/.claude/plans/z/_plan.md" "Task 3: the $word part")" "$P"
 done
 expect_exit "js plan: a plain PHP plan naming Knockout orders browser work while this stack is registered" 2 \
-  "$(gatec Write "$TMP/plain" "$TMP/loaded.jsonl" "$TMP/plain/.claude/plans/x/_plan.md" "Task 3: a Knockout grid")" "$P"
+  "$(gatec Write "$TMP/plain" "$TMP/t-plan-plain.jsonl" "$TMP/plain/.claude/plans/x/_plan.md" "Task 3: a Knockout grid")" "$P"
 
 # ---------- JavaScript source ----------
 expect_exit "js gate: magento module js needs the magento2 frontend skill" 2 \
@@ -164,7 +169,7 @@ expect_exit "js gate: a test suite that is a package of its own untouched" 0 \
 expect_exit "bash write: heredoc plan naming a .ts file on magento needs the JS skill" 2 \
   "$(bash_json "cat > .claude/plans/x/_plan.md <<'EOF'
 | 1 | view/frontend/web/js/gap.ts |
-EOF" "$TMP/mag" "$TMP/t-skill-mag.jsonl")" "$B"
+EOF" "$TMP/mag" "$TMP/t-plan-mag.jsonl")" "$B"
 expect_exit "bash write: heredoc into magento PHP source without the stack skill blocked" 2 \
   "$(bash_json "cat > app/code/Acme/Foo/Block/Survey.php <<'EOF'
 <?php

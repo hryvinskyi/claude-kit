@@ -5,6 +5,7 @@
     "root_paths": ["bin/console", "config/bundles.php"]
   },
   "browser_markers": ["Stimulus", "stimulus_controller"],
+  "domain_dirs": {"php": ["src/Api", "src/Event", "src/Entity", "Domain"]},
   "requires": {
     "php_source": ["symfony-architecture-php/SKILL.md"],
     "js_source": ["symfony-architecture-frontend/SKILL.md"],

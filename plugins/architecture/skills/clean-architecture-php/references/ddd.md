@@ -59,7 +59,7 @@ A modular monolith's "cross-module access only via `Api/`, `Event/`, `Entity/`" 
 ## Part 2 — Tactical building blocks
 
 ### Creation lives in factories
-**Code never writes `new`, and never hides one in a static named constructor** (`Money::ofMinor()`, `Order::draft()`, `OrderId::generate()` each do `new self(...)`). An object comes from the container, or — when a genuinely new instance is needed — from an injected factory. **A factory is an interface; the container writes its implementation, never a person**: how it is generated is the framework's (the stack skill names the mechanism, or the project's docs do) — and if there is none, that is a plan decision, not a licence to hand-write `new`. **A factory method only creates**: one object per method, from its arguments, no computation.
+**Code never writes `new`, and never hides one in a static named constructor** (`Money::ofMinor()`, `Order::draft()`, `OrderId::generate()` each do `new self(...)`). An object comes from the container, or — when a genuinely new instance is needed — from an injected factory. **A factory is an interface, and no person writes the `new` behind it**: the build generates its implementation, or, where the framework generates factories of its own shape, a thin adapter delegates to the generated one with no `new` and no computation of its own. Which one applies is the framework's (the stack skill names the mechanism, or the project's docs do) — and if there is none, that is a plan decision, not a licence to hand-write `new`. **A factory method only creates**: one object per method, from its arguments, no computation.
 
 Why: it is DIP at the call site. A `new`, or a static call that makes one, binds the caller to one concrete class, and nothing can be substituted for it — not a fake, not a decorator, not a second implementation. A factory interface is a seam the container fills.
 
@@ -102,7 +102,7 @@ final readonly class Money
     }
 }
 
-interface MoneyFactoryInterface               // the whole factory: the container generates its implementation
+interface MoneyFactoryInterface               // the whole factory: its implementation holds no `new` a person wrote
 {
     public function create(int $minorUnits, Currency $currency): Money;   // creates; computes nothing
 }
@@ -206,14 +206,14 @@ final readonly class OrderPlaced
     public function __construct(public OrderId $orderId) {}
 }
 
-interface OrderEventFactoryInterface          // domain port; the container generates its implementation
+interface OrderEventFactoryInterface          // domain port; its implementation holds no `new` a person wrote
 {
     public function placed(OrderId $id): OrderPlaced;
 }
 ```
 
 ### Factory & Specification
-- **Factory** — not a pattern kept for complex construction: every creation goes through one (§*Creation lives in factories*). A factory is an interface nobody implements by hand, so it costs a few lines; it is the seam, not ceremony.
+- **Factory** — not a pattern kept for complex construction: every creation goes through one (§*Creation lives in factories*). A factory is an interface whose implementation is generated, or at most a thin adapter over a generated factory, so it costs a few lines; it is the seam, not ceremony.
 - **Specification** (use when it earns it) — a reusable, composable predicate (`$spec->isSatisfiedBy($order)`) for selection/validation rules you compose (`->and()`, `->or()`). Skip it for one-off `if`s.
 
 ---
@@ -282,7 +282,7 @@ Where the framework's models extend a framework base class and are coupled to it
 - [ ] Cross-context access goes through published language (`Api/`) or an ACL — no reaching into internals.
 - [ ] Invariants live **inside** aggregates; no anemic setter-driven state changes.
 - [ ] Value objects replace stringly-typed money/ids/quantities and validate on construction.
-- [ ] Nothing written by a person says `new` — factories are interfaces the container implements, their methods only create, no static named constructors; an aggregate receives the factories it needs as method arguments.
+- [ ] Nothing written by a person says `new` — factories are interfaces whose implementation holds no `new` a person wrote, their methods only create, no static named constructors; an aggregate receives the factories it needs as method arguments.
 - [ ] One repository per aggregate root; aggregates reference each other **by id**.
 - [ ] Application services orchestrate and stay rule-free; domain services hold cross-entity rules.
 - [ ] Tactical machinery is applied where complexity earns it — not on CRUD.

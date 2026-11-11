@@ -27,8 +27,10 @@ project with a stack plugin, read its stack skill's *Implementer checklist on th
 
 - **Code never instantiates a class with `new`.** A collaborator comes from the container, injected
   through its interface. A genuinely new instance comes from an injected `…FactoryInterface`, and a
-  factory is only that interface: the container writes its implementation, never a person. How it
-  is generated is the framework's: the stack skill names the mechanism, or the project's docs do.
+  factory is only that interface, and no person writes the `new` behind it: the build generates its
+  implementation, or, where the framework generates factories of its own shape, a thin adapter
+  delegates to the generated one with no `new` and no computation of its own. Which one applies is
+  the framework's: the stack skill names the mechanism, or the project's docs do.
   If the project has none, stop and return the question: it is a plan decision, not a licence to
   hand-write `new`. `throw new …Exception`, attribute metadata, tests and the composition root are
   exempt. The composition root is the one place that builds the container, before any exists (the

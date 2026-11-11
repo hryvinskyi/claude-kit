@@ -33,7 +33,7 @@ final class OrderService
 final class PlaceOrder
 {
     public function __construct(
-        private readonly OrderFactoryInterface $orderFactory, // creation — an interface the container implements
+        private readonly OrderFactoryInterface $orderFactory, // creation — a factory interface, never `new`
         private readonly OrderRepository $orders,     // persistence — its own reason to change
         private readonly OrderNotifier $notifier,     // notification — its own reason to change
     ) {}
@@ -228,9 +228,12 @@ one of two shapes:
 - **a factory**, an injected `…FactoryInterface`, when a genuinely new instance is needed (a message with
   parameters, an entity being created, a value built from runtime data).
 
-**A factory is an interface; the container writes its implementation, never a person.** How the
-container generates it is the framework's: the stack skill names the mechanism, or the project's own
-docs do. If the project has none, that is a plan decision, not a licence to hand-write `new`.
+**A factory is an interface, and no person writes the `new` behind it.** The build generates its
+implementation; or, where the framework generates factories of its own shape (implementing no
+interface of yours, taking an untyped argument array), a thin adapter implements the interface by
+delegating to the generated factory, with no `new` and no computation of its own. Which one applies is
+the framework's: the stack skill names the mechanism, or the project's own docs do. If the project has
+none, that is a plan decision, not a licence to hand-write `new`.
 **A factory method only creates**: one object per method, from its arguments, no computation. Whatever
 computes those arguments is a service or the value itself.
 **Exempt:** `throw new …Exception`, attribute metadata (`#[Assert\All([new Assert\NotBlank()])]`),
@@ -281,7 +284,8 @@ final class AttributeNotices implements AttributeNoticesInterface
     }
 }
 
-// The factory is only this interface; the container generates its implementation.
+// The factory is only this interface. Its implementation holds no `new` a person wrote: the build
+// generates it, or a thin adapter delegates to the factory the framework generates (the stack skill says which).
 interface TranslatableTextFactoryInterface
 {
     /** @param array<string, string> $parameters */
@@ -300,7 +304,7 @@ $this->notices->success($this->attributeNotices->groupCreated());
 ```
 
 The shape is the point: the vocabulary has one owner (a service, one method per sentence), and every
-object comes from a factory interface whose implementation nobody writes.
+object comes from a factory interface whose implementation holds no `new` a person wrote.
 
 Four smells, one fix:
 - a `new` at the call site, the root one;
@@ -322,7 +326,7 @@ Run these over the blast radius before the reading pass, in the diagnosis order 
 |---|---|---|
 | DIP | `new \\?(\w+\\)*\w*(Client\|Mailer\|Filesystem\|Repository)\(\|new \\?PDO\(` outside `Infrastructure/`, `Repository/`, `DependencyInjection/` and tests | never in written code: the container builds such a client from its service definition. (`Connection` is left out on purpose: it is as often the name of a value object as of a socket) |
 | DIP | `::getInstance\(\)\|\bglobal \$\|\$GLOBALS`, plus the framework's service locator (the stack skill's row) | never in domain or application code |
-| DIP | `(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(` over production code (`-P`, `-g '!**/tests/**'`) | the line is `throw new`, attribute metadata (`#[…(new …)]`), or the composition root: the one place that builds the container, before any exists (the front controller or console entry point that boots the kernel). The regex doesn't match `(object) []`, which is PHP's literal for an empty JSON object (`{}` in a schema or payload): it's acceptable for exactly that, never as a way around the rule for anything else. **Everything else is a finding**, a hand-written factory's `new` included: a `new` binds the caller to a concrete class, and so does a named constructor's `new self`/`new static`. Objects come from the container, as a service or from a factory interface it implements |
+| DIP | `(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(` over production code (`-P`, `-g '!**/tests/**'`) | the line is `throw new`, attribute metadata (`#[…(new …)]`), the composition root: the one place that builds the container, before any exists (the front controller or console entry point that boots the kernel), or code the build generates (a generated factory; never edited by hand). The regex doesn't match `(object) []`, which is PHP's literal for an empty JSON object (`{}` in a schema or payload): it's acceptable for exactly that, never as a way around the rule for anything else. **Everything else is a finding**, a hand-written factory's `new` included: a `new` binds the caller to a concrete class, and so does a named constructor's `new self`/`new static`. Objects come from the container, as a service or from a factory interface whose implementation holds no `new` a person wrote |
 | DIP | `new \\?(\w+\\)*\w*(Message\|Response\|Email\|Envelope\|Notification\|Exception)\(\s*['"]` in `Controller/`, `Service/`, `Handler/` (`-P`) | never in written code. A framework value assembled from a string literal at a call site means the vocabulary (a translation key, a domain, a template id) has no owner and is repeated wherever it is used. The fix: one owner for the vocabulary, a service in the module with one method per value, which takes the object from an injected factory interface and returns the framework's *contract*. See §DIP *No `new` — the container creates every object* |
 | DIP | `function \w+\([^)]*\b(<concrete>)\b\s+\$` and the same types after `private readonly` (`-P`), where `<concrete>` is the alternation of the framework's concrete classes that have a contract (the stack skill's row spells it) | the framework ships no contract for it. A parameter or property typed on a concrete class when an interface exists (the translator's, the event dispatcher's, the HTTP client's) is a DIP break *inside the same file*, however small |
 | DIP | the same string literal as an argument at ≥3 call sites: `rg -o '\x27[a-z_]+\x27\)' <radius> \| sort \| uniq -c \| sort -rn` | a value→value map. A domain name, a channel name or a key prefix repeated across call sites is a concept with no owner. Give it one owner, and have the call sites ask that owner |

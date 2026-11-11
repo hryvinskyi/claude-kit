@@ -40,8 +40,12 @@ that names `<skill>/references/<name>.md`:
                package.json depends on React while no stack is detected;
                typescript.md for .ts/.tsx/.mts/.cts; ddd.md in a domain directory
                (domain, model, entities, value-objects).
+  A domain directory of several segments (Api/Data) matches whole directory
+  names in a row, anywhere below the project root; a stack adds its own.
   Plan file    each skill the plan needs: the PHP skill on a PHP project
-               (composer.json); the JS skill on a JS project (package.json or
+               (composer.json), with solid.md, ddd.md and clean-architecture.md
+               (Plan mode's blast-radius audit runs against all three, whatever
+               the plan turns out to touch); the JS skill on a JS project (package.json or
                tsconfig.json and no composer.json), and on a PHP project whose
                plan directory names JS/TS files or browser machinery. JS host
                reference for plans: react.md when the plan names .jsx/.tsx files
@@ -106,6 +110,8 @@ SKILLS = (PHP_SKILL, JS_SKILL)
 SKILL_EQUIVALENTS = {"SKILL.md", "implementer-checklist.md"}
 
 PHP_DOMAIN_DIRS = {"Api/Data", "Model", "Entity", "Domain", "ValueObject", "ValueObjects", "Aggregate", "Aggregates"}
+# A PHP plan is the rubric's Plan mode, whose mandatory blast-radius audit runs against these three
+PHP_PLAN_REFERENCES = ("solid.md", "ddd.md", "clean-architecture.md")
 JS_DOMAIN_DIRS = {"domain", "Domain", "model", "models", "entities", "entity", "value-objects", "valueObjects", "value_objects"}
 
 # Directories whose PHP is not the project's own source: nothing to design there
@@ -564,10 +570,19 @@ def is_js_source(root: str, cwd: str, path: str) -> bool:
 def in_domain_dir(path: str, domain_dirs) -> bool:
     """Report whether the target sits in one of the domain directories (nested ones included).
 
+    A domain directory of several segments ("Api/Data", "src/Event") matches whole directory names in
+    a row anywhere in the path, never a fragment of one ("LegacyApi/Data", "Api/DataMapper").
+
     @param path The target relative to its project root, so a directory above the project never counts.
+    @param domain_dirs Directory names, or runs of them joined by "/".
     """
     directories = path.split("/")[:-1]
-    return bool(domain_dirs & set(directories)) or any("/" in d and d in "/".join(directories) for d in domain_dirs)
+    for domain_dir in domain_dirs:
+        wanted = [part for part in domain_dir.split("/") if part]
+        width = len(wanted)
+        if width and any(directories[i:i + width] == wanted for i in range(len(directories) - width + 1)):
+            return True
+    return False
 
 
 def stack_requirements(stacks, kind: str) -> set:
@@ -647,6 +662,7 @@ def plan_requirements(cwd: str, path: str, text, registered=()) -> set:
     required = set()
     if php_root:
         required.add(f"{PHP_SKILL}/SKILL.md")
+        required |= {f"{PHP_SKILL}/{reference}" for reference in PHP_PLAN_REFERENCES}
         required |= stack_requirements(detected, "plan_php")
     said = plan_text(cwd, path, text) if (php_root or js_root) else ""
     needs_js = bool(js_root and not php_root) or bool(php_root and orders_js(said, registered))

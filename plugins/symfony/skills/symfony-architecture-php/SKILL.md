@@ -76,18 +76,20 @@ final class DoctrineOrderRepository implements OrderRepositoryInterface
 
 ## 3. Application layer — handlers & transactions
 
-Use Messenger for command/query handlers, or plain invokable services. Keep them thin (orchestrate, don't decide).
+A command/query handler is a plain invokable application service. Keep it thin (orchestrate, don't decide). Messenger reaches it through a tag in `services.yaml`, and its events leave through a port whose adapter holds the bus, so the application layer imports nothing from Symfony (§11 *Layers*). `#[AsMessageHandler]` would do the tag's job, but it is a `Symfony\*` import in the application layer: the rubric's "attribute metadata" exemption is from the no-`new` rule (a `new` inside an attribute's arguments), not from the dependency rule. The attribute belongs on a handler that lives in infrastructure — an adapter that translates a transport message into a use-case call.
 
 ```php
-#[AsMessageHandler]
+// packages/sales/src/Application/PlaceOrderHandler.php — the use case: no framework import
+namespace Acme\Sales\Application;
+
 final class PlaceOrderHandler
 {
     public function __construct(
-        private readonly OrderRepositoryInterface $orders,   // port
-        private readonly OrderFactoryInterface $orderFactory,        // creation: factories, never `new`
-        private readonly OrderLineFactoryInterface $orderLines,      // or a static named constructor
-        private readonly OrderEventFactoryInterface $orderEvents,    // (ddd.md §Creation lives in factories)
-        private readonly MessageBusInterface $eventBus,      // for domain events
+        private readonly OrderRepositoryInterface $orders,             // port
+        private readonly OrderFactoryInterface $orderFactory,          // creation: factories, never `new`
+        private readonly OrderLineFactoryInterface $orderLines,        // or a static named constructor
+        private readonly OrderEventFactoryInterface $orderEvents,      // (ddd.md §Creation lives in factories)
+        private readonly DomainEventPublisherInterface $events,        // port; the Messenger bus is behind it
     ) {}
 
     public function __invoke(PlaceOrder $command): void
@@ -96,11 +98,65 @@ final class PlaceOrderHandler
         foreach ($command->lines as $l) { $order->addLine($this->orderLines->line($l->sku, $l->qty, $l->unitPrice)); }
         $order->place($this->orderEvents);
         $this->orders->save($order);
-        foreach ($order->releaseEvents() as $event) { $this->eventBus->dispatch($event); }
+        foreach ($order->releaseEvents() as $event) { $this->events->publish($event); }
+    }
+}
+
+// packages/sales/src/Application/DomainEventPublisherInterface.php — the PORT
+interface DomainEventPublisherInterface
+{
+    public function publish(object $event): void;
+}
+
+// packages/sales/src/Infrastructure/Messenger/MessengerDomainEventPublisher.php — the ADAPTER
+namespace Acme\Sales\Infrastructure\Messenger;
+
+final class MessengerDomainEventPublisher implements DomainEventPublisherInterface
+{
+    public function __construct(private readonly MessageBusInterface $eventBus) {}
+
+    public function publish(object $event): void
+    {
+        $this->eventBus->dispatch($event);
     }
 }
 ```
-Wrap multi-step writes in a transaction at this layer (`$em->wrapInTransaction(...)` or a middleware) — the domain shouldn't know about transactions.
+```yaml
+# the wiring lives outside the application layer: Messenger reads the handled message from __invoke's type
+Acme\Sales\Application\PlaceOrderHandler:
+    tags: [messenger.message_handler]
+Acme\Sales\Application\DomainEventPublisherInterface:
+    alias: Acme\Sales\Infrastructure\Messenger\MessengerDomainEventPublisher
+```
+Wrap multi-step writes in a transaction at this layer, through a port the application layer owns: the domain shouldn't know about transactions, and the use case shouldn't know about Doctrine. The Doctrine adapter implements the port with `wrapInTransaction()`:
+```php
+// packages/sales/src/Application/TransactionInterface.php — the PORT, owned by the application layer
+namespace Acme\Sales\Application;
+
+interface TransactionInterface
+{
+    /**
+     * @template T
+     * @param callable(): T $work
+     * @return T
+     */
+    public function run(callable $work): mixed;
+}
+
+// packages/sales/src/Infrastructure/Doctrine/DoctrineTransaction.php — the ADAPTER
+namespace Acme\Sales\Infrastructure\Doctrine;
+
+final class DoctrineTransaction implements TransactionInterface
+{
+    public function __construct(private readonly EntityManagerInterface $em) {}
+
+    public function run(callable $work): mixed
+    {
+        return $this->em->wrapInTransaction($work);   // commits, or rolls back and rethrows
+    }
+}
+```
+The handler takes `TransactionInterface` and writes `$this->transactions->run(fn () => …)`; `services.yaml` aliases the port to the adapter (§4). Messenger's `doctrine_transaction` middleware is the other way: the bus opens the transaction around every handler on it, and the handler names none. `$this->em->wrapInTransaction(...)` written in a handler is the framework leaking inward (§9).
 
 ## 4. DIP wiring — `services.yaml`
 
@@ -196,8 +252,8 @@ A review that starts from memory finds what the reviewer expects. These searches
 
 | Smell | Search | Glob | Innocent when |
 |---|---|---|---|
-| Framework leaking inward | `^use (Doctrine\\(ORM\\EntityManager\|DBAL\\Connection)\|Symfony\\Component\\(HttpFoundation\|HttpKernel\|Form)\|Symfony\\Bundle)` | `**/{Domain,Application,Entity,Api}/**/*.php` | mapping metadata is not a runtime dependency: `Doctrine\ORM\Mapping`, `Doctrine\DBAL\Types\Types`, `Doctrine\Common\Collections` (§2). A `Request` in an `Api/` contract is a hit worth reading: the contract now belongs to HTTP |
-| Transactions or flushing inside the model | `beginTransaction\|wrapInTransaction\|->flush\(` | `**/{Domain,Entity}/**/*.php` | never — this belongs to the application layer (§3) |
+| Framework leaking inward | `^use (Doctrine\\\|Symfony\\(Component\|Bundle\|Contracts)\\)` | `**/{Domain,Application,Entity,Api}/**/*.php` | one of the three carve-outs, which are metadata or a contract, never a runtime service: (1) entity mapping on `Entity/` classes — `Doctrine\ORM\Mapping`, `Doctrine\DBAL\Types\Types`, and `Doctrine\Common\Collections` for the mapped collections (§2), the only `Doctrine\` hits that clear: `ManagerRegistry`, `EntityRepository`, `ServiceEntityRepository`, the `EntityManager` and the DBAL `Connection` do not; (2) `Symfony\Component\DependencyInjection\Attribute\AutoconfigureTag` on an `Api/` extension point (§4); (3) `Symfony\Contracts\Translation\TranslatableInterface` as the sentence a port carries (§11 *No `new`*). Anything else is a leak: a Messenger import (`MessageBusInterface`, `#[AsMessageHandler]`) in `Application/` belongs behind a port and in `services.yaml` (§3), and a `Request` in an `Api/` contract makes the contract HTTP's |
+| Transactions or flushing inside the model or a use case | `beginTransaction\|wrapInTransaction\|->flush\(` | `**/{Domain,Application,Entity}/**/*.php` | never — the application layer opens a transaction through the port it owns, and only the Doctrine adapter behind that port calls `wrapInTransaction` (§3) |
 | Service locator | `ContainerInterface\|ServiceLocator\|container->get\(` | `**/src/**/*.php` | a compiler pass, a `ServiceSubscriberInterface` with a typed locator, the kernel |
 | Persistence or rules in a controller | `EntityManagerInterface\|createQueryBuilder\|->findBy\(\|->findOneBy\(\|->persist\(` | `**/{Controller,UI}/**/*.php` | never for writes; a read-only grid may go through a repository port, not the EntityManager |
 | Entity as the public API | `#\[ApiResource` | `**/Entity/**/*.php` | a read-only model the schema is allowed to dictate (§5) — say so in the report |
@@ -257,7 +313,7 @@ hand-written proxy and never a service locator:
   extends an internal class (`\ArrayObject`, …) cannot be made lazy.
 
 ## Symfony review checklist
-- [ ] Domain has no `use Doctrine\`, `use Symfony\...\HttpFoundation`, or EntityManager calls inside entities.
+- [ ] Domain and application code import no Doctrine runtime class and no `Symfony\…` — HttpFoundation, Messenger's bus or `#[AsMessageHandler]`, the container — beyond the carve-outs of §9's framework-leak recipe; no EntityManager calls inside entities.
 - [ ] Repository interfaces are owned by the domain/`Api/`; Doctrine impls live in infrastructure and are aliased in `services.yaml`.
 - [ ] Handlers/use cases are thin; transactions are managed at the application layer, not the domain.
 - [ ] Strategy pools use tagged `Api/` interfaces + `!tagged_iterator` — no `switch`/`elseif` dispatch.
@@ -280,7 +336,7 @@ The core skill states each rule in plain PHP. This section is where those rules 
 | **Frameworks & Drivers** | The Symfony kernel, Doctrine, the Messenger transport, the HTTP client, MySQL, `services.yaml` glue |
 
 - **Litmus:** swapping Doctrine for Eloquent, MySQL for an API, or HTTP for CLI must not touch a use case or an entity.
-- **What the inner layers never import:** no Doctrine, no `Symfony\*`, no `Request`. In review, grep domain and application code for `Doctrine` and `Symfony\Component\HttpFoundation` (the framework-leak recipe of §9 is the full form). Doctrine or Symfony base classes, `Request`, and a container reached from domain or use-case code are the framework leaking inward.
+- **What the inner layers never import:** no Doctrine, no `Symfony\*`, no `Request`. The carve-outs are metadata or a contract, never a runtime service, and the framework-leak recipe of §9 lists them: entity mapping on `Entity/` classes (`Doctrine\ORM\Mapping`, `Doctrine\DBAL\Types\Types`, `Doctrine\Common\Collections` for the mapped collections, §2), `#[AutoconfigureTag]` on an `Api/` extension point (§4), and `TranslatableInterface` as the sentence a port carries (*No `new`* below). A use case gets none of them: its handler is wired from `services.yaml` and its bus sits behind a port (§3). In review, grep domain and application code for `Doctrine` and `Symfony\` (that recipe is the full form). Doctrine or Symfony base classes, `Request`, and a container reached from domain or use-case code are the framework leaking inward.
 - **The ORM entity as the contract:** `$this->doctrine->find(OrderEntity::class, $id)` returned straight as a `JsonResponse` is the Doctrine spelling of the leak in `clean-architecture.md` §4; §5 above is the fix.
 - **Plan mode in Symfony's terms:** adapters are Doctrine repositories, HTTP clients and the Messenger bus; delivery is a controller, an API Platform resource with its provider/processor, a console command or a Messenger handler; the wiring is a `services.yaml` alias or autowiring by type, plus tags (§4).
 
@@ -345,8 +401,8 @@ Same conventions as `solid.md`'s recipes. A client a recipe finds is built by th
 | DIP — free-string side channel | `->addFlash\(\|->add\('(success\|error\|warning\|info)'` in `Controller/` | the project publishes no port for that channel yet. Then plan the port (a typed tone plus a typed sentence, owned by the module that shows it) rather than repeat the pattern |
 | DIP — the composition root | `new Kernel\(` | the front controller or `bin/console` |
 | Dual write | `->dispatch\(\|->publish\(` in `**/{Service,Handler,Messenger,Application,UseCase}/**/*.php` | the transport for that message class in `messenger.yaml` routing: the Doctrine transport on the state change's connection, or a network broker? |
-| Network call inside a transaction | files matching both `wrapInTransaction\|beginTransaction` and `HttpClientInterface\|->request\(\|curl_exec` — `rg -l A \| xargs grep -lE B` | whether the call is inside the closure |
-| Consumer with no idempotency | `#\[AsMessageHandler\|implements MessageHandlerInterface` | a claim on a unique key in the same transaction, or a naturally idempotent effect |
+| Network call inside a transaction | files matching both `wrapInTransaction\|beginTransaction\|TransactionInterface` (the port's name in the project, as §3 spells it) and `HttpClientInterface\|->request\(\|curl_exec` — `rg -l A \| xargs grep -lE B` | whether the call is inside the closure |
+| Consumer with no idempotency | `#\[AsMessageHandler\|implements MessageHandlerInterface` in PHP, and `messenger\.message_handler` in `config/**/*.yaml` and each package's `services.yaml` (a handler tagged there, as §3 wires one, carries no attribute; read the tagged class, or the classes an `_instanceof` block tags) | a claim on a unique key in the same transaction, or a naturally idempotent effect |
 | Outbound call with no timeout | `HttpClientInterface` | `timeout` / `max_duration` on the scoped client or the request options |
 | Retry in the wrong layer | the core row's search | move to a decorator or Messenger's `retry_strategy` |
 | No failure transport | `retry_strategy` present in `messenger.yaml` without `failure_transport` | where a message goes after the last retry |
@@ -354,7 +410,7 @@ Same conventions as `solid.md`'s recipes. A client a recipe finds is built by th
 
 ### Integration patterns on Symfony
 
-- **The transaction port** is `EntityManagerInterface::wrapInTransaction()` (or a middleware, §3): the core's `$this->transactions->run(...)` is written `$this->em->wrapInTransaction(...)` here.
+- **The transaction port** is the application layer's own interface (§3): the core's `$this->transactions->run(...)` is written the same here, and the Doctrine adapter behind it calls `EntityManagerInterface::wrapInTransaction()`. Messenger's `doctrine_transaction` middleware is the other spelling: the bus opens the transaction around the handler, which names none.
 - **Outbox:** a Messenger **Doctrine transport on the same connection** *is* an outbox — dispatching inside the transaction writes the envelope row in the same commit, and `messenger:consume` is the relay. It stops being one the moment the transport is AMQP/Redis/SQS: then either route through a Doctrine transport first and forward, or use `DispatchAfterCurrentBusStamp` knowing it narrows the window without closing it.
 - **Decorators** around an adapter, for resilience or a cache, are wired with `decorates:`:
   ```yaml
@@ -378,7 +434,7 @@ The JavaScript a Symfony module ships — Stimulus controllers, Live and Twig Co
 
 Read with the core skill's `references/implementer-checklist.md`.
 
-- Inner code names no Doctrine class, no `Symfony\Component\HttpFoundation` `Request`/`Response`, and no container.
+- Inner code names no Doctrine class, no `Symfony\Component\HttpFoundation` `Request`/`Response`, no Messenger bus or `#[AsMessageHandler]`, and no container; the only exceptions are the carve-outs of §9's framework-leak recipe.
 - Wiring is a `services.yaml` alias or autowiring by type, plus tags. A class that is built but never wired ships nothing: check the registration exists and is exercised by a test that resolves it through the real container.
 - Factories: Symfony ships no generator; find the project's compile-time one in its docs (§10). If the project has none, stop and return the question. The composition root is `new Kernel(...)` in the front controller or `bin/console`.
 - Type on the contract: `TranslatableInterface`, not `TranslatableMessage`; `TranslatorInterface`; `EventDispatcherInterface` — including a private helper in a controller.

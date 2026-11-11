@@ -92,7 +92,7 @@ t "$TMP/tj-base.jsonl" js j:solid.md j:javascript.md
 t "$TMP/tj-sf.jsonl" js j:solid.md j:javascript.md sf
 t "$TMP/tj-sf-ts.jsonl" js j:solid.md j:javascript.md sf j:typescript.md
 t "$TMP/tj-sf-island.jsonl" js j:solid.md j:javascript.md sf j:typescript.md j:react.md
-t "$TMP/t-plan-php-js.jsonl" php sp js sf
+t "$TMP/t-sf-ddd.jsonl" php p:solid.md sp p:ddd.md
 
 # ---------- PHP source ----------
 expect_exit "source gate: symfony project needs the symfony stack skill" 2 \
@@ -111,21 +111,54 @@ OUT=$(gate Write "$TMP/sf" "$TMP/loaded.jsonl" "$TMP/sf/src/Controller/FooContro
 case "$OUT" in *"references/solid.md"*"Skill tool with \`symfony:symfony-architecture-php\`"*) ok ;;
   *) ko "source gate: denial names the core reference and the stack skill"; echo "$OUT" ;; esac
 
+# ---------- domain directories ----------
+# A module publishes its data contracts in src/Api/ and its domain events in src/Event/; with Entity/ and a
+# layered context's Domain/ they are the DDD material the rubric reads ddd.md for. Everything under src/Api/
+# counts, adapters placed there included: Api/ is the published surface, so a controller or a state provider
+# inside it is read with ddd.md too. A directory merely named like one elsewhere (src/Controller/Api/,
+# src/EventListener/, src/ApiPlatform/) is not.
+mkdir -p "$TMP/sf/packages/billing/src"
+echo '{"name":"acme/billing","require":{"php":">=8.2"}}' > "$TMP/sf/packages/billing/composer.json"
+for target in packages/sales/src/Api/OrderRepositoryInterface.php packages/sales/src/Api/Data/OrderLine.php \
+  packages/sales/src/Event/OrderPlaced.php packages/sales/src/Entity/Order.php packages/billing/src/Api/InvoiceView.php \
+  packages/billing/src/Event/InvoiceIssued.php src/Entity/Customer.php src/Ordering/Domain/Order.php \
+  src/Api/Controller/OrderController.php src/Api/State/OrderProvider.php; do
+  mkdir -p "$(dirname "$TMP/sf/$target")"
+  expect_exit "domain: $target needs ddd.md" 2 \
+    "$(gate Write "$TMP/sf" "$TMP/t-sf.jsonl" "$TMP/sf/$target")" "$P"
+  expect_exit "domain: $target with ddd.md allowed" 0 \
+    "$(gate Write "$TMP/sf" "$TMP/t-sf-ddd.jsonl" "$TMP/sf/$target")" "$P"
+done
+for target in src/Controller/Api/OrderController.php src/EventListener/OrderListener.php \
+  packages/sales/src/Service/PlaceOrder.php packages/sales/src/ApiPlatform/OrderProvider.php; do
+  mkdir -p "$(dirname "$TMP/sf/$target")"
+  expect_exit "domain: $target needs no ddd.md" 0 \
+    "$(gate Write "$TMP/sf" "$TMP/t-sf.jsonl" "$TMP/sf/$target")" "$P"
+done
+OUT=$(gate Write "$TMP/sf" "$TMP/t-sf.jsonl" "$TMP/sf/packages/sales/src/Event/OrderPlaced.php" | python3 "$P" 2>&1)
+case "$OUT" in *"Read clean-architecture-php/references/ddd.md"*) ok ;; *) ko "domain: the denial names ddd.md"; echo "$OUT" ;; esac
+
 # ---------- plans ----------
+# Plan mode audits the blast radius against clean-architecture.md, solid.md and ddd.md
+t "$TMP/t-plan-sf.jsonl" php sp p:solid.md p:ddd.md p:clean-architecture.md
+t "$TMP/t-plan-php-js.jsonl" php sp p:solid.md p:ddd.md p:clean-architecture.md js sf
+t "$TMP/t-plan-plain.jsonl" php p:solid.md p:ddd.md p:clean-architecture.md
 expect_exit "plan gate: symfony plan needs the stack skill" 2 \
   "$(gate Write "$TMP/sf" "$TMP/loaded.jsonl" "$TMP/sf/.claude/plans/x/_plan.md")" "$P"
-expect_exit "plan gate: symfony plan with skill+stack skill allowed" 0 \
+expect_exit "plan gate: symfony plan with skill+stack skill but no plan references blocked" 2 \
   "$(gate Write "$TMP/sf" "$TMP/t-skill-sf.jsonl" "$TMP/sf/.claude/plans/x/_plan.md")" "$P"
+expect_exit "plan gate: symfony plan with skill+stack skill+plan references allowed" 0 \
+  "$(gate Write "$TMP/sf" "$TMP/t-plan-sf.jsonl" "$TMP/sf/.claude/plans/x/_plan.md")" "$P"
 expect_exit "js plan: symfony plan naming a JS file needs the JS skill and the frontend skill" 2 \
-  "$(gatec Write "$TMP/sf" "$TMP/t-skill-sf.jsonl" "$TMP/sf/.claude/plans/x/_plan.md" "Task 2: add assets/controllers/coupon_controller.js")" "$P"
+  "$(gatec Write "$TMP/sf" "$TMP/t-plan-sf.jsonl" "$TMP/sf/.claude/plans/x/_plan.md" "Task 2: add assets/controllers/coupon_controller.js")" "$P"
 expect_exit "js plan: symfony plan naming a JS file with both skills allowed" 0 \
   "$(gatec Write "$TMP/sf" "$TMP/t-plan-php-js.jsonl" "$TMP/sf/.claude/plans/x/_plan.md" "Task 2: add assets/controllers/coupon_controller.js")" "$P"
 for word in Stimulus stimulus_controller; do
   expect_exit "js plan: a plan naming $word orders browser work" 2 \
-    "$(gatec Write "$TMP/sf" "$TMP/t-skill-sf.jsonl" "$TMP/sf/.claude/plans/z/_plan.md" "Task 3: the $word part")" "$P"
+    "$(gatec Write "$TMP/sf" "$TMP/t-plan-sf.jsonl" "$TMP/sf/.claude/plans/z/_plan.md" "Task 3: the $word part")" "$P"
 done
 expect_exit "js plan: a plain PHP plan naming Stimulus orders browser work while this stack is registered" 2 \
-  "$(gatec Write "$TMP/plain" "$TMP/loaded.jsonl" "$TMP/plain/.claude/plans/x/_plan.md" "Task 3: a Stimulus controller")" "$P"
+  "$(gatec Write "$TMP/plain" "$TMP/t-plan-plain.jsonl" "$TMP/plain/.claude/plans/x/_plan.md" "Task 3: a Stimulus controller")" "$P"
 
 # ---------- JavaScript source ----------
 expect_exit "js gate: stimulus controller needs the symfony frontend skill" 2 \
@@ -151,7 +184,7 @@ EOF" "$TMP/sf" "$TMP/t-sf.jsonl")" "$B"
 expect_exit "bash write: heredoc plan naming a Stimulus controller needs the JS skill" 2 \
   "$(bash_json "cat > .claude/plans/x/_plan.md <<'EOF'
 | 1 | a Stimulus controller for the coupon form |
-EOF" "$TMP/sf" "$TMP/t-skill-sf.jsonl")" "$B"
+EOF" "$TMP/sf" "$TMP/t-plan-sf.jsonl")" "$B"
 expect_exit "bash write: a copy into public/build untouched" 0 \
   "$(bash_json "cp /tmp/app.js public/build/app.js" "$TMP/sf" "$TMP/empty.jsonl")" "$B"
 OUT=$(bash_json "sed -i '' 's/a/b/' src/Controller/FooController.php" "$TMP/sf" "$TMP/t-skill-solid.jsonl" | python3 "$B" 2>&1)

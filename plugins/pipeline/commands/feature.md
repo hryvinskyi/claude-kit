@@ -103,9 +103,15 @@ denial names the one it wants); it says what browser work looks like on its stac
 lenses from memory is not this step: each skill carries a reference set your recollection does
 not — PHP: `clean-architecture.md`, `solid.md`, `ddd.md`, `integration-patterns.md`; JS/TS:
 `solid.md`, `javascript.md`, `typescript.md`, `react.md`, `ddd.md`, `clean-architecture.md`,
-`integration-patterns.md`; and the stack skill's own sections. If no `Skill` call for it appears in
-this session's transcript, the plan is not ready to be written — a hook enforces this on writes under
-`.claude/plans/`, including the JS skill for a plan that names JS/TS files. On other stacks, load
+`integration-patterns.md`; and the stack skill's own sections. Until this session shows the skill and
+the references the plan gate requires, the plan is not ready to be written — a hook enforces this on
+writes under `.claude/plans/`: on a PHP project the skill with `solid.md`, `ddd.md` and
+`clean-architecture.md` and the stack skill; for a plan that orders JS/TS work (always on a JS
+project; on a PHP project, when the plan directory names a JS/TS file, `package.json`, `tsconfig.json`,
+`TypeScript`, `react_component` or a registered stack's browser word), the JS skill, plus the stack's frontend skill when a stack is
+detected, plus `react.md` when the plan names a `.jsx`/`.tsx` file or, with no stack detected, the
+project's `package.json` depends on React, and `javascript.md` only when neither of those two is
+required. On other stacks, load
 that stack's equivalent rubric if the project declares one, and say in the plan that you did not.
 
 **1b. Design domain-outward** — bounded context/placement (module? bridge? plugin?), invariants, ports, in-scope tech debt as first-class tasks.
@@ -166,7 +172,7 @@ Every level runs all of this phase. An S change has no plan files and no frozen 
 - Review the complete `git diff <base> <CP>` yourself against the plan and that project's repo law (boundaries, tests at both levels, comment scope, and its own i18n/locale obligations). Small fixes: apply directly. Structural misses: re-dispatch to the owning implementer with a precise correction — on a Sonnet task, that is an escalation to Opus (Phase 4).
   - **An implementer's report is not a review, and neither is a green gate.** Gates check types, boundaries and tests. They do not check whether a controller builds a framework's message object with `new` at every call site, or types a helper on a concrete class. That has shipped past every gate. Nothing is committed until you have **read** the diff of every touched source file.
   - **Frozen contracts hold** — run `shasum -a 256 -c` over every `.claude/plans/<slug>/_contract-*.sha256` before the sweep; a line that is not `OK` blocks the commit until it is explained and resolved.
-  - **Mechanical sweep first, then the reading.** Run the architectural skill's detection recipes (`solid.md` §Detection recipes, the stack skill's detection recipes) over **every touched file in full**, not only the changed lines, and list each hit with its verdict in the Phase 6 report. A file an implementer touched brings its whole content into scope: an English literal or `$e->getMessage()` shown to a user beside the changed line is in-scope debt, not "outside this ticket". On a PHP project the minimum is (non-test files; `throw new` and a factory's own implementation are the only innocent `new`):
+  - **Mechanical sweep first, then the reading.** Run the architectural skill's detection recipes (`solid.md` §Detection recipes, the stack skill's detection recipes) over **every touched file in full**, not only the changed lines, and list each hit with its verdict in the Phase 6 report. A file an implementer touched brings its whole content into scope: an English literal or `$e->getMessage()` shown to a user beside the changed line is in-scope debt, not "outside this ticket". On a PHP project the minimum is (non-test files; the only innocent `new` are the ones `solid.md`'s DIP recipe clears — `throw new`, attribute metadata, the composition root, code the build generates, `(object) []` as an empty JSON object; a hand-written factory with `new` inside is a finding):
     `git -c core.quotePath=false diff -z --name-only --diff-filter=d <base> <CP> | grep -z -E '\.php$' | grep -z -v /tests/ | xargs -0 -r rg -nP '(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(|getMessage\(\)|\bswitch\s*\(|\belse\s?if\b' --`
     The list is NUL-separated and ends the options with `--`, so a name with a quote, a non-ASCII letter or `$(…)` in it is read as it is, and a name like `--pre=x.php` is a file, not an option of `rg`.
     On a project a stack plugin covers, its PHP skill's *Finding things* adds the framework's own alternatives to that pattern — its side channel and the concrete types a helper must not be typed on — and they run in the same sweep.
