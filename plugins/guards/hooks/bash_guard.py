@@ -198,16 +198,18 @@ GH_GRAPHQL_COMMANDS = {"issue", "pr", "project", "search"}
 GH_GRAPHQL_ACTIONS = {"repo": "view", "release": "list"}
 # The REST (or board-queue) form of the commonly used refused commands, by "<subcommand> <action>"
 GH_REST_FORMS = {
-    "issue create": "gh api --method POST repos/OWNER/REPO/issues -f title=... -F body=@file",
-    "issue view": "gh api repos/OWNER/REPO/issues/N",
-    "issue comment": "gh api --method POST repos/OWNER/REPO/issues/N/comments -F body=@file",
-    "issue close": "gh api --method PATCH repos/OWNER/REPO/issues/N -f state=closed",
-    "issue list": "gh api 'repos/OWNER/REPO/issues?state=open&per_page=100'",
-    "pr create": "gh api --method POST repos/OWNER/REPO/pulls -f title=... -f head=... -f base=main -F body=@file",
-    "pr view": "gh api repos/OWNER/REPO/pulls/N",
-    "pr list": "gh api 'repos/OWNER/REPO/pulls?state=open'",
-    "repo view": "gh api repos/OWNER/REPO",
-    "release list": "gh api repos/OWNER/REPO/releases",
+    "issue create": "`gh api --method POST repos/OWNER/REPO/issues -f title=... -F body=@file`",
+    "issue view": "`gh api repos/OWNER/REPO/issues/N`",
+    "issue comment": "the board queue (`board_enqueue`, kind `issue.comment`) where one runs, "
+                     "else `gh api --method POST repos/OWNER/REPO/issues/N/comments -F body=@file`",
+    "issue close": "the board queue (`board_enqueue`, kind `issue.close`, the evidence as its comment) where one runs, "
+                   "else `gh api --method PATCH repos/OWNER/REPO/issues/N -f state=closed`",
+    "issue list": "`gh api 'repos/OWNER/REPO/issues?state=open&per_page=100'`",
+    "pr create": "`gh api --method POST repos/OWNER/REPO/pulls -f title=... -f head=... -f base=main -F body=@file`",
+    "pr view": "`gh api repos/OWNER/REPO/pulls/N`",
+    "pr list": "`gh api 'repos/OWNER/REPO/pulls?state=open'`",
+    "repo view": "`gh api repos/OWNER/REPO`",
+    "release list": "`gh api repos/OWNER/REPO/releases`",
 }
 GH_PROJECT_FORM = "the board queue (`board_enqueue`): the board is written only by its worker"
 ATTRIBUTION_TRAILER = re.compile(r"(?i)\bco-authored-by\s*[:=]|\bclaude-session\s*:")
@@ -964,8 +966,8 @@ def gh_rest_form(refused):
         return f"Use {GH_PROJECT_FORM}."
     form = GH_REST_FORMS.get(" ".join(parts[1:3]))
     if form is not None:
-        return f"Use `{form}`."
-    rows = "; ".join(f"`gh {k}` -> `{v}`" for k, v in GH_REST_FORMS.items())
+        return f"Use {form}."
+    rows = "; ".join(f"`gh {k}` -> {v}" for k, v in GH_REST_FORMS.items())
     return f"Use the REST form instead: {rows}; `gh project ...` -> {GH_PROJECT_FORM}."
 
 
