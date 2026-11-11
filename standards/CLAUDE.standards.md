@@ -3,6 +3,16 @@
 ## Text other people read never cites agent config
 In a PR review comment, issue, evidence comment, commit message, doc or chat post, never name `CLAUDE.md`, `AGENTS.md`, anything under `.claude/`, a skill or agent memory as the source of a rule ("The root CLAUDE.md requires tests…"). Teammates don't work from those files, and quoting them reads as a bot quoting its prompt. State the rule as the project's own and give the concrete reason it matters ("integration tests boot the real kernel and Postgres, so a stub never runs this SQL"). When a subagent or skill will post such text (`/code-review --comment`, issue creation), tell it this in the brief, and grep its text for `CLAUDE|AGENTS|\.claude/` before it goes out.
 
+## Code comments describe the code, not its history
+Covers every language, and comments in configuration and templates (XML, YAML, LESS, a template's notes).
+- **What a comment says.** A comment or docblock says what the code does and why it must, as the code stands now.
+- **What goes elsewhere.** These belong in the commit message, the pull request and the vault, where history is kept:
+  - a ticket or card key (`ABC-1234`, `#123`, "Trello 3203");
+  - a change narrative ("added for…", "previously…", "fixed after…").
+  - The reader of the code needs the rule, not the errand that brought it.
+- **An existing key is not a style to copy.** A file that already carries ticket keys does not license adding one beside them.
+- **Removing keys.** An edit takes the keys out of the lines it touches and writes down what each key stood for. Keys elsewhere in the blast radius are in-scope debt (*Architecture and tech debt*).
+
 ## Knowledge vaults
 A project's vault is whatever `find-vault` (the `vault` plugin's command on `PATH`) resolves. Three global tools serve every vault project. A project whose own `.claude/settings.json` declares a SessionStart or SessionEnd hook is left to its own tooling for that event.
 - **Search the vault before re-deriving anything.** Use the `qmd` MCP tool `query`; it searches only the current project's index. Each project gets its own index in `.qmd/`, created in the background on its first session and excluded through `.git/info/exclude`. Grep when qmd is not connected. A hit is where to start reading, never a fact to repeat.
