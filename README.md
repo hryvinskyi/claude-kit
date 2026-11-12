@@ -138,7 +138,8 @@ endpoint on this machine needs none and is reached without a proxy. A hosted end
 whoever holds the key, and receives what is asked: the session's summary of the request and its facts,
 the change's diff, the claims and their evidence (test and gate output, `git diff --stat`). Before sending, the diff loses the files whose name or
 content looks like a credential, and every other text but the review files' own items has the values
-of secret-looking lines withheld — a net, not a guarantee. `pipeline-decide status` says what is set and whether the key would be sent.
+of secret-looking lines withheld — a net, not a guarantee. A review file includes only a Markdown file
+beside it (`@name`), and what it includes is filtered like the diff; a refused include is named, never sent. `pipeline-decide status` says what is set and whether the key would be sent.
 
 ## Agent evals
 

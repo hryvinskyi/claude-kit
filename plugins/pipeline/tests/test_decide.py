@@ -1,30 +1,293 @@
 #!/usr/bin/env python3
 """Tests for bin/decide.py, run as the pipeline runs it: the pipeline-decide command against a fake
-systemone endpoint on this machine.
+systemone endpoint on this machine; the secret filter is also run form by form on the module itself.
 
 What is pinned: nothing is sent while no endpoint is set, a kind left out is never asked, a plain-HTTP
 endpoint off this machine is refused, the key travels only in the request header and never reaches
 the output, the size of a change follows from its yes answers with L winning, an uncertain answer is
 named rather than guessed, the rules check reads only the review file's "Always check" items, keeps
-credential-shaped files out of what it sends, splits a large diff and counts a violation in any part,
-the done check reports a contradicted claim, and a refusal from the endpoint exits with its status.
+credential-shaped files out of what it sends, includes only a Markdown file beside the review file and
+names every include it refuses, splits a large diff and counts a violation in any part, the done check
+reports a contradicted claim, a refusal from the endpoint exits with its status, every common form of a
+secret is withheld to its end while text about secrets that holds none is sent as it is, and a long
+line costs time in proportion to its length.
 
 Run from the plugin directory: python3 -m unittest discover -s tests
 """
 from __future__ import annotations
 
 import http.server
+import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 COMMAND = Path(__file__).resolve().parent.parent / "bin" / "pipeline-decide"
 SECRET = "sk_test_never_printed_0123456789"
+
+
+def load_decide() -> object:
+    """bin/decide.py as a module, so the filter is exercised form by form without an endpoint."""
+    spec = importlib.util.spec_from_file_location("pipeline_decide", str(COMMAND.parent / "decide.py"))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+decide = load_decide()
+
+# A text holding a secret, and every fragment of it that must not be sent.
+LEAKS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("DB_PASSWORD=hunter2,tail", ("hunter2", "tail")),
+    ("DB_PASSWORD=hunter2;tail", ("hunter2", "tail")),
+    ("DB_PASSWORD=hunter2)tail", ("hunter2", "tail")),
+    ("DB_PASSWORD=hunter2&tail", ("hunter2", "tail")),
+    ('password: "esc\\"aped14"', ("esc", "aped14")),
+    ("DB_PASS=hunter3", ("hunter3",)),
+    ("export REDIS_PASS=r3dispw", ("r3dispw",)),
+    ("MAIL_SMTP_PASS=smtppw23", ("smtppw23",)),
+    ('dbPass: "pa55word"', ("pa55word",)),
+    ("auth: { user: 'mailer', pass: 'mailerpw24' }", ("mailerpw24",)),
+    ("/login?user=bob&pass=qpw21", ("qpw21",)),
+    ("sync --pass=clipw22 --verbose", ("clipw22",)),
+    ("PGPASSWORD=pgpw16 psql -h db", ("pgpw16",)),
+    ("MYSQL_PWD=mypwd17", ("mypwd17",)),
+    ("client_secret=cs18&grant_type=client_credentials", ("cs18",)),
+    ("cloud_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCY", ("wJalrXUtnFEMI",)),
+    ("define('DB_PASSWORD', 'wp-secret-1');", ("wp-secret-1",)),
+    ('define( "AUTH_KEY", "k3y-s4lt-value" );', ("k3y-s4lt-value",)),
+    ("$config['db_password'] = 'phparr13';", ("phparr13",)),
+    ('os.environ["API_TOKEN"] = "envtok12"', ("envtok12",)),
+    ('api_key: str = "typedkey11"', ("typedkey11",)),
+    ("{'password': 'pyd1ct'}", ("pyd1ct",)),
+    ("const API_KEY = `tmpl4te`;", ("tmpl4te",)),
+    ('<user name="app" password="xmlpw1"/>', ("xmlpw1",)),
+    ('<add key="ApiKey" value="dotnetkey9"/>', ("dotnetkey9",)),
+    ("<password>elempw7</password>", ("elempw7",)),
+    ('<property name="db.password" value="antpw8"/>', ("antpw8",)),
+    ('{"api_key": "jsonkey123"}', ("jsonkey123",)),
+    ('{"apiKey":"jsonkey456","x":1}', ("jsonkey456",)),
+    ("redis://:redispw8@cache:6379/0", ("redispw8",)),
+    ("amqp://guest:p@ssw0rd@rabbit:5672/", ("p@ss", "ssw0rd")),
+    ("https://x-access-token:ghs_shorttoken1@forge.example.com/o/r.git", ("ghs_shorttoken1",)),
+    ("https://glpat0deploy0token0123456@forge.example.com/x.git", ("glpat0deploy0token0123456",)),
+    ("DATABASE_URL=mysql://app:dbpw19@db/app", ("dbpw19",)),
+    ("jdbc:mysql://db:3306/app?user=root&password=jdbcpw20", ("jdbcpw20",)),
+    ("curl -u admin:curlpw5 https://api.example.com", ("curlpw5",)),
+    ('curl --user "admin:curlpw6" https://api.example.com', ("curlpw6",)),
+    ("mysql -uroot -pMyDbPw1 shop", ("MyDbPw1",)),
+    ("DB_PASSWORD=$ecr3t!", ("ecr3t",)),
+    ("PASSWORD_HASH=$2y$10$abcdefghij", ("abcdefghij",)),
+    ("DB_PASSWORD=pa(ss)word", ("pa(ss", "word")),
+    ("secret: hunter(9", ("hunter(9",)),
+    ("Authorization: Bearer abcdef0123456789", ("abcdef0123456789",)),
+    ('"Authorization": "Bearer abcdef0123456789xyz"', ("abcdef0123456789xyz",)),
+    ("curl -H 'Authorization: Basic YWRtaW46cGFzcw=='", ("YWRtaW46cGFzcw",)),
+    ("sent with Bearer eyJhbGciOiJIUzI1NiJ9.payload123.sig456sig", ("payload123",)),
+    ("Cookie: session=cookie17", ("cookie17",)),
+    ("X-Api-Key: hdrkey18", ("hdrkey18",)),
+    ("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----", ("MIIEvQIBADANBg",)),
+    ('"private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEA\\n-----END RSA PRIVATE KEY-----\\n"',
+     ("MIIEowIBAAKCAQEA",)),
+    ("use sk_live_4eC39HqLyjWDarjt here", ("4eC39HqLyjWDarjt",)),
+    ("pushed with ghp_a1B2c3D4e5F6g7H8i9J0", ("a1B2c3D4e5F6g7H8i9J0",)),
+    ("pushed with github_pat_11ABCDEFG0123456789_abcd", ("11ABCDEFG0123456789_abcd",)),
+    ("cloned with glpat-abcdefghij1234567890", ("abcdefghij1234567890",)),
+    ("posted with xoxb-1234567890-abcdefghij", ("1234567890-abcdefghij",)),
+    ("posted with xoxp-12345-67890-abcdef", ("12345-67890-abcdef",)),
+    ("signed with AKIAZ3MSJV4WWXZ4QJ5K", ("AKIAZ3MSJV4WWXZ4QJ5K",)),
+    ("maps with AIzaSyD-abcdefghijklmnopqrstuvwxyz12345", ("AIzaSyD-abcdefghijklmnopqrstuvwxyz12345",)),
+    ("published with npm_abcdefghijklmnopqrstuvwxyz0123456789", ("npm_abcdefghijklmnopqrstuvwxyz0123456789",)),
+    ("**Password:** Hunter2-Xq9z", ("Hunter2-Xq9z",)),
+    ("*Token:* abcd1234efgh5678", ("abcd1234efgh5678",)),
+    ('"passwords": ["Hunter2-Xq9z"]', ("Hunter2-Xq9z",)),
+    ('api_keys: ["a1b2c3d4e5f6g7h8", "b2c3d4e5f6g7h8i9"]', ("a1b2c3d4e5f6g7h8", "b2c3d4e5f6g7h8i9")),
+    ("credentials: { user: 'app', password: 'Hunter2-Xq9z' }", ("Hunter2-Xq9z",)),
+    ("token: {Hunter-21}", ("Hunter-21",)),
+    ("DB_PASSWORD=1.0-Xk9mQ2pLzR7", ("Xk9mQ2pLzR7",)),
+    ('password: "1.0+Xk9mQ2pLzR7"', ("Xk9mQ2pLzR7",)),
+    ("APP_KEY=base64:Zm9vYmFyYmF6cXV4", ("Zm9vYmFyYmF6cXV4",)),
+    ("ENCRYPTION_KEY=9f8e7d6c5b4a3210", ("9f8e7d6c5b4a3210",)),
+    ("SIGNING_KEY: hk_9f8e7d6c5b4a", ("hk_9f8e7d6c5b4a",)),
+    ("encryption.key = 9f8e7d6c5b4a", ("9f8e7d6c5b4a",)),
+    ("const SIGNING_KEY = 'hk9f8e7d6c5b4a';", ("hk9f8e7d6c5b4a",)),
+    ("API_KEY = 'pause'", ("pause",)),
+    ("password: [hunter]", ("hunter",)),
+    ('"token": { "from": "env", "value": "Hunter2-Xq9z" }', ("Hunter2-Xq9z",)),
+    ('"credentials": { "user": "app", "pin": "Hunter2-Xq9z" }', ("Hunter2-Xq9z",)),
+)
+
+# Text about secrets that holds none, and must be sent exactly as it is.
+PASSES: Tuple[str, ...] = (
+    "password={password}",
+    "password: REDACTED",
+    "DB_PASSWORD=<your-password>",
+    'password: "********"',
+    'password: ""',
+    "password: {{ db_password }}",
+    "password=*** user=bob",
+    "api_key: ${API_KEY}",
+    "password: %env(DB_PASSWORD)%",
+    "password: process.env.DB_PASSWORD,",
+    'token = os.environ["TOKEN"]',
+    "$token = $this->tokens->issue();",
+    "$password = $request->get('password');",
+    "secret = secrets.token_hex(32)",
+    "define('DB_PASSWORD', getenv('DB_PASSWORD'));",
+    "'password' => Hash::make($request->password),",
+    "api_key: str",
+    "token: string;",
+    "token = None",
+    "secret: true",
+    "Never log a password, a token or an API key.",
+    "Rotate the password every 90 days; the token expires after an hour.",
+    "Bearer tokens travel in the Authorization header.",
+    "Tests passed: 12, failed: 0",
+    "Scoring: PASS = E1 + E2 + E3.",
+    "*Pass:* every goal the product supports has one how-to.",
+    "PASS=0",
+    '"maxStatusWritesPerPass": 20,',
+    "CREDENTIAL_PATH = re.compile(",
+    'TOKEN_SHAPES = re.compile(r"(?<![A-Za-z0-9_-])(?:AKIA"',
+    "token = issue(",
+    '"token": { "from": "env", "env": "DIBS_TOKEN" },',
+    "credentials: { source: 'vault', path: 'app/db' }",
+    '"cookie": "^0.7.1",',
+    '"pbkdf2-password": "1.2.1",',
+    '"node_modules/cookie": {',
+    "token: () => TOKEN,",
+    "const credentials = new AccountCredentials({",
+    "APP_PRIVATE_KEY_PATH: writeAppKey(keyDir).path,",
+    "this.#perPass = deps.settings.maxStatusWritesPerPass;",
+    "SECRET_KEY_FILE=/run/secrets/app_key",
+    'export SIGNING_PRIVATE_KEY="$HOME/.config/app/signing.pem"',
+    'token = "${token}"',
+    "ssh://git@example.com/org/repo.git",
+    "git@forge.example.com:org/repo.git",
+    "See https://example.com/docs/auth for the login flow.",
+    "mailto:someone@example.com",
+    "docker run -u 1000:1000 app",
+    "git push -u origin main",
+    "if (Authorization::allows($user)) {",
+    '"version": "1.2.0-rc.1",',
+    '"cookie": "~2.0.0+build.7",',
+    "cache_key = f'user:{user_id}'",
+    "PUBLIC_KEY_PATH=/etc/app/public.pem",
+    "<li key={item.id}>",
+    "monkey: banana",
+    "if token:",
+    'key = "content" if t == "Write" else "new_string"',
+    "env = {key: value for key, value in os.environ.items()}",
+    "const side = (key: BoardKey) => key;",
+    '"node_modules/path-key": {',
+    "A file that recorded its layout under the generation's key: the layout.",
+    "_key=",
+    "export type AppTokenDeps = {\n  /** Whether the installation may be used, which belongs to one account. */\n  ownerType: BoardOwnerType;\n};",
+    "const PAUSE_KEY = 'pause';",
+    "const READER_GENERATION_KEY = 'schema_version';",
+    "interface SecretStore {",
+)
+
+# Every line the filter of the previous release withheld, and the fragments it kept from being sent: each
+# must still be withheld.
+BASE_WITHHELD: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ('DB_PASSWORD=hunter2,tail', ('hunter2',)),
+    ('DB_PASSWORD=hunter2;tail', ('hunter2',)),
+    ('DB_PASSWORD=hunter2)tail', ('hunter2',)),
+    ('DB_PASSWORD=hunter2&tail', ('hunter2',)),
+    ('PGPASSWORD=pgpw16 psql -h db', ('pgpw16',)),
+    ('MYSQL_PWD=mypwd17', ('mypwd17',)),
+    ('client_secret=cs18&grant_type=client_credentials', ('cs18',)),
+    ('cloud_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCY', ('wJalrXUtnFEMI',)),
+    ('const API_KEY = `tmpl4te`;', ('tmpl4te',)),
+    ('{"apiKey":"jsonkey456","x":1}', ('jsonkey456',)),
+    ('amqp://guest:p@ssw0rd@rabbit:5672/', ('p@ss',)),
+    ('https://x-access-token:ghs_shorttoken1@forge.example.com/o/r.git', ('ghs_shorttoken1',)),
+    ('DATABASE_URL=mysql://app:dbpw19@db/app', ('dbpw19',)),
+    ('jdbc:mysql://db:3306/app?user=root&password=jdbcpw20', ('jdbcpw20',)),
+    ('Authorization: Bearer abcdef0123456789', ('abcdef0123456789',)),
+    ("curl -H 'Authorization: Basic YWRtaW46cGFzcw=='", ('YWRtaW46cGFzcw',)),
+    ('sent with Bearer eyJhbGciOiJIUzI1NiJ9.payload123.sig456sig', ('payload123',)),
+    ('Cookie: session=cookie17', ('cookie17',)),
+    ('X-Api-Key: hdrkey18', ('hdrkey18',)),
+    ('-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----', ('MIIEvQIBADANBg',)),
+    ('"private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEA\\n-----END RSA PRIVATE KEY-----\\n"', ('MIIEowIBAAKCAQEA',)),
+    ('use sk_live_4eC39HqLyjWDarjt here', ('4eC39HqLyjWDarjt',)),
+    ('pushed with github_pat_11ABCDEFG0123456789_abcd', ('11ABCDEFG0123456789_abcd',)),
+    ('cloned with glpat-abcdefghij1234567890', ('abcdefghij1234567890',)),
+    ('posted with xoxb-1234567890-abcdefghij', ('1234567890-abcdefghij',)),
+    ('posted with xoxp-12345-67890-abcdef', ('12345-67890-abcdef',)),
+    ('signed with AKIAZ3MSJV4WWXZ4QJ5K', ('AKIAZ3MSJV4WWXZ4QJ5K',)),
+    ('**Password:** Hunter2-Xq9z', ('Hunter2-Xq9z',)),
+    ('*Token:* abcd1234efgh5678', ('abcd1234efgh5678',)),
+    ('**Tokens:** compare a token with hash_equals, never ==.', ('compare a token',)),
+    ("SECRET_KEY = 'django-insecure-abc123xyz'", ('django-insecure',)),
+    ('JWT_SECRET_KEY=k3yvalue', ('k3yvalue',)),
+    ('DB_PWD=hunter2xx', ('hunter2xx',)),
+    ('AUTH_KEY=authv4lue', ('authv4lue',)),
+    ('DB_PASSWORD=p@ss!w0rd#1', ('p@ss', 'w0rd')),
+    ('JWT_SECRET=base64:abcdefgh', ('abcdefgh',)),
+    ('DB_PASSWORD=hunter3 # prod', ('hunter3',)),
+    ('{"password":"hunter4","user":"bob"}', ('hunter4',)),
+    ('?access_token=abc123def&state=x', ('abc123def',)),
+    ('docker run -e DB_PASSWORD=hunter5 app', ('hunter5',)),
+    ('mysql --password=hunter6 -h db', ('hunter6',)),
+    ('apiKey := "abc987xyz"', ('abc987xyz',)),
+    ('password: hunter seven words', ('hunter', 'seven', 'words')),
+    ('api_token: ghp_abcdefghijklmnopqrstuvwxyz0123456789', ('ghp_abcdefghijklmnopqrstuvwxyz0123456789',)),
+    ('database_password: hunter2', ('hunter2',)),
+    ('dsn: postgres://app:s3cret@db:5432/app', ('s3cret',)),
+    ('Authorization: Bearer abc.def.ghi', ('abc.def.ghi',)),
+    ('Set-Cookie: sid=XYZ123', ('XYZ123',)),
+    ('Proxy-Authorization: Basic dXNlcjpwYXNz', ('dXNlcjpwYXNz',)),
+    ('x-api-key: k3y-value-77', ('k3y-value-77',)),
+    ('Rotate the key sk_live_abcdefghijklmnop', ('sk_live_abcdefghijklmnop',)),
+    ('secret = hunter8', ('hunter8',)),
+    ('PASSWORD: Hunter9', ('Hunter9',)),
+    ("password='hunter10'", ('hunter10',)),
+    ("'password' => 'hunter11',", ('hunter11',)),
+    ('private_key: abcdef123456', ('abcdef123456',)),
+    ('credentials: admin:hunter12', ('hunter12',)),
+    ('api-key: hunter13', ('hunter13',)),
+    ('client_secret: hunter14', ('hunter14',)),
+    ('token: abc def', ('abc', 'def')),
+    ('sk-ant-abcdefghijklmnopqrstuvwxyz', ('sk-ant-abcdefghijklmnopqrstuvwxyz',)),
+    ('jwt eyJhbGciOiJIUzI1.eyJzdWIiOiIx.c2lnbmF0dXJl', ('eyJzdWIiOiIx',)),
+    ('password: hunter15 // dev only', ('hunter15',)),
+    ('passwd=hunter16', ('hunter16',)),
+    ('access_key=hunter17', ('hunter17',)),
+    ('set PASSWORD=hunter18', ('hunter18',)),
+    ('--token=hunter19', ('hunter19',)),
+    ('secret: 12345678', ('12345678',)),
+    ('password: [hunter20]', ('hunter20',)),
+    ('token: {hunter-21}', ('hunter-21',)),
+    ('Cookie: a=1; b=hunter22', ('hunter22',)),
+)
+
+# A value that goes on over the next lines, the fragments of it that must not be sent, and the lines after
+# it that must be sent as they are.
+MULTILINE: Tuple[Tuple[str, Tuple[str, ...], Tuple[str, ...]], ...] = (
+    ("password: |\n  Hunter2-Xq9z\n  second-line-77\nname: shop", ("Hunter2-Xq9z", "second-line-77"), ("name: shop",)),
+    ("+password: >-\n+  Hunter2-Xq9z\n+name: shop", ("Hunter2-Xq9z",), ("+name: shop",)),
+    ("database:\n  password:\n    dev: Hunter2dev\n    prod: Hunter2prod\n  host: db", ("Hunter2dev", "Hunter2prod"),
+     ("  host: db",)),
+    ('password = """\nHunter2-Xq9z\n"""\nname = "shop"', ("Hunter2-Xq9z",), ('name = "shop"',)),
+    ("token = '''Hunter2-Xq9z\nsecond-line-77'''; name = 1\nnext = 2", ("Hunter2-Xq9z", "second-line-77"), ("next = 2",)),
+    ('api_keys: [\n  "a1b2c3d4e5f6g7h8",\n  "b2c3d4e5f6g7h8i9",\n]\nname: shop', ("a1b2c3d4e5f6g7h8", "b2c3d4e5f6g7h8i9"),
+     ("name: shop",)),
+    ('"credentials": {\n  "user": "app",\n  "pin": "Hunter2-Xq9z"\n},\n"name": "shop"', ("Hunter2-Xq9z",), ('"name": "shop"',)),
+    ('password: "Hunter2-Xq9z\n  second-line-77"\nname: shop', ("Hunter2-Xq9z", "second-line-77"), ("name: shop",)),
+    ('credentials: [\n  // the ones in use\n  "Hunter2-Xq9z",\n]\nname: shop', ("Hunter2-Xq9z",), ("  // the ones in use", "name: shop")),
+)
 
 Answer = Callable[[str, dict, str], Optional[dict]]
 
@@ -397,6 +660,44 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(sorted(questions), ["item-7", "item-8"])
         self.assertNotIn("Stolen", json.dumps(questions))
 
+    def test_an_include_is_only_a_markdown_file_that_lies_beside_the_review_file(self) -> None:
+        self.file("outside/rules.md", "5. **Outside.** A rule from elsewhere.\n")
+        self.file("rules/.env", "DB_PASSWORD=hunter2\n")
+        self.file("rules/notes.txt", "6. **Text.** A rule in a text file.\n")
+        self.file("rules/credentials.md", "9. **Credentials.** cloud_secret=abc\n")
+        self.file("rules/keys.md", "10. **Keys.**\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA\n"
+                                   "-----END OPENSSH PRIVATE KEY-----\n")
+        self.file("rules/php.md", "7. **No new.** Objects come from factories.\n")
+        os.symlink(str(self.tmp / "outside" / "rules.md"), str(self.tmp / "rules" / "link.md"))
+        os.symlink(".env", str(self.tmp / "rules" / "inside.md"))
+        review = self.file("rules/REVIEW.md", "## Always check\n\n@.env\n@notes.txt\n@credentials.md\n@keys.md\n"
+                           "@link.md\n@inside.md\n@../outside/rules.md\n@php.md\n8. **Final.** Text.\n")
+
+        done = self.run_decide("rules", "--diff", self.file("d.diff", "diff --git a/a b/a\n+++ b/a\n+x\n"), "--rules", review)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        questions = json.dumps(self.endpoint.requests[0]["body"])
+        self.assertEqual(sorted(self.asked_ids()), ["item-7", "item-8"])
+        for leaked in ("hunter2", "Outside", "A rule in a text file", "cloud_secret", "b3BlbnNzaA", "@"):
+            self.assertNotIn(leaked, questions)
+        refused = json.loads(done.stdout)["refused"]
+        self.assertEqual(sorted(r["path"] for r in refused),
+                         sorted([".env", "notes.txt", "credentials.md", "keys.md", "link.md", "inside.md",
+                                 "../outside/rules.md"]))
+        self.assertTrue(all(r["why"] and r["in"] == review for r in refused))
+
+    def test_an_included_file_has_its_secret_values_withheld(self) -> None:
+        self.file("rules/php.md", "7. **Pool.** Connect with DB_PASSWORD=hunter2 only from config.\n")
+        review = self.file("rules/REVIEW.md", "## Always check\n\n@php.md\n8. **Final.** Text.\n")
+
+        done = self.run_decide("rules", "--diff", self.file("d.diff", "diff --git a/a b/a\n+++ b/a\n+x\n"), "--rules", review)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(sorted(self.asked_ids()), ["item-7", "item-8"])
+        self.assertNotIn("hunter2", json.dumps(self.endpoint.requests[0]["body"]))
+        self.assertEqual(json.loads(done.stdout)["withheld"], 1)
+        self.assertEqual(json.loads(done.stdout)["refused"], [])
+
     def test_items_numbered_alike_in_two_sections_are_both_asked(self) -> None:
         review = ("## Always check — PHP\n\n1. **No new.** Factories.\n\n"
                   "```sh\n# a comment in an example\n```\n\n2. **Final.** Final classes.\n\n"
@@ -541,6 +842,103 @@ class DecideTests(unittest.TestCase):
         parts = [r["body"]["state"] for r in self.endpoint.requests if "claim-1" in r["body"]["questions"]]
         self.assertGreater(len(parts), 1)
         self.assertTrue(all(part.startswith("=== ") and "gate.log ===" in part.splitlines()[0] for part in parts))
+
+
+class SecretFilterTests(unittest.TestCase):
+    """The filter every sent text goes through, form by form."""
+
+    def test_every_common_form_of_a_secret_is_withheld_to_its_end(self) -> None:
+        for text, fragments in LEAKS:
+            with self.subTest(text=text):
+                sent, count = decide.withhold(text + "\n")
+
+                for fragment in fragments:
+                    self.assertNotIn(fragment, sent)
+                self.assertGreater(count, 0)
+
+    def test_text_about_secrets_that_holds_none_is_sent_as_it_is(self) -> None:
+        for text in PASSES:
+            with self.subTest(text=text):
+                self.assertEqual(decide.withhold(text + "\n"), (text + "\n", 0))
+
+    def test_every_line_the_previous_filter_withheld_is_still_withheld(self) -> None:
+        for text, fragments in BASE_WITHHELD:
+            with self.subTest(text=text):
+                sent, count = decide.withhold(text + "\n")
+
+                for fragment in fragments:
+                    self.assertNotIn(fragment, sent)
+                self.assertGreater(count, 0)
+
+    def test_a_value_that_goes_on_over_the_next_lines_is_withheld_there_too(self) -> None:
+        for text, fragments, kept in MULTILINE:
+            with self.subTest(text=text):
+                sent, _ = decide.withhold(text + "\n")
+
+                for fragment in fragments:
+                    self.assertNotIn(fragment, sent)
+                for line in kept:
+                    self.assertIn(line + "\n", sent)
+
+    def test_code_after_a_name_that_ends_its_line_is_sent_as_it_is(self) -> None:
+        for text in ("if token:\n    run(token)\nelse:\n    stop()\n", "for secret in secrets:\n    print(secret.name)\n",
+                     "tokens = [\n    cfg.first,\n    ACCESS_TOKEN,\n]\n", "password = (\n    first\n)\n",
+                     "password:\nname: shop\n"):
+            with self.subTest(text=text):
+                self.assertEqual(decide.withhold(text), (text, 0))
+
+    def test_a_string_that_only_looks_opened_holds_back_a_bounded_number_of_lines(self) -> None:
+        text = "const lines = `token = \"\"\"\\nline`;\n" + "".join("step(%d);\n" % n for n in range(100))
+
+        sent, _ = decide.withhold(text)
+
+        self.assertIn("step(64);\n", sent)
+        self.assertNotIn("step(63);\n", sent)
+
+    def test_nested_calls_and_chains_cost_time_in_proportion_to_their_length(self) -> None:
+        shapes = ("token: make()" + ".a()" * 26 + " + x", "token = make(cfg)" + ".with(o)" * 26 + " ?? y",
+                  "password: f(" + ").a(" * 28 + "!", "token = a(" * 200 + ")" * 200 + "x",
+                  "token = new A(" + "b.c(" * 100 + "!", "token = A\\B" + "\\C" * 300 + "(")
+        for text in shapes:
+            with self.subTest(text=text[:32]):
+                began = time.monotonic()
+
+                decide.withhold(text + "\n")
+
+                self.assertLess(time.monotonic() - began, 0.5)
+
+    def test_every_pattern_is_linear_on_lines_built_to_make_it_backtrack(self) -> None:
+        units = ("token: make()", ".a()", "(", ")", "a(", ").a(", "token=", "token: ", "password=\"", "'''", '"""',
+                 "[", "{", "\\", "->", "::", "a.", "$a", "${", "@", "a://", "a:", "-u a:", "mysql ", " -p",
+                 "<token>", "</token>", 'key="token" value="', "Bearer ", "eyJaaaaaaaa.", "pass", "*", "x" * 7,
+                 "1.0-", "|", " # ", "AKIA", "ghp_", "Authorization: ", "-----BEGIN ")
+        began = time.monotonic()
+
+        for unit in units:
+            decide.withhold(unit * (40000 // len(unit)) + "\n")
+            decide.withhold("token: " + unit * (40000 // len(unit)) + "\n")
+
+        self.assertLess(time.monotonic() - began, 6.0)
+
+    def test_a_long_line_of_names_that_only_look_like_secrets_is_sent_as_it_is(self) -> None:
+        for line in ("passed=1 " * 3000 + "\n", "token=token," * 3000 + "\n"):
+            with self.subTest(line=line[:24]):
+                self.assertEqual(decide.withhold(line), (line, 0))
+
+    def test_a_long_line_costs_time_in_proportion_to_its_length(self) -> None:
+        lines = ("token=token," * 10000, "api_key: str " * 10000, "token: (" * 15000, "password=*** " * 10000,
+                 'password="' * 15000, "token=" + "x" * 120000, "x" * 3000 + " password=" + "y" * 120000)
+        began = time.monotonic()
+
+        for line in lines:
+            decide.withhold(line + "\n")
+
+        self.assertLess(time.monotonic() - began, 3.0)
+
+    def test_a_value_longer_than_the_window_is_withheld_to_its_end(self) -> None:
+        sent, count = decide.withhold("password=" + "y" * 5000 + "tail # note\n")
+
+        self.assertEqual((sent, count), ("password=[withheld] # note\n", 1))
 
 
 if __name__ == "__main__":

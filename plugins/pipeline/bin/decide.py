@@ -26,10 +26,19 @@ object of id to a claim text or to {"claim": text, "evidence": [files]}: a claim
 asked over those alone, and one that names none over the --evidence files alone, so a red test run kept
 as evidence for one claim never counts against another. Before anything is sent, a diff loses the files whose
 name or content looks like a credential (a key file, an env or auth file, a database dump, a private
-key block), and every text sent but the review files' own items has the values of secret-looking lines withheld (a password or token
-assignment, an Authorization or Cookie header, a password inside a URI, a known token shape). The
-answer counts what was dropped and withheld. The filter is a net, not a guarantee: what is not meant
-to leave the machine does not go into a state, claims or evidence file.
+key block), and every text sent but the items written in the review files themselves has the values of
+secret-looking lines withheld, each to its end (a password, secret, token or key — `APP_KEY`, not `key`
+alone — given by assignment, by a setter such as define(), as an XML element or attribute, or as a
+command's -u user:password; an Authorization, Cookie or API-key header and a bearer credential; the
+userinfo of a URI; a private key block; a known token shape). A value that goes on over the next lines is
+withheld there too: a YAML block scalar or nested map, a triple-quoted or unclosed string (for at most
+64 lines), a list or an object, whose scalars are withheld to its closing bracket — its keys, and a value
+whose key points at the secret (`"env": "DIBS_TOKEN"`), are kept. A review file's line holding only
+`@name` includes a Markdown file of that name from its own directory — no path, no link out of it, no
+name that looks like a credential, no private key inside — and its text goes through the same filter;
+an include that is refused is named under "refused" and not sent. The answer counts what was dropped,
+refused and withheld. The filter is a net, not a guarantee: what is not meant to leave the machine does
+not go into a state, claims or evidence file.
 
 Answers print as JSON on standard output. A probability of YES or more counts as yes, NO or less as no,
 anything between — or no readable answer — as uncertain: the session settles an uncertain answer by
@@ -64,6 +73,8 @@ TIMEOUT = 60
 # that is not ASCII.
 STATE_TOKENS = 20_000
 LINE_CHARS = 4_000
+VALUE_CHARS = 1_024
+STRING_LINES = 64
 BODY_BYTES = 240_000
 MAX_QUESTIONS = 64
 KINDS = ("size", "rules", "done")
@@ -111,24 +122,102 @@ CREDENTIAL_PATH = re.compile(
 KEY_BLOCK_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----")
 KEY_BLOCK_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----")
 TOKEN_SHAPES = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}"
-    r"|xox[abposr]-[A-Za-z0-9-]{10,}|sk_(live|test)_[A-Za-z0-9]{10,}|sk-[A-Za-z0-9_-]{20,}|sk_[a-z0-9-]+_[A-Za-z0-9]{16,}"
-    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})")
-# A name holding a secret word, then one `=`, `:`, `:=` or `=>` (never `==`, `::` or `->`), then its value: a
-# quoted string, or everything up to a separator (`&`, `,`, `;`, `)`), a comment after a space, or the end of
-# the line. `value_is_code` leaves a value that is a type, a literal or a reference to other code.
-SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(?P<head>(?<![\w.-])(?P<name>[\w.-]{0,64}"
-    r"(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key|credentials?)"
-    r"[\w.-]{0,64})[\"']?[ \t]{0,8}(?<![=:!<>])(?::=|=>|=|:)(?![=:>])[ \t]{0,8})"
-    r"(?P<value>\"[^\"\n]{0,512}\"|'[^'\n]{0,512}'|[^\s\"'&,;)][^\n&,;)]{0,511}?)"
-    r"(?=[ \t]+(?:#|//)|[ \t]{0,64}(?:[&,;)]|$))")
+    r"(?<![A-Za-z0-9_-])(?:(?:AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}"
+    r"|glpat-[A-Za-z0-9_-]{16,}|xox[abposr]-[A-Za-z0-9-]{8,}|xapp-[A-Za-z0-9-]{8,}|[sr]k_(?:live|test)_[A-Za-z0-9]{8,}"
+    r"|sk-[A-Za-z0-9_-]{20,}|sk_[a-z0-9-]+_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{30,}|npm_[A-Za-z0-9]{30,}"
+    r"|pypi-[A-Za-z0-9_-]{30,}|whsec_[A-Za-z0-9]{16,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})")
+# The words that make a name a secret's name. `pass` and `key` are one only as a whole part that ends the
+# name, never inside a word (`passed`, `bypass`, `monkey`); `secret_name` and `weak_pass` decide that.
+SECRET_WORDS = (r"password|passwd|passphrase|pwd|pass|secret|token|api[_-]?key|access[_-]?key|private[_-]?key"
+                r"|auth[_-]?key|credentials?|key")
+STRONG_SECRET_WORDS = re.compile(r"(?i)password|passwd|passphrase|pwd|secret|token|api[_-]?key|access[_-]?key"
+                                 r"|private[_-]?key|auth[_-]?key|credential")
+NAME_PARTS = re.compile(r"[_.\-]+|(?<=[a-z0-9])(?=[A-Z])")
+# `key` after a separator (`APP_KEY`, `encryption.key`, `signing-key`), not `signingKey`, `monkey`, or `key`
+# alone, which names a map's or a loop's key far more often than a secret.
+KEY_NAME = re.compile(r"(?i)[_.-]key$")
+# A last part that makes the name about a secret rather than the secret: where it lives or comes from, what it
+# is called, how long it lasts (`SECRET_KEY_FILE`, `TOKEN_URL`, `tokenEnv`, `TOKEN_SOURCE`, `ACCESS_KEY_ID`,
+# `TOKEN_TTL`; inside an object, `"from": "env"`).
+POINTER_PARTS = frozenset(("path", "file", "dir", "url", "uri", "env", "source", "from", "name", "type", "id",
+                           "length", "ttl", "field", "header", "label"))
+# A part before `key` that makes it a key of a table, a cache or a published pair, never a secret.
+PUBLIC_KEY_PARTS = frozenset(("public", "primary", "foreign", "cache", "sort", "partition", "route", "lookup",
+                              "idempotency", "unique", "composite", "row", "map", "translation", "i18n", "storage",
+                              "index", "lock", "dedupe", "item", "object", "column", "message"))
+VERSION = re.compile(
+    r"(?i)[\^~]?(?:[<>]=?|=)?[ \t]*v?\d+\.\d+(?:\.\d+)?(?:-(?:alpha|beta|rc|dev|pre|preview|snapshot)(?:[.-]?\d+)*)?"
+    r"(?:\+(?:build[.-]?)?\d+(?:\.\d+)*)?")
+# A name holding a secret word and not a segment of a path (`node_modules/path-key`), a closing quote or bracket
+# of a key (`"password"`, `['db_password']`), then one `=`, `:`, `:=` or `=>` (never `==`, `::` or `->`). The
+# value is read from the rest of the line by `value_span`.
+ASSIGNMENT_HEAD = re.compile(
+    r"(?i)(?<![\w./-])(?P<name>[\w.-]{0,64}(?:%s)[\w.-]{0,64})(?P<close>[\"'`]?\]?)(?P<before>[ \t]{0,8})"
+    r"(?<![=:!<>])(?P<sep>:=|=>|=|:)(?![=:>])(?P<after>[ \t]{0,8})" % SECRET_WORDS)
+# A setter that takes the name as a quoted first argument: `define('DB_PASSWORD', '…')`, `putenv("TOKEN", …)`.
+SETTER_HEAD = re.compile(
+    r"(?i)\b(?:define|setenv|putenv|set|setparameter|setdefault)[ \t]*\([ \t]*([\"'])(?P<name>[\w.-]{1,128})\1"
+    r"(?P<before>[ \t]*)(?P<sep>,)(?P<after>[ \t]*)")
+XML_ELEMENT = re.compile(
+    r"(?i)<(?P<name>[\w.:-]{0,64}(?:%s)[\w.:-]{0,64})>(?P<value>[^<\n]{1,1024})</(?P=name)>" % SECRET_WORDS)
+# `<add key="ApiKey" value="…"/>`, `<property name="db.password" value="…"/>`.
+KEY_VALUE_ATTRIBUTES = re.compile(
+    r"(?i)\b(?:key|name)[ \t]*=[ \t]*([\"'])(?P<name>[^\"'\n]{1,128})\1[ \t]+value[ \t]*=[ \t]*([\"'])"
+    r"(?P<value>[^\"'\n]*)\3")
 CODE_WORDS = frozenset(("string", "str", "int", "integer", "bool", "boolean", "number", "float", "double", "bytes",
                         "none", "null", "nil", "true", "false", "undefined", "any", "void", "object", "array",
                         "mixed", "unknown", "never"))
-CODE_PREFIXES = ("$", "@", "%env(", "${", "process.env", "os.environ", "getenv(", "env(", "this.", "self.", "this->")
-SECRET_HEADER = re.compile(r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key)(\s*:\s*)(\S.*)$")
-URI_PASSWORD = re.compile(r"((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^/\s:@]{1,256}:)([^@\s/]{1,256})(@)", re.I)
+CODE_PREFIXES = ("@", "%env(", "process.env", "os.environ", "getenv(", "env(", "this.", "self.", "this->")
+# A reference to a variable: `$name` ended by what ends a variable, `${NAME}`, `$(command)`. `$ecr3t!` and
+# `$2y$10$…` are not one.
+VARIABLE = re.compile(r"\$(?:\{[^}\s]{1,128}\}|\(|[A-Za-z_]\w{0,63}(?=$|[\s;,)\]}.:\[/\"'`]|->|\?\?|\|\|))")
+# The callee and opening parenthesis of a call; `is_call` reads what follows with a bracket scanner, so no
+# pattern repeats over the arguments.
+CALLEE = re.compile(r"(?:new[ \t]+|await[ \t]+)?[A-Za-z_\\][\w.:\\>-]{0,127}[ \t]*\(")
+CALL_TRAILER = re.compile(r"(?:\??\.|->)\w{1,64}")
+CALL_END = re.compile(r"[ \t;,)\]}]*")
+ARGUMENTS_BELOW = re.compile(r"[ \t]*[{\[]?[ \t]*")
+# A call whose arguments go on below and whose callee is a constructor or qualified: `new Account({ a,`,
+# `re.compile(r"…"`. Each part is bounded and the separators are not word characters, so it cannot backtrack.
+OPEN_CALL = re.compile(
+    r"(?:new[ \t]+[A-Za-z_\\][\w\\]{0,127}|(?:await[ \t]+)?[A-Za-z_]\w{0,63}(?:(?:\.|::|->|\\)\w{1,63}){1,16})"
+    r"[ \t]*\(")
+# A value annotated with a type before it is given: `api_key: str = "…"`.
+TYPED = re.compile(r"[A-Za-z_][\w\[\]., |?]{0,63}?[ \t]*=(?![=>])[ \t]*(?=\S)")
+PLACEHOLDER = re.compile(
+    r"(?i)|redacted|\[redacted\]|<redacted>|\[withheld\]|\*{3,}|x{3,}|\.{3}|…|<[^<>\n]{1,64}>"
+    r"|\{\{?[ \t]*[A-Za-z_$][\w.$]{0,63}[ \t]*\}\}?|%[sd]|%\(\w{1,64}\)s")
+# One scalar inside a list or an object: a key, bare or quoted (`user:`, `"from":`), a quoted string, or a
+# bare word.
+SCALAR = re.compile(r"(?P<key>[\w$.-]{1,128}|\"(?:[^\"\\\n]|\\.){0,128}\"|'(?:[^'\\\n]|\\.){0,128}')"
+                    r"(?=[ \t]*:(?!:))|\"(?:[^\"\\\n]|\\.)*\"?|'(?:[^'\\\n]|\\.)*'?"
+                    r"|`(?:[^`\\\n]|\\.)*`?|[^\s,:;=\[\]{}()\"'`]+")
+# A bare word inside a list or an object that is code rather than a value: a qualified reference, a variable,
+# or a constant's name.
+CODE_REFERENCE = re.compile(r"(?:\.{3})?(?:[$#@]?[A-Za-z_]\w*(?:(?:\??\.|->|::)[A-Za-z_]\w*)+|\$[A-Za-z_]\w*"
+                            r"|[A-Z][A-Z0-9]*_[A-Z0-9_]+)")
+KEY_GAP = re.compile(r"[ \t]*:[ \t]*")
+BLOCK_SCALAR = re.compile(r"[|>][+-]?[1-9]?[+-]?")
+# A name a declaration introduces (`type AppTokenDeps = {`, `class TokenStore {`): a type, never a secret's.
+DECLARED = re.compile(r"\b(?:type|interface|class|enum|struct|record|trait)[ \t]+$")
+# A value made of words alone (`'pause'`, `schema_version`): under a name that is a secret's only by ending in
+# `KEY`, the name of a key rather than a key.
+WORDS_ONLY = re.compile(r"[A-Za-z][A-Za-z_.:-]{0,127}")
+COMMENT_LINE = ("//", "/*", "*", "#")
+LINE_START = re.compile(r"[+-]?[ \t]*(?:-[ \t]+)?")
+COMMENT = re.compile(r"[ \t]+(?:#|//)")
+SECRET_HEADER = re.compile(
+    r"(?i)(?<![\w-])(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|private-token)"
+    r"([\"']?[ \t]*:(?!:)[ \t]*)(\S.*)$")
+BEARER = re.compile(r"(?i)\b(bearer|basic)([ \t]+)([A-Za-z0-9._~+/-]{12,}=*)")
+# The userinfo of a URI, up to the last `@` before the host: `redis://:pw@host`, `amqp://user:p@ss@host`,
+# `https://<token>@host`.
+URI_USERINFO = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,30}://)([^\s/?#'\"<>()\[\]{}]{0,512})@")
+PLAIN_USER = re.compile(r"[A-Za-z][A-Za-z._-]{0,31}[0-9]{0,4}")
+COMMAND_USER = re.compile(
+    r"(?<!\S)(?:-u|--user|--proxy-user)(?:[ \t]+|=)?([\"']?)(?P<user>[^\s:'\"]*):(?P<pw>[^\s'\"]+)")
+MYSQL_PASSWORD = re.compile(
+    r"(?<![\w-])(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n]{0,512}?(?<!\S)-p(?P<pw>[^\s'\"]\S*)")
 WITHHELD = "[withheld]"
 HTTP_HINTS = {
     401: "the key is missing or wrong",
@@ -323,18 +412,39 @@ def read_text(path: str) -> str:
 
 # -- what may leave the machine --------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class Carry:
+    """A withheld value that goes on over the next lines. `kind` is "indent" (a YAML block scalar or nested
+    map: the lines indented deeper than `column`), "bracket" (a list or object `depth` brackets deep, until it
+    closes), "quote" (a quoted string that has not closed, on lines indented deeper than `column`) or "triple"
+    (a triple-quoted string, until `closer`). A string goes on for at most `left` more lines, so a quote that
+    only looks like one opening, inside another string, does not hold back the rest of the text."""
+    kind: str
+    column: int
+    closer: str = ""
+    depth: int = 0
+    left: int = STRING_LINES
+
+
 def withhold(text: str) -> Tuple[str, int]:
-    """The text with the values of secret-looking lines replaced, and how many lines were touched."""
+    """The text with the values of secret-looking lines replaced, and how many lines were touched; a value
+    that goes on over the next lines is withheld there too."""
     out: List[str] = []
     count = 0
     in_block = False
+    carry: Optional[Carry] = None
     for line in text.splitlines(keepends=True):
         if in_block or KEY_BLOCK_BEGIN.search(line):
             in_block = not KEY_BLOCK_END.search(line)
             out.append(WITHHELD + "\n")
             count += 1
+            carry = None
             continue
-        changed = scrub_line(line)
+        changed: Optional[str] = None
+        if carry is not None:
+            changed, carry = carried_line(line, carry)
+        if changed is None:
+            changed, carry = scrub_line(line)
         if changed != line:
             count += 1
             if line.endswith("\n") and not changed.endswith("\n"):
@@ -343,29 +453,382 @@ def withhold(text: str) -> Tuple[str, int]:
     return "".join(out), count
 
 
-def value_is_code(name: str, value: str) -> bool:
-    """A value that is a type, a literal, the name again, or a reference to other code — not a secret."""
-    if value[:1] in "\"'":
+def content_column(body: str) -> int:
+    """Where a line's content starts: after one leading diff marker (`+`, `-`) and the indentation."""
+    i = 1 if body[:1] in ("+", "-") else 0
+    while i < len(body) and body[i] in " \t":
+        i += 1
+    return i
+
+
+def carried_line(line: str, carry: Carry) -> Tuple[Optional[str], Optional[Carry]]:
+    """A line inside a value that `carry` says goes on: the line with that value withheld and what goes on
+    after it, or None when the value ended before this line, which is then read as any other."""
+    body = line.rstrip("\r\n")
+    end = line[len(body):]
+    column = content_column(body)
+    if not body[column:].strip():
+        return line, carry
+    if carry.kind == "indent":
+        return (body[:column] + WITHHELD + end, carry) if column > carry.column else (None, None)
+    if carry.kind == "quote" and column <= carry.column:
+        return None, None
+    if carry.kind == "bracket":
+        if column < carry.column:
+            return None, None
+        if body[column:].startswith(COMMENT_LINE):
+            return scrub_line(line)[0], carry
+        closes, depth = close_of(body, column, carry.depth)
+        if closes < 0:
+            return body[:column] + withhold_scalars(body[column:]) + end, Carry("bracket", carry.column, depth=depth)
+        tail, after = scrub_line(body[closes - 1:])
+        return body[:column] + withhold_scalars(body[column:closes - 1]) + tail + end, after
+    if carry.left <= 0:
+        return None, None
+    closer = body.find(carry.closer, column) if carry.kind == "triple" else string_close(body, column, carry.closer)
+    if closer < 0:
+        return body[:column] + WITHHELD + end, Carry(carry.kind, carry.column, carry.closer, left=carry.left - 1)
+    tail, after = scrub_line(body[closer:])
+    return body[:column] + WITHHELD + tail + end, after
+
+
+def string_close(text: str, start: int, quote: str) -> int:
+    """The index of the first `quote` from `start` that no backslash escapes, or -1."""
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == quote:
+            return i
+        i += 1
+    return -1
+
+
+def close_of(text: str, start: int, depth: int) -> Tuple[int, int]:
+    """Reading `text` from `start` with `depth` brackets open: the index just after the bracket that closes
+    them all, or -1 and the depth still open when the text ends first. A quoted string is skipped whole."""
+    i = start
+    while i < len(text):
+        char = text[i]
+        if char in "\"'`":
+            i = quoted_end(text, i)[0]
+            continue
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth <= 0:
+                return i + 1, 0
+        i += 1
+    return -1, depth
+
+
+def name_parts(name: str) -> List[str]:
+    """The parts of a name, split at `_`, `.`, `-` and camel case, lower-cased."""
+    return [part.lower() for part in NAME_PARTS.split(name) if part]
+
+
+def secret_name(name: str) -> bool:
+    """Whether `name` names a secret: it holds a secret word, or `pass` or `key` ends it after a separator
+    (`DB_PASS`, `smtp.pass`, `APP_KEY`) — unless its last part says it points at the secret
+    instead (`SECRET_KEY_FILE`), or the part before `key` makes it a table's or a cache's (`PRIMARY_KEY`)."""
+    parts = name_parts(name)
+    if not parts or parts[-1] in POINTER_PARTS:
         return False
-    word = re.split(r"[\s|]", value.strip(), maxsplit=1)[0].strip("?[]").lower()
+    if STRONG_SECRET_WORDS.search(name):
+        return True
+    if KEY_NAME.search(name.strip("-")):
+        return len(parts) > 1 and parts[-2] not in PUBLIC_KEY_PARTS
+    return len(parts) > 1 and parts[-1] == "pass" and re.search(r"[_.-]", name.strip("-")) is not None
+
+
+def weak_pass(name: str) -> bool:
+    """A name that is `pass` alone or after one camel-case word (`pass`, `PASS`, `--pass`, `dbPass`): a
+    secret's in a query, an option or before a quoted value; a verdict, a label or a counter otherwise
+    (`PASS = 3`, `*Pass:*`, `this.perPass = n`)."""
+    parts = name_parts(name)
+    return 0 < len(parts) <= 2 and parts[-1] == "pass" and not secret_name(name)
+
+
+def is_placeholder(value: str) -> bool:
+    """A value that stands in for a secret without being one: empty, `REDACTED`, `***`, `<…>`, `{name}`,
+    `%s`."""
+    return PLACEHOLDER.fullmatch(value.strip()) is not None
+
+
+def kept_literal(quote: str, inner: str) -> bool:
+    """A quoted literal that holds no secret: a placeholder, a version constraint (`^0.7.1`, `1.2.0-rc.1`), or a
+    string that only interpolates a variable (`"$HOME/…"`, `"${token}"`)."""
+    return (is_placeholder(inner) or VERSION.fullmatch(inner.strip()) is not None
+            or (quote in "\"`" and VARIABLE.match(inner) is not None))
+
+
+def is_call(value: str) -> bool:
+    """Whether `value` is a call: a callee, its arguments to the matching parenthesis, then member accesses,
+    further calls and indexes (`key(dir).path`, `make().a().b()`), then only closing punctuation; or a callee
+    whose arguments go on below (`issue(`, `make({`). A bracket scanner reads the arguments, so the cost is in
+    proportion to the length."""
+    head = CALLEE.match(value)
+    if head is None:
+        return False
+    if ARGUMENTS_BELOW.fullmatch(value, head.end()) is not None:
+        return True
+    pos = close_of(value, head.end(), 1)[0]
+    while pos > 0:
+        trailer = CALL_TRAILER.match(value, pos)
+        if trailer is not None:
+            pos = trailer.end()
+            if value.startswith("(", pos):
+                pos = close_of(value, pos + 1, 1)[0]
+        elif value.startswith("[", pos):
+            pos = close_of(value, pos + 1, 1)[0]
+        else:
+            break
+    return pos > 0 and CALL_END.fullmatch(value, pos) is not None
+
+
+def value_is_code(name: str, value: str, env_style: bool) -> bool:
+    """An unquoted value that is a type, a literal, the name again, a variable, a call, a parenthesized
+    expression or an arrow function, or another reference to code — not a secret. A call or a parenthesis is
+    code only outside an environment line (`NAME=value`), where none runs."""
+    word = re.match(r"[^\s,;)|\]}]*", value).group(0).strip("?[]").lower()
     last = re.split(r"[.-]", name)[-1].lower()
     a_file = re.search(r"\.(php|py|js|mjs|ts|tsx|jsx|rb|go|rs|java|kt|cs|twig|html|css|ya?ml|json|xml|md|txt|log|sh)$",
                        name, re.I) is not None
-    return (word in CODE_WORDS or word == last or word == name.lower() or "(" in value or a_file
-            or value.startswith(CODE_PREFIXES))
+    if (word in CODE_WORDS or word == last or word.rsplit(".", 1)[-1] == last or word == name.lower() or a_file
+            or value.startswith(CODE_PREFIXES)):
+        return True
+    if value.startswith("$"):
+        return VARIABLE.match(value) is not None
+    return not env_style and (value.startswith("(") or is_call(value) or OPEN_CALL.match(value) is not None)
 
 
-def scrub_line(line: str) -> str:
-    """One line with its secret-looking values withheld; every pattern is bounded, so a long line costs
-    time in proportion to its length."""
+def withhold_scalar(found: re.Match[str], key: Optional[str]) -> str:
+    """One scalar of a list or an object under a secret's name, withheld unless it is a key, the value of a
+    key that points at the secret rather than holding it (`"env": "DIBS_TOKEN"`), a literal that holds no
+    secret, code, or punctuation."""
+    text = found.group(0)
+    if found.group("key") is not None:
+        return text
+    if key is not None:
+        parts = name_parts(key.strip("\"'"))
+        if parts and parts[-1] in POINTER_PARTS:
+            return text
+    if text[0] in "\"'`":
+        closed = len(text) > 1 and text[-1] == text[0]
+        if kept_literal(text[0], text[1:-1] if closed else text[1:]):
+            return text
+        return WITHHELD
+    if (re.search(r"[A-Za-z0-9]", text) is None or text.lower() in CODE_WORDS or is_placeholder(text)
+            or CODE_REFERENCE.fullmatch(text) is not None):
+        return text
+    return WITHHELD
+
+
+def withhold_scalars(text: str) -> str:
+    """The inside of a list or an object under a secret's name with its scalars withheld; a scalar right after
+    a key and its `:` is that key's value."""
+    out: List[str] = []
+    pos = 0
+    key: Optional[str] = None
+    key_end = -1
+    for found in SCALAR.finditer(text):
+        owner = key if key_end >= 0 and KEY_GAP.fullmatch(text, key_end, found.start()) is not None else None
+        out.append(text[pos:found.start()] + withhold_scalar(found, owner))
+        pos = found.end()
+        key, key_end = (found.group("key"), found.end()) if found.group("key") is not None else (None, -1)
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def quoted_end(text: str, start: int = 0, stop: Optional[int] = None) -> Tuple[int, bool]:
+    """The index just after the string that opens at `start` in `text`, a backslash escaping the next
+    character, and whether it closes before `stop` (the end of `text` by default); `stop` when it does not."""
+    stop = len(text) if stop is None else min(stop, len(text))
+    quote = text[start]
+    i = start + 1
+    while i < stop:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == quote:
+            return i + 1, True
+        i += 1
+    return stop, False
+
+
+Span = Tuple[int, int, str]
+
+
+def value_span(body: str, start: int, name: str, env_style: bool, column: int, line_key: bool,
+               typed_ok: bool = True, names_a_key: bool = False) -> Tuple[Optional[Span], Optional[Carry]]:
+    """The value that opens at `start` in `body`, after a secret's name (at `column`) and separator: where it
+    lies and what replaces it when it is withheld, and the carry when it goes on over the next lines.
+
+    A quoted value runs to its closing quote; a triple-quoted one, or one that does not close, goes on
+    below. A list or an object has its scalars withheld, to its closing bracket or over the lines below.
+    Any other value runs to the end of the line or a comment after a space, so no tail of it is sent. A YAML
+    key that ends its line (`line_key`) with nothing or a block indicator (`|`, `>-`) after it has its value
+    on the lines indented deeper. Under a name that only ends in `KEY` (`names_a_key`), a value of words
+    alone is the name of a key and is kept. A type before the value (`str = "…"`) is looked past once. Only the first
+    VALUE_CHARS from `start` decide; the rest of the line is read only to find the end of a value that is
+    withheld, after which the scan goes on past it, so a line costs time in proportion to its length."""
+    if start >= len(body):
+        return None, (Carry("indent", column) if line_key else None)
+    window = body[start:start + VALUE_CHARS]
+    first = window[0]
+    if first in "&,;)]}":
+        return None, None
+    if window.startswith(('"""', "'''")):
+        closer = body.find(window[:3], start + 3)
+        if closer >= 0:
+            return (start, closer + 3, WITHHELD), None
+        return (start, len(body), WITHHELD), Carry("triple", column, closer=window[:3])
+    if first in "\"'`":
+        end, closed = quoted_end(window)
+        inner = window[1:end - 1] if closed else window[1:]
+        if kept_literal(first, inner) or (names_a_key and closed and WORDS_ONLY.fullmatch(inner) is not None):
+            return None, None
+        if not closed:
+            end, closed = quoted_end(body, start)
+            end -= start
+        if closed:
+            return (start, start + end, WITHHELD), None
+        return (start, len(body), WITHHELD), Carry("quote", column, closer=first)
+    if first in "[{" and not env_style:
+        closes, depth = close_of(body, start + 1, 1)
+        if closes < 0:
+            return (start + 1, len(body), withhold_scalars(body[start + 1:])), Carry(
+                "bracket", content_column(body), depth=depth)
+        if is_placeholder(body[start:closes]):
+            return None, None
+        return (start + 1, closes - 1, withhold_scalars(body[start + 1:closes - 1])), None
+    comment = COMMENT.search(window)
+    value = window[:comment.start() if comment else len(window)].rstrip()
+    if not value or value.startswith(("#", "//")) or (line_key and BLOCK_SCALAR.fullmatch(value) is not None):
+        return None, (Carry("indent", column) if line_key else None)
+    if (is_placeholder(value) or is_placeholder(value.split()[0].rstrip(",;"))
+            or (names_a_key and WORDS_ONLY.fullmatch(value.rstrip(",;")) is not None)):
+        return None, None
+    if value_is_code(name, value, env_style):
+        typed = TYPED.match(value) if typed_ok else None
+        if typed is None:
+            return None, None
+        return value_span(body, start + typed.end(), name, env_style, column, False, typed_ok=False,
+                          names_a_key=names_a_key)
+    if comment is None and start + len(window) < len(body):
+        comment = COMMENT.search(body, start + len(window))
+        return (start, len(body[:comment.start() if comment else len(body)].rstrip()), WITHHELD), None
+    return (start, start + len(value), WITHHELD), None
+
+
+def withhold_values(body: str, head: re.Pattern[str]) -> Tuple[str, Optional[Carry]]:
+    """`body` with the value after every secret's name that `head` finds withheld, and the carry of a value
+    that goes on below. A name that is no secret's, or a value that is code, is passed over and the scan
+    goes on inside its value. A Markdown label (`*Pass:*`) is a label only for a name that is no secret's, and
+    a name a declaration introduces is a type's."""
+    out: List[str] = []
+    pos = 0
+    carry: Optional[Carry] = None
+    while True:
+        found = head.search(body, pos)
+        if found is None:
+            break
+        start = found.end()
+        name = found.group("name")
+        before = body[found.start() - 1:found.start()] if found.start() else ""
+        label = before == "*" and body[start:start + 1] == "*"
+        declared = DECLARED.search(body, max(0, found.start("name") - 32), found.start("name")) is not None
+        named = not declared and (secret_name(name) or (weak_pass(name) and not label
+                                                        and (name.startswith("-") or before in ("?", "&")
+                                                             or body[start:start + 1] in ("\"", "'"))))
+        span: Optional[Span] = None
+        if named:
+            env_style = (re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is not None and found.group("sep") == "="
+                         and found.group(0) == name + "=")
+            line_key = (found.group("sep") == ":"
+                        and LINE_START.fullmatch(body, 0, found.start("name")) is not None)
+            names_a_key = STRONG_SECRET_WORDS.search(name) is None and KEY_NAME.search(name) is not None
+            span, opened = value_span(body, start, name, env_style, found.start("name"), line_key,
+                                      names_a_key=names_a_key)
+            carry = opened or carry
+        if span is None:
+            out.append(body[pos:start])
+            pos = start
+            continue
+        out.append(body[pos:span[0]] + span[2])
+        pos = span[1]
+    out.append(body[pos:])
+    return "".join(out), carry
+
+
+def withhold_userinfo(found: re.Match[str]) -> str:
+    """A URI's userinfo with its password withheld, or all of it when it is a token rather than a user name."""
+    scheme, info = found.group(1), found.group(2)
+    user, colon, password = info.partition(":")
+    if colon:
+        return found.group(0) if is_placeholder(password) else scheme + user + ":" + WITHHELD + "@"
+    return found.group(0) if PLAIN_USER.fullmatch(info) else scheme + WITHHELD + "@"
+
+
+def withhold_command_user(found: re.Match[str]) -> str:
+    """`-u user:password` with the password withheld; a numeric `uid:gid` and a `user:user` pair are kept."""
+    user, password = found.group("user"), found.group("pw")
+    if (user.isdigit() and password.isdigit()) or user == password or is_placeholder(password):
+        return found.group(0)
+    return found.group(0)[:found.start("pw") - found.start()] + WITHHELD
+
+
+def withhold_bearer(found: re.Match[str]) -> str:
+    """A bearer or basic credential withheld when it holds a digit or a symbol, as a credential does and a
+    word of prose does not."""
+    credential = found.group(3)
+    if re.search(r"[0-9._~+/=-]", credential) is None:
+        return found.group(0)
+    return found.group(1) + found.group(2) + WITHHELD
+
+
+def withhold_header(found: re.Match[str]) -> str:
+    """A credential header's value withheld to the end of the line, unless it is a type or a reference."""
+    value = found.group(3)
+    if value[0] in "{[":
+        return found.group(0)
+    if value[0] in "\"'`":
+        end, closed = quoted_end(value)
+        if kept_literal(value[0], value[1:end - 1] if closed else value[1:]):
+            return found.group(0)
+    word = re.match(r"[^\s,;)|\]}]*", value).group(0).lower()
+    if word in CODE_WORDS or is_placeholder(value) or value.startswith(CODE_PREFIXES) or VARIABLE.match(value):
+        return found.group(0)
+    return found.group(1) + found.group(2) + WITHHELD
+
+
+def withhold_named_value(found: re.Match[str]) -> str:
+    """The value of an XML element or a key/value attribute pair withheld when its name is a secret's."""
+    value = found.group("value")
+    if not secret_name(found.group("name")) or is_placeholder(value) or value.startswith(("${", "%env(")):
+        return found.group(0)
+    start, end = found.start("value") - found.start(), found.end("value") - found.start()
+    return found.group(0)[:start] + WITHHELD + found.group(0)[end:]
+
+
+def scrub_line(line: str) -> Tuple[str, Optional[Carry]]:
+    """One line with its secret-looking values withheld, and the carry of a value that goes on below; every
+    pattern is bounded or scans forward only, so a long line costs time in proportion to its length."""
     body = line.rstrip("\r\n")
     end = line[len(body):]
-    body = URI_PASSWORD.sub(lambda m: m.group(1) + WITHHELD + m.group(3), body)
+    body = URI_USERINFO.sub(withhold_userinfo, body)
+    body = COMMAND_USER.sub(withhold_command_user, body)
+    body = MYSQL_PASSWORD.sub(lambda m: m.group(0)[:m.start("pw") - m.start()] + WITHHELD, body)
     body = TOKEN_SHAPES.sub(WITHHELD, body)
-    body = SECRET_HEADER.sub(lambda m: m.group(1) + m.group(2) + WITHHELD, body)
-    body = SECRET_ASSIGNMENT.sub(
-        lambda m: m.group(0) if value_is_code(m.group("name"), m.group("value")) else m.group("head") + WITHHELD, body)
-    return body + end
+    body = BEARER.sub(withhold_bearer, body)
+    body = SECRET_HEADER.sub(withhold_header, body)
+    body = XML_ELEMENT.sub(withhold_named_value, body)
+    body = KEY_VALUE_ATTRIBUTES.sub(withhold_named_value, body)
+    body, set_carry = withhold_values(body, SETTER_HEAD)
+    body, carry = withhold_values(body, ASSIGNMENT_HEAD)
+    return body + end, carry or set_carry
 
 
 def weight(text: str) -> int:
@@ -546,27 +1009,69 @@ def size_questions() -> dict:
 
 # -- rules --------------------------------------------------------------------------------------------
 
-def spliced(path: Path) -> List[str]:
+def include_refusal(folder: Path, name: str) -> Optional[str]:
+    """Why the file an `@name` line names may not be included, or None when it may: only a Markdown file
+    that lies in the review file's own directory — reached through no path and no link that leaves it —
+    under a name that does not look like a credential."""
+    if "/" in name or "\\" in name or name in (".", ".."):
+        return "an include names a file beside the review file, never a path"
+    try:
+        target = (folder / name).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return "it cannot be read"
+    if target.parent != folder.resolve():
+        return "it leads outside the review file's directory"
+    for candidate in (name, target.name):
+        if not candidate.lower().endswith(".md"):
+            return "only a Markdown file (.md) is included"
+        if CREDENTIAL_PATH.search(candidate):
+            return "its name looks like a credential"
+    if not target.is_file():
+        return "it is not a regular file"
+    return None
+
+
+def spliced(path: Path) -> Tuple[List[str], List[Dict[str, str]], int]:
     """The file's lines with each `@name` line outside a code fence replaced by the lines of the file of
-    that name beside it, one level deep; a line naming no such file stays as it is."""
+    that name beside it, one level deep, its secret values withheld; the includes refused, each named with
+    the reason; and the number of included lines withheld. A line naming nothing that exists stays as it
+    is; a refused include is left out."""
     lines: List[str] = []
+    refused: List[Dict[str, str]] = []
+    withheld = 0
     fenced = False
     for line in read_text(str(path)).splitlines():
         if line.lstrip().startswith("```"):
             fenced = not fenced
         include = None if fenced else re.fullmatch(r"@(\S+)", line.strip())
-        beside = (path.parent / include.group(1)).resolve() if include else None
-        if beside is not None and beside.parent == path.parent.resolve() and beside.is_file():
-            lines += read_text(str(beside)).splitlines()
-        else:
+        if include is None or not os.path.lexists(str(path.parent / include.group(1))):
             lines.append(line)
-    return lines
+            continue
+        name = include.group(1)
+        reason = include_refusal(path.parent, name)
+        text = ""
+        if reason is None:
+            try:
+                text = read_text(str(path.parent / name))
+            except Unusable:
+                reason = "it cannot be read"
+        reason = reason or credential_reason([name], text)
+        if reason:
+            refused.append({"path": name, "in": str(path), "why": reason})
+            continue
+        text, count = withhold(text)
+        withheld += count
+        lines += text.splitlines()
+    return lines, refused, withheld
 
 
-def review_items(paths: Sequence[str]) -> List[Tuple[str, str, str]]:
-    """(id, title, text) of every numbered item under an "Always check" heading. Ids are unique: a number
-    met again, in another section or file, gets a suffix."""
+def review_items(paths: Sequence[str]) -> Tuple[List[Tuple[str, str, str]], List[Dict[str, str]], int]:
+    """(id, title, text) of every numbered item under an "Always check" heading, the includes refused, and
+    the number of included lines withheld. Ids are unique: a number met again, in another section or file,
+    gets a suffix."""
     items: List[Tuple[str, str, str]] = []
+    refused: List[Dict[str, str]] = []
+    withheld = 0
     taken: Dict[str, int] = {}
     for path in paths:
         checking = False
@@ -585,7 +1090,10 @@ def review_items(paths: Sequence[str]) -> List[Tuple[str, str, str]]:
                 qid += "-%d" % taken[qid]
             items.append((qid, title.group(1) if title else text[:80], text))
 
-        for line in spliced(Path(path)):
+        lines, refused_here, withheld_here = spliced(Path(path))
+        refused += refused_here
+        withheld += withheld_here
+        for line in lines:
             if line.lstrip().startswith("```"):
                 fenced = not fenced
             elif not fenced and line.startswith("#"):
@@ -602,16 +1110,15 @@ def review_items(paths: Sequence[str]) -> List[Tuple[str, str, str]]:
             elif current is not None:
                 current.append(line)
         keep()
-    return items
+    return items, refused, withheld
 
 
 def rules(ep: Endpoint, diff: str, review_files: Sequence[str]) -> dict:
-    items = review_items(review_files)
+    items, refused, withheld = review_items(review_files)
     if not items:
         raise Unusable("the review files hold no numbered item under an \"Always check\" heading")
     kept: List[str] = []
     dropped = []
-    withheld = 0
     for paths, text in diff_sections(diff):
         reason = credential_reason(paths, text)
         named = next((p for p in paths if p[:2] not in ("a/", "b/")), paths[0] if paths else "")
@@ -645,7 +1152,7 @@ def rules(ep: Endpoint, diff: str, review_files: Sequence[str]) -> dict:
     order = {"violates": 0, "uncertain": 1, "complies": 2, "not_shown": 3}
     found.sort(key=lambda i: (order[i["verdict"]], -(i["p_violates"] or 0.0)))
     return {"kind": "rules", "model": model, "parts": len(parts), "requests": requests, "dropped": dropped,
-            "withheld": withheld, "items": found, "yes_at": YES, "no_at": NO, "usage": usage}
+            "refused": refused, "withheld": withheld, "items": found, "yes_at": YES, "no_at": NO, "usage": usage}
 
 
 # -- done ---------------------------------------------------------------------------------------------
