@@ -44,8 +44,18 @@ Answers print as JSON on standard output. A probability of YES or more counts as
 anything between — or no readable answer — as uncertain: the session settles an uncertain answer by
 reading the code.
 
-Exit status: 0 answered; 3 off (no endpoint, or the kind is left out), nothing sent; 4 the endpoint
-failed or answered something unreadable; 2 the input or the configuration is unusable.
+A run is bounded: one request waits at most CLAUDE_KIT_DECISION_TIMEOUT seconds for its whole answer (60),
+the run at most CLAUDE_KIT_DECISION_BUDGET seconds from its start (300), and it makes at most
+CLAUDE_KIT_DECISION_MAX_REQUESTS requests (40) of at most CLAUDE_KIT_DECISION_MAX_BYTES request-body bytes
+in all (4000000). Each must be a positive number. A large input is asked batch by batch over every part —
+the first batch of questions over all the parts before the second — so a bound that stops the run leaves
+the fewest questions half asked. When the next request would pass a bound, or a request waits past its
+time, nothing more is sent: "stopped" names the bound, and every question not asked over all its parts
+answers "not_asked" unless an asked part already found it violated, contradicted or uncertain. Such a run
+still exits 0; "requests", "bytes" and "planned" say what was sent and what the whole run would have sent.
+
+Exit status: 0 answered, in whole or up to a bound; 3 off (no endpoint, or the kind is left out), nothing
+sent; 4 the endpoint failed or answered something unreadable; 2 the input or the configuration is unusable.
 """
 from __future__ import annotations
 
@@ -53,21 +63,30 @@ import argparse
 import http.client
 import ipaddress
 import json
+import math
 import os
 import re
+import socket
 import stat
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 YES = 0.85
 NO = 0.15
 DEFAULT_MODEL = "jev-latest"
+# The bounds of one run: seconds one request waits for its whole answer, seconds the run takes from its
+# start, requests it makes, and request-body bytes it sends.
 TIMEOUT = 60
+BUDGET = 300
+MAX_REQUESTS = 40
+MAX_BYTES = 4_000_000
 # The API takes a body of 256000 bytes, and a state with its longest question must fit the model's
 # context of 32k tokens; a state is held to an estimate of 20000 tokens, counted generously for text
 # that is not ASCII.
@@ -239,6 +258,23 @@ class Failed(Exception):
     """The endpoint failed, refused, or answered something unreadable."""
 
 
+class TimedOut(Failed):
+    """The endpoint gave no whole answer within the time the request was allowed."""
+
+
+@dataclass(frozen=True)
+class Limits:
+    """The bounds of one run; see the module's description."""
+    timeout: float
+    budget: float
+    max_requests: int
+    max_bytes: int
+
+    def as_json(self) -> Dict[str, float]:
+        return {"timeout": self.timeout, "budget": self.budget, "max_requests": self.max_requests,
+                "max_bytes": self.max_bytes}
+
+
 @dataclass(frozen=True)
 class Endpoint:
     url: str
@@ -248,6 +284,73 @@ class Endpoint:
     key_note: str
     local: bool
     kinds: Tuple[str, ...]
+    limits: Limits
+
+
+class Meter:
+    """What one run has sent and how long it has run, held to its limits: it tells the next request how
+    long it may wait, or records the bound that stops it."""
+
+    def __init__(self, limits: Limits, clock: Callable[[], float] = time.monotonic) -> None:
+        self.limits = limits
+        self.clock = clock
+        self.started = clock()
+        self.requests = 0
+        self.bytes = 0
+        self.stopped: Optional[Dict[str, object]] = None
+
+    def allow(self, size: int) -> Optional[float]:
+        """The seconds a request of `size` body bytes may wait for its answer, counted as sent; or None when a
+        bound stops it, recorded in `stopped`."""
+        limits = self.limits
+        left = limits.budget - (self.clock() - self.started)
+        if self.requests >= limits.max_requests:
+            self.stop("requests", limits.max_requests, "CLAUDE_KIT_DECISION_MAX_REQUESTS",
+                      "the run made the %d requests it may make" % limits.max_requests)
+        elif self.bytes + size > limits.max_bytes:
+            self.stop("bytes", limits.max_bytes, "CLAUDE_KIT_DECISION_MAX_BYTES",
+                      "the next request would take the bytes sent past %d" % limits.max_bytes)
+        elif left <= 0:
+            self.stop("time", limits.budget, "CLAUDE_KIT_DECISION_BUDGET",
+                      "the run used the %g seconds it may take" % limits.budget)
+        else:
+            self.requests += 1
+            self.bytes += size
+            return min(limits.timeout, left)
+        return None
+
+    def timed_out(self, waited: float) -> None:
+        """Records the bound a request that had no answer within `waited` seconds ran into."""
+        if waited < self.limits.timeout:
+            self.stop("time", self.limits.budget, "CLAUDE_KIT_DECISION_BUDGET",
+                      "the run used the %g seconds it may take" % self.limits.budget)
+        else:
+            self.stop("timeout", self.limits.timeout, "CLAUDE_KIT_DECISION_TIMEOUT",
+                      "a request had no answer within %g seconds" % self.limits.timeout)
+
+    def stop(self, bound: str, limit: float, setting: str, why: str) -> None:
+        self.stopped = {"bound": bound, "limit": limit, "setting": setting, "why": why}
+
+
+def bound(env: Dict[str, str], name: str, default: float, whole: bool) -> float:
+    """The positive number setting `name` holds, or `default` when it is unset or empty."""
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw) if whole else float(raw)
+    except ValueError:
+        value = 0
+    if not (math.isfinite(value) and value > 0):
+        raise Unusable("%s must be a positive %s" % (name, "whole number" if whole else "number of seconds"))
+    return value
+
+
+def limits_of(env: Dict[str, str]) -> Limits:
+    return Limits(timeout=bound(env, "CLAUDE_KIT_DECISION_TIMEOUT", TIMEOUT, False),
+                  budget=bound(env, "CLAUDE_KIT_DECISION_BUDGET", BUDGET, False),
+                  max_requests=int(bound(env, "CLAUDE_KIT_DECISION_MAX_REQUESTS", MAX_REQUESTS, True)),
+                  max_bytes=int(bound(env, "CLAUDE_KIT_DECISION_MAX_BYTES", MAX_BYTES, True)))
 
 
 def is_loopback(host: str) -> bool:
@@ -326,7 +429,7 @@ def endpoint(kind: Optional[str], env: Dict[str, str]) -> Endpoint:
     else:
         note = "sent"
     model = env.get("CLAUDE_KIT_DECISION_MODEL", "").strip() or DEFAULT_MODEL
-    return Endpoint(base.rstrip("/") + "/v1/systemone", model, key, key_file, note, local, kinds)
+    return Endpoint(base.rstrip("/") + "/v1/systemone", model, key, key_file, note, local, kinds, limits_of(env))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -340,9 +443,37 @@ def scrub(text: str, key: Optional[str]) -> str:
     return text.replace(key, "***") if key else text
 
 
-def ask(ep: Endpoint, state: str, questions: Dict[str, dict]) -> Tuple[Dict[str, object], Dict[str, int], str]:
-    """One systemone request: the answers by question id, the usage, and the model that answered."""
-    body = json.dumps({"state": state, "model": ep.model, "questions": questions}).encode("utf-8")
+def request_body(ep: Endpoint, state: str, questions: Dict[str, dict]) -> bytes:
+    """The body of one systemone request, as it is sent."""
+    return json.dumps({"state": state, "model": ep.model, "questions": questions}).encode("utf-8")
+
+
+def exchange(opener: urllib.request.OpenerDirector, request: urllib.request.Request, wait: float) -> bytes:
+    """The whole response body to `request`, waited for at most `wait` seconds in all: the socket's timeout
+    bounds each read alone, so an endpoint that trickles its answer is given up at that time like one that
+    is silent. The request runs on a thread of its own that is left behind when it is given up."""
+    outcome: List[object] = []
+
+    def fetch() -> None:
+        try:
+            with opener.open(request, timeout=wait) as response:
+                outcome.append(response.read())
+        except Exception as error:  # handed to the caller, which reads it below
+            outcome.append(error)
+
+    worker = threading.Thread(target=fetch, daemon=True)
+    worker.start()
+    worker.join(wait)
+    if not outcome:
+        raise TimedOut("the endpoint gave no whole answer within %g seconds" % wait)
+    if isinstance(outcome[0], Exception):
+        raise outcome[0]
+    return outcome[0] if isinstance(outcome[0], bytes) else b""
+
+
+def ask(ep: Endpoint, body: bytes, wait: float) -> Tuple[Dict[str, object], Dict[str, int], str]:
+    """One systemone request of `body`, waiting at most `wait` seconds: the answers by question id, the
+    usage, and the model that answered."""
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if ep.key:
         headers["Authorization"] = "Bearer " + ep.key
@@ -351,8 +482,9 @@ def ask(ep: Endpoint, state: str, questions: Dict[str, dict]) -> Tuple[Dict[str,
     if ep.local:
         handlers.append(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.build_opener(*handlers).open(request, timeout=TIMEOUT) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        payload = json.loads(exchange(urllib.request.build_opener(*handlers), request, wait).decode("utf-8"))
+    except TimedOut:
+        raise
     except urllib.error.HTTPError as error:
         hint = HTTP_HINTS.get(error.code) or ("it redirected, and a redirect is never followed: check the base URL"
                                               if 300 <= error.code < 400 else "an error")
@@ -361,6 +493,8 @@ def ask(ep: Endpoint, state: str, questions: Dict[str, dict]) -> Tuple[Dict[str,
         raise Failed("the endpoint answered %d: %s" % (error.code, hint))
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         reason = getattr(error, "reason", error)
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            raise TimedOut("the endpoint gave no answer within %g seconds" % wait)
         detail = reason.strerror if isinstance(reason, OSError) and reason.strerror else type(reason).__name__
         raise Failed(scrub("the endpoint did not answer: %s" % detail, ep.key))
     except ValueError:
@@ -956,21 +1090,73 @@ def batches(state: str, questions: Dict[str, dict]) -> List[Dict[str, dict]]:
     return out
 
 
-def ask_over(ep: Endpoint, parts: Sequence[str], questions: Dict[str, dict]) -> Tuple[List[Dict[str, object]], Dict[str, int], str, int]:
-    """Every question over every part: one answers map per part, the summed usage, the model, the requests."""
-    per_part: List[Dict[str, object]] = []
+@dataclass
+class Asked:
+    """What a run got back: per part, the answers by question id and the ids its answered requests asked;
+    the summed usage; the model; and what the whole run would have sent."""
+    answers: List[Dict[str, object]]
+    asked: List[Set[str]]
+    usage: Dict[str, int]
+    model: str
+    planned_requests: int
+    planned_bytes: int
+
+    def over(self, qid: str, among: Sequence[int]) -> List[Dict[str, object]]:
+        """The answers of the parts in `among` whose request asking `qid` was answered."""
+        return [self.answers[i] for i in among if qid in self.asked[i]]
+
+
+def ask_parts(ep: Endpoint, meter: Meter, parts: Sequence[str], questions_of: Sequence[Dict[str, dict]]) -> Asked:
+    """Each part asked its own questions, batch by batch over every part — the first batch of every part
+    before the second of any — until the run is done or `meter` stops it."""
+    rounds = [batches(state, questions) if questions else [] for state, questions in zip(parts, questions_of)]
+    plan: List[Tuple[int, Dict[str, dict], bytes]] = []
+    for r in range(max((len(b) for b in rounds), default=0)):
+        plan += [(i, b[r], request_body(ep, parts[i], b[r])) for i, b in enumerate(rounds) if r < len(b)]
+    answers: List[Dict[str, object]] = [{} for _ in parts]
+    asked: List[Set[str]] = [set() for _ in parts]
     usage: Dict[str, int] = {}
     model = ep.model
-    requests = 0
-    for state in parts:
-        answers: Dict[str, object] = {}
-        for batch in batches(state, questions):
-            got, used, model = ask(ep, state, batch)
-            answers.update(got)
-            add_usage(usage, used)
-            requests += 1
-        per_part.append(answers)
-    return per_part, usage, model, requests
+    for i, batch, body in plan:
+        wait = meter.allow(len(body))
+        if wait is None:
+            break
+        try:
+            got, used, model = ask(ep, body, wait)
+        except TimedOut:
+            meter.timed_out(wait)
+            break
+        answers[i].update((qid, got[qid]) for qid in batch if qid in got)
+        asked[i].update(batch)
+        add_usage(usage, used)
+    return Asked(answers, asked, usage, model, len(plan), sum(len(body) for _, _, body in plan))
+
+
+def sending(meter: Meter, asked: Asked) -> Dict[str, object]:
+    """What a run sent, what it would have sent whole, the bound that stopped it, and its limits."""
+    return {"requests": meter.requests, "bytes": meter.bytes,
+            "planned": {"requests": asked.planned_requests, "bytes": asked.planned_bytes},
+            "stopped": meter.stopped, "limits": meter.limits.as_json()}
+
+
+def outcome_of(seen: Sequence[Dict[str, object]], of: int, qid: str, against: str, behind: str) -> Tuple[str, Optional[float], Optional[float]]:
+    """The verdict on `qid` from the answers of the `seen` parts out of the `of` it is asked over: `against`
+    when a part finds it, uncertain when a part cannot tell, not_asked when a part was left unasked, then
+    `behind` or not_shown; with the highest probabilities of `against` and of `behind`."""
+    worst, doubt = worst_and_doubt(seen, qid, against)
+    best, _ = worst_and_doubt(seen, qid, behind)
+    unsure = doubt or worst is None or worst > NO
+    if worst is not None and worst >= YES:
+        return against, worst, best
+    if seen and unsure:
+        return "uncertain", worst, best
+    if len(seen) < of:
+        return "not_asked", worst, best
+    if unsure:
+        return "uncertain", worst, best
+    if best is not None and best >= YES:
+        return behind, worst, best
+    return "not_shown", worst, best
 
 
 def worst_and_doubt(per_part: Sequence[Dict[str, object]], qid: str, option: str) -> Tuple[Optional[float], bool]:
@@ -982,24 +1168,26 @@ def worst_and_doubt(per_part: Sequence[Dict[str, object]], qid: str, option: str
 
 # -- size ---------------------------------------------------------------------------------------------
 
-def size(ep: Endpoint, state: str) -> dict:
+def size(ep: Endpoint, meter: Meter, state: str) -> dict:
     state, withheld = withhold(state)
     if weight(state) > STATE_TOKENS:
         raise Unusable("the state is too long: keep it to a summary of the request and the facts about the change")
     questions = {qid: {"type": "noul", "instructions": text} for qid, _, text in SIZE_QUESTIONS}
-    answers, usage, model = ask(ep, state, questions)
+    asked = ask_parts(ep, meter, [state], [questions])
     result: Dict[str, dict] = {}
     for qid, raises_to, _ in SIZE_QUESTIONS:
-        p = noul(answers.get(qid))
-        result[qid] = {"p": p, "answer": verdict(p), "raises_to": raises_to}
+        p = noul(asked.answers[0].get(qid))
+        answer = verdict(p) if qid in asked.asked[0] else "not_asked"
+        result[qid] = {"p": p, "answer": answer, "raises_to": raises_to}
     rank = LEVELS.index
     level = max((a["raises_to"] for a in result.values() if a["answer"] == "yes"), key=rank, default="S")
     uncertain = [qid for qid, a in result.items() if a["answer"] == "uncertain"]
-    highest = max((result[qid]["raises_to"] for qid in uncertain), key=rank, default=level)
-    return {"kind": "size", "model": model, "level": level,
+    not_asked = [qid for qid, a in result.items() if a["answer"] == "not_asked"]
+    highest = max((result[qid]["raises_to"] for qid in uncertain + not_asked), key=rank, default=level)
+    return {"kind": "size", "model": asked.model, "level": level,
             "could_be": highest if rank(highest) > rank(level) else None,
-            "uncertain": uncertain, "answers": result, "withheld": withheld,
-            "yes_at": YES, "no_at": NO, "usage": usage}
+            "uncertain": uncertain, "not_asked": not_asked, "answers": result, "withheld": withheld,
+            "yes_at": YES, "no_at": NO, "usage": asked.usage, **sending(meter, asked)}
 
 
 def size_questions() -> dict:
@@ -1113,7 +1301,7 @@ def review_items(paths: Sequence[str]) -> Tuple[List[Tuple[str, str, str]], List
     return items, refused, withheld
 
 
-def rules(ep: Endpoint, diff: str, review_files: Sequence[str]) -> dict:
+def rules(ep: Endpoint, meter: Meter, diff: str, review_files: Sequence[str]) -> dict:
     items, refused, withheld = review_items(review_files)
     if not items:
         raise Unusable("the review files hold no numbered item under an \"Always check\" heading")
@@ -1135,24 +1323,18 @@ def rules(ep: Endpoint, diff: str, review_files: Sequence[str]) -> dict:
     for qid, _, text in items:
         questions[qid] = {"type": "choice", "criteria": RULE_CRITERIA,
                           "instructions": "Judge only what this diff shows. Does it break this project review rule?\n\n" + text}
-    per_part, usage, model, requests = ask_over(ep, parts, questions)
+    asked = ask_parts(ep, meter, parts, [questions] * len(parts))
+    every = range(len(parts))
     found = []
     for qid, title, _ in items:
-        worst, doubt = worst_and_doubt(per_part, qid, "violates")
-        complies, _ = worst_and_doubt(per_part, qid, "complies")
-        if worst is not None and worst >= YES:
-            outcome = "violates"
-        elif doubt or worst is None or worst > NO:
-            outcome = "uncertain"
-        elif complies is not None and complies >= YES:
-            outcome = "complies"
-        else:
-            outcome = "not_shown"
-        found.append({"id": qid, "title": title, "verdict": outcome, "p_violates": worst})
-    order = {"violates": 0, "uncertain": 1, "complies": 2, "not_shown": 3}
+        seen = asked.over(qid, every)
+        outcome, worst, _ = outcome_of(seen, len(parts), qid, "violates", "complies")
+        found.append({"id": qid, "title": title, "verdict": outcome, "p_violates": worst, "parts_asked": len(seen)})
+    order = {"violates": 0, "uncertain": 1, "not_asked": 2, "complies": 3, "not_shown": 4}
     found.sort(key=lambda i: (order[i["verdict"]], -(i["p_violates"] or 0.0)))
-    return {"kind": "rules", "model": model, "parts": len(parts), "requests": requests, "dropped": dropped,
-            "refused": refused, "withheld": withheld, "items": found, "yes_at": YES, "no_at": NO, "usage": usage}
+    return {"kind": "rules", "model": asked.model, "parts": len(parts), **sending(meter, asked), "dropped": dropped,
+            "refused": refused, "withheld": withheld, "items": found, "yes_at": YES, "no_at": NO,
+            "usage": asked.usage}
 
 
 # -- done ---------------------------------------------------------------------------------------------
@@ -1188,7 +1370,7 @@ def read_claims(path: str) -> Dict[str, Claim]:
     return claims
 
 
-def done(ep: Endpoint, claims: Dict[str, Claim], evidence_files: Sequence[str]) -> dict:
+def done(ep: Endpoint, meter: Meter, claims: Dict[str, Claim], evidence_files: Sequence[str]) -> dict:
     """Each claim asked over its own evidence files (all of them when it names none)."""
     files = list(dict.fromkeys(list(evidence_files) + [f for _, own in claims.values() for f in (own or [])]))
     parts: List[str] = []
@@ -1208,35 +1390,18 @@ def done(ep: Endpoint, claims: Dict[str, Claim], evidence_files: Sequence[str]) 
         withheld += count
         questions[qid] = {"type": "choice", "criteria": CLAIM_CRITERIA,
                           "instructions": "Does this evidence support the claim from a report of finished work?\n\nClaim: " + text}
-    usage: Dict[str, int] = {}
-    model = ep.model
-    requests = 0
-    per_part: List[Dict[str, object]] = []
-    for state, path in zip(parts, part_file):
-        asked = {qid: q for qid, q in questions.items() if path in (claims[qid][1] or evidence_files)}
-        answers: Dict[str, object] = {}
-        for batch in batches(state, asked) if asked else []:
-            got, used, model = ask(ep, state, batch)
-            answers.update(got)
-            add_usage(usage, used)
-            requests += 1
-        per_part.append(answers)
+    questions_of = [{qid: q for qid, q in questions.items() if path in (claims[qid][1] or evidence_files)}
+                    for path in part_file]
+    asked = ask_parts(ep, meter, parts, questions_of)
     out = []
     for qid, (text, own) in claims.items():
-        mine = [a for a, path in zip(per_part, part_file) if path in (own or evidence_files)]
-        against, doubt = worst_and_doubt(mine, qid, "contradicted")
-        support, _ = worst_and_doubt(mine, qid, "supported")
-        if against is not None and against >= YES:
-            outcome = "contradicted"
-        elif doubt or against is None or against > NO:
-            outcome = "uncertain"
-        elif support is not None and support >= YES:
-            outcome = "supported"
-        else:
-            outcome = "not_shown"
-        out.append({"id": qid, "claim": text, "verdict": outcome, "p_supported": support, "p_contradicted": against})
-    return {"kind": "done", "model": model, "parts": len(parts), "requests": requests, "withheld": withheld,
-            "claims": out, "yes_at": YES, "no_at": NO, "usage": usage}
+        mine = [i for i, path in enumerate(part_file) if path in (own or evidence_files)]
+        seen = asked.over(qid, mine)
+        outcome, against, support = outcome_of(seen, len(mine), qid, "contradicted", "supported")
+        out.append({"id": qid, "claim": text, "verdict": outcome, "p_supported": support, "p_contradicted": against,
+                    "parts_asked": len(seen)})
+    return {"kind": "done", "model": asked.model, "parts": len(parts), **sending(meter, asked), "withheld": withheld,
+            "claims": out, "yes_at": YES, "no_at": NO, "usage": asked.usage}
 
 
 # -- the command --------------------------------------------------------------------------------------
@@ -1266,12 +1431,13 @@ def run(argv: Sequence[str], env: Dict[str, str]) -> Tuple[int, dict]:
     ep = endpoint(kind, env)
     if args.command == "status":
         return 0, {"on": True, "endpoint": ep.url, "model": ep.model, "kinds": list(ep.kinds),
-                   "key": ep.key_note, "key_file": str(ep.key_file)}
+                   "key": ep.key_note, "key_file": str(ep.key_file), "limits": ep.limits.as_json()}
+    meter = Meter(ep.limits)
     if args.command == "size":
-        return 0, size(ep, read_text(args.state))
+        return 0, size(ep, meter, read_text(args.state))
     if args.command == "rules":
-        return 0, rules(ep, read_text(args.diff), args.rules)
-    return 0, done(ep, read_claims(args.claims), args.evidence)
+        return 0, rules(ep, meter, read_text(args.diff), args.rules)
+    return 0, done(ep, meter, read_claims(args.claims), args.evidence)
 
 
 def main(argv: Sequence[str]) -> int:
@@ -1286,6 +1452,10 @@ def main(argv: Sequence[str]) -> int:
         print("pipeline-decide: %s" % error, file=sys.stderr)
         return 4
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    stopped = result.get("stopped")
+    if isinstance(stopped, dict):
+        print("pipeline-decide: stopped sending: %s (%s); what it did not ask is not_asked"
+              % (stopped["why"], stopped["setting"]), file=sys.stderr)
     return status
 
 

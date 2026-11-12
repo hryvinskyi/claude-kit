@@ -8,7 +8,8 @@ the output, the size of a change follows from its yes answers with L winning, an
 named rather than guessed, the rules check reads only the review file's "Always check" items, keeps
 credential-shaped files out of what it sends, includes only a Markdown file beside the review file and
 names every include it refuses, splits a large diff and counts a violation in any part, the done check
-reports a contradicted claim, a refusal from the endpoint exits with its status, every common form of a
+reports a contradicted claim, a refusal from the endpoint exits with its status, a run stops sending at its
+bound on requests, bytes, time or one request's wait and names what it left unasked, every common form of a
 secret is withheld to its end while text about secrets that holds none is sent as it is, and a long
 line costs time in proportion to its length.
 
@@ -293,7 +294,11 @@ Answer = Callable[[str, dict, str], Optional[dict]]
 
 
 class FakeEndpoint(http.server.ThreadingHTTPServer):
-    """A systemone endpoint that records every request and answers each question through `answer`."""
+    """A systemone endpoint that records every request and answers each question through `answer`; while
+    `hang` is set it reads a request and never answers it, and while `trickle` is set it sends its answer one
+    byte per `trickle` seconds, each until `release` is set."""
+
+    daemon_threads = True
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), Handler)
@@ -303,6 +308,12 @@ class FakeEndpoint(http.server.ThreadingHTTPServer):
         self.model = "jev-1.14.0"
         self.truncate = False
         self.reason: Optional[str] = None
+        self.hang = False
+        self.trickle: Optional[float] = None
+        self.release = threading.Event()
+
+    def bytes_received(self) -> int:
+        return sum(int(r["headers"]["Content-Length"]) for r in self.requests)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -311,6 +322,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - the stdlib's name
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode("utf-8"))
         self.server.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
+        if self.server.hang:
+            self.server.release.wait(30)
+            return
         if self.server.status != 200:
             self.send_error(self.server.status, self.server.reason)
             return
@@ -322,7 +336,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(reply) + (500 if self.server.truncate else 0)))
         self.end_headers()
-        self.wfile.write(reply)
+        if self.server.trickle is None:
+            self.wfile.write(reply)
+            return
+        self.wfile.flush()
+        try:
+            for byte in reply:
+                if self.server.release.wait(self.server.trickle):
+                    return
+                self.wfile.write(bytes((byte,)))
+                self.wfile.flush()
+        except OSError:
+            return
 
     def log_message(self, *args: object) -> None:
         pass
@@ -843,9 +868,172 @@ class DecideTests(unittest.TestCase):
         self.assertGreater(len(parts), 1)
         self.assertTrue(all(part.startswith("=== ") and "gate.log ===" in part.splitlines()[0] for part in parts))
 
+    # -- bounds -----------------------------------------------------------------------------------------
+
+    MANY_RULES = "## Always check\n\n" + "".join("%d. **Rule %d.** Text of rule %d.\n" % (n, n, n) for n in range(1, 71))
+
+    def two_part_diff(self) -> str:
+        filler = "".join("+line %d of a long generated file\n" % n for n in range(2500))
+        return self.file("d.diff", "diff --git a/big.py b/big.py\n+++ b/big.py\n" + filler)
+
+    def hang_up(self) -> None:
+        self.endpoint.hang = True
+        self.addCleanup(self.endpoint.release.set)
+
+    def test_a_run_stops_at_the_request_bound_having_asked_each_batch_over_every_part_first(self) -> None:
+        done = self.run_decide("rules", "--diff", self.two_part_diff(), "--rules", self.file("REVIEW.md", self.MANY_RULES),
+                               CLAUDE_KIT_DECISION_MAX_REQUESTS="2")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["parts"], 2)
+        self.assertEqual(len(self.endpoint.requests), 2)
+        self.assertEqual(out["requests"], 2)
+        self.assertEqual(out["planned"]["requests"], 4)
+        self.assertEqual(out["bytes"], self.endpoint.bytes_received())
+        self.assertEqual(out["stopped"]["bound"], "requests")
+        self.assertEqual(out["stopped"]["limit"], 2)
+        first = sorted(self.endpoint.requests[0]["body"]["questions"])
+        self.assertEqual(sorted(self.endpoint.requests[1]["body"]["questions"]), first)
+        verdicts = {i["id"]: i["verdict"] for i in out["items"]}
+        self.assertEqual(sorted(qid for qid, v in verdicts.items() if v == "not_asked"),
+                         sorted("item-%d" % n for n in range(65, 71)))
+        self.assertTrue(all(verdicts[qid] == "not_shown" for qid in first))
+        self.assertEqual({i["parts_asked"] for i in out["items"] if i["verdict"] == "not_asked"}, {0})
+
+    def test_a_run_stops_before_the_request_that_would_pass_the_byte_bound(self) -> None:
+        diff = self.file("d.diff", "diff --git a/a b/a\n+++ b/a\n+x\n")
+        review = self.file("REVIEW.md", self.MANY_RULES)
+        whole = self.run_decide("rules", "--diff", diff, "--rules", review)
+        sizes = [int(r["headers"]["Content-Length"]) for r in self.endpoint.requests]
+        self.endpoint.requests.clear()
+
+        done = self.run_decide("rules", "--diff", diff, "--rules", review,
+                               CLAUDE_KIT_DECISION_MAX_BYTES=str(sum(sizes) - 1))
+
+        self.assertEqual(whole.returncode, 0, whole.stdout + whole.stderr)
+        self.assertEqual(json.loads(whole.stdout)["stopped"], None)
+        self.assertEqual(len(sizes), 2)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(len(self.endpoint.requests), 1)
+        self.assertEqual(out["bytes"], sizes[0])
+        self.assertEqual(out["bytes"], self.endpoint.bytes_received())
+        self.assertEqual(out["stopped"]["bound"], "bytes")
+        self.assertEqual(sum(1 for i in out["items"] if i["verdict"] == "not_asked"), 70 - len(
+            self.endpoint.requests[0]["body"]["questions"]))
+
+    def test_an_endpoint_that_never_answers_is_given_up_at_the_time_budget(self) -> None:
+        self.hang_up()
+        started = time.monotonic()
+
+        done = self.run_decide("rules", "--diff", self.two_part_diff(), "--rules", self.file("REVIEW.md", self.REVIEW),
+                               CLAUDE_KIT_DECISION_BUDGET="2")
+
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["stopped"]["bound"], "time")
+        self.assertEqual(len(self.endpoint.requests), 1)
+        self.assertEqual({i["verdict"] for i in out["items"]}, {"not_asked"})
+
+    def test_a_request_past_its_timeout_stops_the_run(self) -> None:
+        self.hang_up()
+
+        done = self.run_decide("rules", "--diff", self.two_part_diff(), "--rules", self.file("REVIEW.md", self.REVIEW),
+                               CLAUDE_KIT_DECISION_TIMEOUT="1")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["stopped"]["bound"], "timeout")
+        self.assertEqual(len(self.endpoint.requests), 1)
+        self.assertEqual(out["requests"], 1)
+        self.assertEqual({i["verdict"] for i in out["items"]}, {"not_asked"})
+
+    def test_an_answer_that_trickles_in_is_given_up_at_the_request_timeout(self) -> None:
+        self.endpoint.trickle = 1.0
+        self.addCleanup(self.endpoint.release.set)
+        started = time.monotonic()
+
+        done = self.run_decide("rules", "--diff", self.two_part_diff(), "--rules", self.file("REVIEW.md", self.REVIEW),
+                               CLAUDE_KIT_DECISION_TIMEOUT="3")
+
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["stopped"]["bound"], "timeout")
+        self.assertEqual(len(self.endpoint.requests), 1)
+        self.assertEqual({i["verdict"] for i in out["items"]}, {"not_asked"})
+
+    def test_a_size_the_budget_stops_names_its_questions_not_asked(self) -> None:
+        self.hang_up()
+
+        done = self.run_decide("size", "--state", self.file("state.md", "x"), CLAUDE_KIT_DECISION_BUDGET="1")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["stopped"]["bound"], "time")
+        self.assertEqual(sorted(out["not_asked"]), sorted(q[0] for q in decide.SIZE_QUESTIONS))
+        self.assertEqual({a["answer"] for a in out["answers"].values()}, {"not_asked"})
+        self.assertEqual(out["could_be"], "L")
+
+    def test_a_claim_whose_evidence_the_bound_left_unsent_is_not_asked(self) -> None:
+        first = self.file("first.log", "Ran 3 tests\nOK\n")
+        second = self.file("second.log", "Ran 5 tests\nOK\n")
+        claims = self.file("claims.json", json.dumps({
+            "one": {"claim": "The first suite passes.", "evidence": [first]},
+            "two": {"claim": "The second suite passes.", "evidence": [second]}}))
+        self.endpoint.answer = lambda qid, question, state: choice(
+            "supported", {"supported": 0.95, "contradicted": 0.03, "not_shown": 0.02})
+
+        done = self.run_decide("done", "--claims", claims, "--evidence", first, CLAUDE_KIT_DECISION_MAX_REQUESTS="1")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = json.loads(done.stdout)
+        verdicts = {c["id"]: c["verdict"] for c in out["claims"]}
+        self.assertEqual(verdicts, {"one": "supported", "two": "not_asked"})
+        self.assertEqual(out["stopped"]["bound"], "requests")
+        self.assertEqual(len(self.endpoint.requests), 1)
+
+    def test_the_bounds_have_defaults_and_refuse_what_is_not_a_positive_number(self) -> None:
+        status = self.run_decide("status")
+        refused = [self.run_decide("size", "--state", self.file("state.md", "x"), **{name: value})
+                   for name, value in (("CLAUDE_KIT_DECISION_MAX_REQUESTS", "0"),
+                                       ("CLAUDE_KIT_DECISION_MAX_BYTES", "many"),
+                                       ("CLAUDE_KIT_DECISION_TIMEOUT", "-1"),
+                                       ("CLAUDE_KIT_DECISION_BUDGET", "nan"))]
+
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertEqual(json.loads(status.stdout)["limits"],
+                         {"timeout": decide.TIMEOUT, "budget": decide.BUDGET,
+                          "max_requests": decide.MAX_REQUESTS, "max_bytes": decide.MAX_BYTES})
+        for done in refused:
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertEqual(self.endpoint.requests, [])
+
+
+def cpu_cost(work: Callable[[], object], repeat: int = 1) -> float:
+    """The least CPU time, of three tries, that `repeat` runs of `work` take: CPU time rather than wall time,
+    so the other processes of a busy machine do not count."""
+    best = float("inf")
+    for _ in range(3):
+        began = time.process_time()
+        for _ in range(repeat):
+            work()
+        best = min(best, time.process_time() - began)
+    return best
+
 
 class SecretFilterTests(unittest.TestCase):
     """The filter every sent text goes through, form by form."""
+
+    def assert_linear(self, build: Callable[[int], str], n: int, repeat: int = 1) -> None:
+        """The filter costs at most eight times as much on `build(4 * n)` as on `build(n)`: a scan in proportion
+        to the length costs four times as much, a quadratic one sixteen, one that backtracks far more. A few
+        milliseconds of slack keep the clock's grain out of a baseline that short."""
+        small = cpu_cost(lambda: decide.withhold(build(n) + "\n"), repeat)
+        large = cpu_cost(lambda: decide.withhold(build(4 * n) + "\n"), repeat)
+        self.assertLess(large, 8 * small + 0.002, "%.4fs at %d against %.4fs at %d" % (large, 4 * n, small, n))
 
     def test_every_common_form_of_a_secret_is_withheld_to_its_end(self) -> None:
         for text, fragments in LEAKS:
@@ -896,29 +1084,26 @@ class SecretFilterTests(unittest.TestCase):
         self.assertNotIn("step(63);\n", sent)
 
     def test_nested_calls_and_chains_cost_time_in_proportion_to_their_length(self) -> None:
-        shapes = ("token: make()" + ".a()" * 26 + " + x", "token = make(cfg)" + ".with(o)" * 26 + " ?? y",
-                  "password: f(" + ").a(" * 28 + "!", "token = a(" * 200 + ")" * 200 + "x",
-                  "token = new A(" + "b.c(" * 100 + "!", "token = A\\B" + "\\C" * 300 + "(")
-        for text in shapes:
-            with self.subTest(text=text[:32]):
-                began = time.monotonic()
-
-                decide.withhold(text + "\n")
-
-                self.assertLess(time.monotonic() - began, 0.5)
+        shapes: Tuple[Tuple[Callable[[int], str], int], ...] = (
+            (lambda k: "token: make()" + ".a()" * k + " + x", 26),
+            (lambda k: "token = make(cfg)" + ".with(o)" * k + " ?? y", 26),
+            (lambda k: "password: f(" + ").a(" * k + "!", 28),
+            (lambda k: "token = a(" * k + ")" * k + "x", 200),
+            (lambda k: "token = new A(" + "b.c(" * k + "!", 100),
+            (lambda k: "token = A\\B" + "\\C" * k + "(", 300))
+        for build, depth in shapes:
+            with self.subTest(text=build(1)[:32]):
+                self.assert_linear(build, depth // 4, repeat=100)
 
     def test_every_pattern_is_linear_on_lines_built_to_make_it_backtrack(self) -> None:
         units = ("token: make()", ".a()", "(", ")", "a(", ").a(", "token=", "token: ", "password=\"", "'''", '"""',
                  "[", "{", "\\", "->", "::", "a.", "$a", "${", "@", "a://", "a:", "-u a:", "mysql ", " -p",
                  "<token>", "</token>", 'key="token" value="', "Bearer ", "eyJaaaaaaaa.", "pass", "*", "x" * 7,
                  "1.0-", "|", " # ", "AKIA", "ghp_", "Authorization: ", "-----BEGIN ")
-        began = time.monotonic()
-
         for unit in units:
-            decide.withhold(unit * (40000 // len(unit)) + "\n")
-            decide.withhold("token: " + unit * (40000 // len(unit)) + "\n")
-
-        self.assertLess(time.monotonic() - began, 6.0)
+            for head in ("", "token: "):
+                with self.subTest(unit=unit, head=head):
+                    self.assert_linear(lambda k: head + unit * k, 10000 // len(unit))
 
     def test_a_long_line_of_names_that_only_look_like_secrets_is_sent_as_it_is(self) -> None:
         for line in ("passed=1 " * 3000 + "\n", "token=token," * 3000 + "\n"):
@@ -926,14 +1111,13 @@ class SecretFilterTests(unittest.TestCase):
                 self.assertEqual(decide.withhold(line), (line, 0))
 
     def test_a_long_line_costs_time_in_proportion_to_its_length(self) -> None:
-        lines = ("token=token," * 10000, "api_key: str " * 10000, "token: (" * 15000, "password=*** " * 10000,
-                 'password="' * 15000, "token=" + "x" * 120000, "x" * 3000 + " password=" + "y" * 120000)
-        began = time.monotonic()
-
-        for line in lines:
-            decide.withhold(line + "\n")
-
-        self.assertLess(time.monotonic() - began, 3.0)
+        lines: Tuple[Tuple[Callable[[int], str], int], ...] = (
+            (lambda k: "token=token," * k, 10000), (lambda k: "api_key: str " * k, 10000),
+            (lambda k: "token: (" * k, 15000), (lambda k: "password=*** " * k, 10000), (lambda k: 'password="' * k, 15000),
+            (lambda k: "token=" + "x" * k, 120000), (lambda k: "x" * (k // 40) + " password=" + "y" * k, 120000))
+        for build, length in lines:
+            with self.subTest(line=build(2)[:32]):
+                self.assert_linear(build, length // 4)
 
     def test_a_value_longer_than_the_window_is_withheld_to_its_end(self) -> None:
         sent, count = decide.withhold("password=" + "y" * 5000 + "tail # note\n")

@@ -141,6 +141,14 @@ content looks like a credential, and every other text but the review files' own 
 of secret-looking lines withheld — a net, not a guarantee. A review file includes only a Markdown file
 beside it (`@name`), and what it includes is filtered like the diff; a refused include is named, never sent. `pipeline-decide status` says what is set and whether the key would be sent.
 
+One run is bounded: a request waits at most `CLAUDE_KIT_DECISION_TIMEOUT` seconds for its answer (60),
+the run takes at most `CLAUDE_KIT_DECISION_BUDGET` seconds (300), and it makes at most
+`CLAUDE_KIT_DECISION_MAX_REQUESTS` requests (40) carrying at most `CLAUDE_KIT_DECISION_MAX_BYTES` bytes
+(4000000). A large diff is asked one batch of questions over every part before the next batch, so a
+bound leaves the fewest items half asked. When a bound stops the run, nothing more is sent, the answer
+names the bound under `stopped`, and every question it did not ask over all its parts comes back
+`not_asked`; the run still exits 0.
+
 ## Agent evals
 
 Agent definitions are programs, so they have regression tests: a plugin's `evals/` holds fixtures
