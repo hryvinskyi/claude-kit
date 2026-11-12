@@ -160,14 +160,21 @@ Rules (each has cases in tests.sh):
            - debt_guard.py: the written text (here-document body or
              here-string, echo/printf arguments, a sed `s///` replacement, the
              lines a patch adds, the content a copy or move brings into a
-             project unless its source is source of the same repository) may
-             not carry a deferral marker or a static-analysis
-             suppression into a source file; and an existing static-analysis
-             baseline (or eslint-suppressions.json) may only shrink: an append,
-             a longer replacement, raised ESLint counts, a patch adding more
-             lines than it removes, and any write whose result cannot be read
+             project unless its source is source of the same repository, the
+             blob `git show <rev>:<path>` prints) may not carry a deferral
+             marker or a static-analysis suppression into a source file of a
+             project tree (a scratch directory outside every project holds
+             none) beyond those the file it replaces holds (a sed command that only deletes lines inserts none); and an
+             existing static-analysis baseline (or eslint-suppressions.json) may
+             only shrink: an append, a replacement that ignores more or cannot be
+             read in its format, raised ESLint counts, a patch whose
+             result (applied in memory) ignores more or that does not
+             apply, and any write whose result cannot be read
              (a download, an unreadable copy, any in-place sed -- deleting one
-             line of an entry widens it -- a restore from git) are refused; and new content that cannot be read (a missing
+             line of an entry widens it -- a restore from git) are refused; a
+             baseline HEAD tracks may not be deleted, moved or emptied (rm,
+             git rm, mv, git mv, truncate, an empty write), and one written
+             where it is gone is measured against HEAD's version; and new content that cannot be read (a missing
              source, a file an earlier command of the line writes, a copied
              tree past 64 files) is refused onto the project's own source (not
              tests, dependencies, build output or served copies) and any other
@@ -189,6 +196,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from typing import NamedTuple
 from urllib.parse import urlparse
 
@@ -764,11 +772,87 @@ def command_words(argv):
     return strip_wrappers(argv[i:])
 
 
-def cd_target(argv, cwd):
-    """The directory a `cd`/`pushd` segment moves to from `cwd`; None when the segment is no such move."""
+# Where a `cd` whose target cannot be read leaves the commands after it. It is no directory on disk:
+# a file they write by a relative path lands somewhere unknown, so a source file, a plan or a
+# baseline written there is refused (write_danger), never judged as a file of another directory
+UNREAD_DIRECTORY = os.path.join(os.sep, "dev", "null", "unread-cd-target")
+CD_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+ROOT_QUERY = re.compile(r"\s*git\s+rev-parse\s+--show-toplevel\s*")
+DIRNAME_QUERY = re.compile(r"\s*dirname\s+(\S+)\s*")
+PWD_REFERENCE = re.compile(r"\$(?:\{PWD\}|PWD(?!\w))")
+# Variables Claude Code sets for its hooks and not for the shell the Bash tool runs: in a cd target the
+# hook would read a directory the shell never moves to
+HOOK_ONLY_VARIABLE = re.compile(r"\$\{?CLAUDE_\w*")
+# Where `cd "$(mktemp -d)"` leads: a fresh directory under the temporary directory, in no project
+SCRATCH_DIRECTORY = os.path.join(os.path.realpath(tempfile.gettempdir()), "mktemp-directory")
+
+
+class Unread(Exception):
+    """A part of a word the guard cannot read."""
+
+
+def work_tree_root(cwd):
+    """The top of the git work tree `cwd` lies in; None when it lies in none or git cannot tell."""
+    try:
+        res = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True,
+                             text=True, timeout=3, stdin=subprocess.DEVNULL)
+    except Exception:
+        return None
+    return res.stdout.strip() or None if res.returncode == 0 else None
+
+
+def cd_word(word, cwd, ctx):
+    """A `cd` target with the parts the guard can tell filled in: `$PWD`, `$(git rev-parse
+    --show-toplevel)` (the work tree of `cwd`), `$(dirname <readable path>)` and `$(mktemp …)` (a
+    directory in no project); the variables are read later by the line's ShellWrites (its own
+    assignments, then the environment). None when another substitution is in it, or a variable only
+    the hook's environment holds (HOOK_ONLY_VARIABLE)."""
+    text = PWD_REFERENCE.sub(lambda _: cwd, str(word))
+    if HOOK_ONLY_VARIABLE.search(text):
+        return None
+
+    def substitute(match):
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+        if MKTEMP.match(inner):
+            found = SCRATCH_DIRECTORY
+        elif ROOT_QUERY.fullmatch(inner):
+            found = work_tree_root(cwd)
+        else:
+            dirname = DIRNAME_QUERY.fullmatch(inner)
+            values = ctx.expand(PWD_REFERENCE.sub(lambda _: cwd, dirname.group(1).strip("\"'"))) if dirname else None
+            found = os.path.dirname(resolve(cwd, values[0])) if isinstance(values, list) and len(values) == 1 else None
+        if found is None:
+            raise Unread(inner)
+        return found
+
+    try:
+        text = CD_SUBSTITUTION.sub(substitute, text)
+    except Unread:
+        return None
+    return Token(text, quoted=getattr(word, "quoted", False))
+
+
+def cd_target(argv, cwd, ctx=None, previous=None):
+    """The directory a `cd`/`pushd` segment moves to from `cwd`; None when the segment is no such move.
+
+    @param ctx      the ShellWrites of the line, whose variables the target is read with; a target
+                    that cannot be read, or that names more than one directory, moves to UNREAD_DIRECTORY
+    @param previous the directory the line was in before its last move, for `cd -`
+    """
     if not argv or os.path.basename(argv[0]) not in ("cd", "pushd"):
         return None
-    return resolve(cwd, argv[1]) if len(argv) > 1 else HOME
+    operands = [a for a in argv[1:] if a == "-" or not a.startswith("-")]
+    if not operands:
+        return HOME
+    if ctx is None:
+        return resolve(cwd, operands[0])
+    if operands[0] == "-":
+        return previous or UNREAD_DIRECTORY
+    word = cd_word(operands[0], cwd, ctx)
+    if word is not None and ctx.expand(str(word)) is TEMPORARY:
+        return SCRATCH_DIRECTORY
+    paths = ctx.paths(word, cwd) if word is not None else None
+    return paths[0] if paths is not None and len(paths) == 1 else UNREAD_DIRECTORY
 
 
 def resolve(cwd, path):
@@ -1706,6 +1790,7 @@ class ShellWrite(NamedTuple):
     mode: str = "replace"
     removed: int = 0
     unreadable: bool = False
+    hunks: object = None  # a patch's hunks for this file (patch_hunks), to apply it in memory
 
 
 # The value of a variable that names a fresh temporary file (`tmp=$(mktemp)`)
@@ -1781,6 +1866,7 @@ class ShellWrites(list):
     def __init__(self):
         super().__init__()
         self.words, self.variables, self.changed = [], {}, set()
+        self.links = False  # the line makes a symbolic link: a path outside every project may lead into one
 
     def extend(self, writes):
         """Add writes, and remember the files they change for the commands after them."""
@@ -1814,6 +1900,8 @@ class ShellWrites(list):
                 self.variables[str(argv[i + 1])] = None if listed is None else self.loop_values(listed, cwd)
             return
         words = command_words(argv)
+        if words and makes_link(words):
+            self.links = True
         if not words:
             for word in argv[i:]:
                 self.assign(word)
@@ -2224,18 +2312,143 @@ def unnamed_targets(words):
     return out[:CANDIDATE_LIMIT], bool(directories) and budget[0] > 0
 
 
+# One sed address: a line number or `first~step`, `$`, `/regex/` or `\cregexc` with its flags
+SED_ADDRESS = re.compile(r"\s*(?:\d+(?:~\d+)?|\$|/(?:\\.|[^/\\])*/[IM]*|\\(\S)(?:\\.|(?!\1)[^\\])*\1[IM]*)")
+# A sed command that deletes lines or ends the script, and puts no text into the file
+SED_NO_TEXT = re.compile(r"[dDnNlz=]\s*|[qQ]\s*\d*\s*")
+# The sed commands that copy lines of the file elsewhere in it (hold and get, exchange; print when sed
+# also prints every line): what they write is text the guard cannot read, a suppression on a copied
+# line included
+SED_HOLD_COMMANDS = set("hHgGx")
+SED_STEP = re.compile(r"\s*,\s*(?:[+~]\d+)?")
+
+
+def sed_command(part):
+    """A sed command with its addresses taken off (`/re/d` → `d`, `3,$!p` → `p`); the part as it
+    is when its addresses cannot be read."""
+    at = 0
+    for _ in range(2):
+        m = SED_ADDRESS.match(part, at)
+        if not m:
+            break
+        at = m.end()
+        step = re.compile(r"\s*,\s*(?:[+~]\d+)?").match(part, at)
+        if not step or step.end() == at:
+            break
+        at = step.end()
+    command = part[at:].lstrip()
+    return command[1:].lstrip() if command.startswith("!") else command
+
+
+def sed_letters(script):
+    """The command letters of a sed script, read command by command: addresses taken off, and the
+    bodies of `s` and `y`, labels, file names and the text of `a`/`i`/`c` skipped. An `s` command's
+    `e` flag counts as the `e` command and its `w` flag as the `w` command, which do the same."""
+    out, i, n = [], 0, len(script)
+    while i < n:
+        if script[i] in " \t\n;{}!":
+            i += 1
+            continue
+        address = SED_ADDRESS.match(script, i)
+        if address and address.end() > i and not script[i].isalpha():
+            i = address.end()
+            step = SED_STEP.match(script, i)
+            if step and step.end() > i:
+                i = step.end()
+                second = SED_ADDRESS.match(script, i)
+                i = second.end() if second else i
+            continue
+        letter = script[i]
+        out.append(letter)
+        i += 1
+        if letter in "sy" and i < n:
+            delimiter = script[i]
+            i += 1
+            for _ in range(2):
+                while i < n and script[i] != delimiter:
+                    i += 2 if script[i] == "\\" else 1
+                i += 1
+            flags = i
+            while i < n and script[i] not in ";\n}":
+                i += 1
+            if letter == "s":
+                head, written, _ = script[flags:i].partition("w")
+                out += ["e"] * ("e" in head) + ["w"] * bool(written)
+        elif letter in "aic":
+            while i < n and script[i] != "\n":
+                i += 2 if script[i] == "\\" else 1
+        elif letter in "btT:rRwWe":
+            while i < n and script[i] not in ";\n":
+                i += 1
+    return out
+
+
+def sed_copies(expressions, quiet=False):
+    """Report whether a sed script copies lines of the file: a hold-space command, or `p` when sed
+    also prints every line (no -n)."""
+    letters = {letter for expr in expressions for letter in sed_letters(expr)}
+    return bool(letters & SED_HOLD_COMMANDS) or ("p" in letters and not quiet)
+
+
+# The sed commands whose output is the input's lines and the script's own text: substitute,
+# transliterate, delete, print
+SED_PLAIN_COMMANDS = set("sydp")
+
+
+def sed_output(argv, cwd, writes, ctx):
+    """The writes of what a sed command prints, with the text that lands.
+
+    When every input is a file of the written file's repository that is its own source
+    (new_content), and the script only substitutes, transliterates, deletes and prints
+    (SED_PLAIN_COMMANDS, no line copied: sed_copies), what lands is those lines plus the script's
+    replacement text. Any other sed -- stdin, a file from elsewhere, a script file that cannot be
+    read, a command that runs, reads or writes files -- prints what cannot be read.
+    """
+    in_place, exprs, scripts, files, ambiguous = sed_reading(argv)
+    script_texts = [ctx.read(resolve(cwd, f)) for f in scripts]
+    exprs = exprs + [t for t in script_texts if t is not None]
+    sources = [resolve(cwd, f) for f in files]
+    plain = (not in_place and ambiguous is None and files and "-" not in files and exprs
+             and None not in script_texts
+             and all(ctx.read(source) is not None for source in sources)
+             and {letter for expr in exprs for letter in sed_letters(expr)} <= SED_PLAIN_COMMANDS
+             and not sed_copies(exprs, sed_quiet(argv)))
+    out = []
+    for write in writes:
+        if not guarded_content(write):
+            out.append(write)
+        elif plain and not any(new_content(source, write.path, False, write.cwd) for source in sources):
+            out.append(write._replace(text="\n".join(sed_replacements(exprs)) or None, mode="edit"))
+        else:
+            out.append(write._replace(text=None, unreadable=True))
+    return out
+
+
+def sed_quiet(argv):
+    """Report whether a sed command line prints only what its script prints (-n, --quiet, --silent)."""
+    for word in argv[1:]:
+        if word in ("--quiet", "--silent") or (word.startswith("-") and not word.startswith("--")
+                                                and "n" in word[1:].split("i")[0]):
+            return True
+    return False
+
+
 def sed_replacements(expressions):
-    """The text a sed script inserts: the replacement of every `s` command, else the whole expression."""
+    """The text a sed script inserts: the replacement of every `s` command, nothing for a command
+    that only deletes or prints lines (`/re/d`), else the whole expression."""
     out = []
     for expr in expressions:
-        for part in re.split(r";(?=\s*[a-z])", expr):
+        for part in re.split(r";(?=\s*[a-z])|\n", expr):
             part = part.strip()
-            m = re.match(r"^\d*,?\d*\s*s(.)", part)
+            command = sed_command(part)
+            if SED_NO_TEXT.fullmatch(command):
+                continue
+            m = re.match(r"^s(.)", command)
             if not m:
                 out.append(part)
                 continue
             d = re.escape(m.group(1))
-            m2 = re.match(rf"^\d*,?\d*\s*s{d}((?:\\.|[^{d}])*){d}((?:\\.|[^{d}])*){d}", part)
+            m2 = re.match(rf"^s{d}((?:\\.|[^{d}])*){d}((?:\\.|[^{d}])*){d}", command)
             out.append(m2.group(2).replace("\\/", "/") if m2 else part)
     return out
 
@@ -2325,7 +2538,7 @@ def sed_writes(argv, cwd, text, ctx, segment, before):
     out = []
     for in_place, exprs, scripts, files, _ in readings:
         if in_place:
-            out += sed_reading_writes(exprs, scripts, files, cwd, ctx, fed_by_xargs(segment))
+            out += sed_reading_writes(exprs, scripts, files, cwd, ctx, fed_by_xargs(segment), sed_quiet(argv))
     return out
 
 
@@ -2379,13 +2592,14 @@ def sed_reading(argv, suffix_at=None):
     return in_place, exprs, scripts, files, ambiguous
 
 
-def sed_reading_writes(exprs, scripts, files, cwd, ctx, fed):
+def sed_reading_writes(exprs, scripts, files, cwd, ctx, fed, quiet=False):
     """The writes of one reading of an in-place sed: each file, edited with the text its script
     inserts, and the files xargs hands it when it runs under xargs; a reading with neither writes
     nothing (sed refuses to run without a file)."""
     script_texts = [ctx.read(resolve(cwd, f)) for f in scripts]
     unreadable = any(t is None for t in script_texts)
     exprs = exprs + [t for t in script_texts if t is not None]
+    unreadable = unreadable or sed_copies(exprs, quiet)
     sed_text = None if unreadable else ("\n".join(sed_replacements(exprs)) or None)
     out = [ShellWrite(None, sed_text, cwd, "edit", unreadable=unreadable)] if fed else []
     return out + [w._replace(unreadable=unreadable) for f in files for w in targets(ctx, f, cwd, sed_text, "edit")]
@@ -2676,6 +2890,89 @@ def patch_files(text, strip, reverse):
     return {p: (a, r[0]) for p, (a, r) in files.items()} or None
 
 
+HUNK_STARTS = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)", re.ASCII)
+
+
+def patch_hunks(text, strip, reverse):
+    """The hunks a unified diff applies to each file: {path: [(first old line, [(kind, line)])]}.
+
+    `kind` is " " for context, "-" for a line taken out and "+" for a line put in; applied in
+    reverse, the two swap and the first line is the new side's. Hunks are read by their counts,
+    as patch_files reads them.
+    """
+    files, current, old, body, old_left, new_left = {}, None, None, None, 0, 0
+    for line in text.splitlines():
+        if old_left > 0 or new_left > 0:
+            if line.startswith("\\"):
+                continue  # "\ No newline at end of file"
+            kind = line[:1] if line[:1] in ("+", "-") else " "
+            if kind == "+":
+                new_left -= 1
+            elif kind == "-":
+                old_left -= 1
+            else:
+                old_left, new_left = old_left - 1, new_left - 1
+            if reverse and kind != " ":
+                kind = "-" if kind == "+" else "+"
+            body.append((kind, line[1:]))
+        elif line.startswith("--- "):
+            old = header_path(line[4:], strip)
+            current = None
+        elif line.startswith("+++ "):
+            current = header_path(line[4:], strip) or old
+            if current is not None:
+                files.setdefault(current, [])
+        elif current is not None and line.startswith("@@"):
+            counts, starts = HUNK_HEADER.match(line), HUNK_STARTS.match(line)
+            if counts and starts:
+                old_left = int(counts.group(1)) if counts.group(1) is not None else 1
+                new_left = int(counts.group(2)) if counts.group(2) is not None else 1
+                body = []
+                files[current].append((int(starts.group(2 if reverse else 1)), body))
+    return files
+
+
+def nearest_fit(lines, old, at, want):
+    """The place at or after `at` nearest to `want` where `lines` hold `old` in a row, else None.
+
+    The stated place is tried first and the search moves outward from it, so a patch whose hunks
+    land where they say costs one comparison each.
+    """
+    last = len(lines) - len(old)
+    want = min(max(want, at), last) if last >= at else at
+    for distance in range(0, max(want - at, last - want) + 1):
+        for place in (want - distance, want + distance) if distance else (want,):
+            if at <= place <= last and lines[place:place + len(old)] == old:
+                return place
+    return None
+
+
+def apply_hunks(current, hunks):
+    """The text a file holds once hunks are applied to it, else None when one does not apply.
+
+    A hunk lands at its line when its old lines are there, else at the nearest place after the
+    previous hunk that holds them; a hunk whose first line is None (an apply_patch chunk) at the
+    first such place.
+    """
+    lines = current.splitlines()
+    out, at = [], 0
+    for start, body in hunks:
+        old = [text for kind, text in body if kind != "+"]
+        new = [text for kind, text in body if kind != "-"]
+        if not old:
+            place = at if start is None else max(start, at)
+            if place > len(lines):
+                return None
+        else:
+            place = nearest_fit(lines, old, at, at if start is None else max(start - 1, 0))
+            if place is None:
+                return None
+        out += lines[at:place] + new
+        at = place + len(old)
+    out += lines[at:]
+    return "\n".join(out) + ("\n" if out and current.endswith("\n") else "")
+
+
 def patch_input(files, cwd, segment, before, ctx):
     """The text of the patches a command applies: the files it names, else what reaches its stdin.
 
@@ -2710,10 +3007,12 @@ def patched(texts, base, strip, reverse, cwd, only=None):
     files = patch_files("\n".join(texts), strip, reverse)
     if files is None:
         return []  # what it reads holds no diff: it changes nothing
+    hunks = patch_hunks("\n".join(texts), strip, reverse)
     if only is not None:
         added = [line for lines, _ in files.values() for line in lines]
         files = {only: (added, sum(r for _, r in files.values()))}
-    return [ShellWrite(resolve(base, path), "\n".join(added) or None, cwd, "patch", removed)
+        hunks = {only: [hunk for each in hunks.values() for hunk in each]}
+    return [ShellWrite(resolve(base, path), "\n".join(added) or None, cwd, "patch", removed, hunks=hunks.get(path))
             for path, (added, removed) in files.items()]
 
 
@@ -2905,6 +3204,8 @@ def stand_ins(cwd):
     """The source a write of an unnamed file may be, where the command runs: a PHP file in a PHP
     project (composer.json above it), a JavaScript file in a JavaScript project (package.json or
     tsconfig.json above it), nothing elsewhere."""
+    if cwd == UNREAD_DIRECTORY:
+        return [os.path.join(cwd, UNNAMED_FILE + ".php")]  # a directory nobody can tell: refused as such
     out = []
     if rubric is not None and rubric.nearest_root(cwd, os.path.join(cwd, "x"), ("composer.json",)):
         out.append(os.path.join(cwd, UNNAMED_FILE + ".php"))
@@ -2927,37 +3228,370 @@ def named_writes(writes):
     return named
 
 
-def added_text(write):
-    """The lines a write adds to its file: for a replacement, those the file does not already hold."""
-    lines = write.text.splitlines()
+def replaced_text(write):
+    """The text a write's markers and suppressions are counted against: the file it replaces, else
+    nothing (an append, an in-place edit and a patch add their text to what stays)."""
     if write.mode == "replace":
-        current = debt.existing_text(write.path)
-        if current is not None:
-            held = set(current.splitlines())
-            lines = [line for line in lines if line not in held]
-    return lines
+        return debt.existing_text(write.path) or ""
+    return ""
 
 
 def baseline_grows(write):
     """Report whether a shell write leaves an existing static-analysis baseline bigger than it was.
 
-    A write whose result cannot be read counts as growth, an in-place edit included: deleting
-    one line of an entry (its path, its count, an ESLint file key) widens what it ignores, and
-    which lines a sed deletes is not known here. Creating the first baseline is allowed.
+    A patch is applied to the file in memory and the result judged by what it ignores
+    (debt_guard's baseline verdict); a patch that does not apply counts as growth. Any other write
+    whose result cannot be read counts as growth, an in-place edit included: deleting one line of
+    an entry (its path, its count, an ESLint file key) widens what it ignores, and which lines a
+    sed deletes is not known here. Creating the first baseline is allowed.
     """
     current = debt.existing_text(write.path)
+    name = os.path.basename(write.path)
     if current is None:
-        return False
+        # a file that is not there: measured against what HEAD holds there, or beside a tracked one
+        # of its kind (debt_guard's baseline verdict, given the path); else the first baseline
+        if write.mode == "patch":
+            after = apply_hunks("", write.hunks) if write.hunks is not None else None
+        else:
+            after = None if write.mode == "edit" else write.text
+        if after is None:
+            return tracked_baseline(write.path)
+        return debt.baseline_verdict("Write", {"content": after}, None, name, write.path) is not None
+    if write.mode == "patch":
+        after = apply_hunks(current, write.hunks) if write.hunks is not None else None
+        return after is None or debt.baseline_verdict("Write", {"content": after}, current, name, write.path) is not None
     if write.mode == "append":
         return write.text is None or bool(write.text.strip())
     if write.text is None or write.mode == "edit":
         return True
-    name = os.path.basename(write.path)
-    if write.mode == "patch":
-        if name.lower() == debt.ESLINT_SUPPRESSIONS:
-            return bool(write.text.strip())
-        return len(write.text.splitlines()) > write.removed
-    return debt.baseline_growth("Write", {"content": write.text}, current, name)
+    return debt.baseline_verdict("Write", {"content": write.text}, current, name, write.path) is not None
+
+
+BASELINE_REMOVAL = ("{what} the static-analysis baseline {path}, which the repository tracks: once it is gone, "
+                    "it can be written back ignoring more than it does. " + STANDARDS + " §PHP static analysis, "
+                    "§JavaScript and TypeScript static analysis): the baseline only shrinks -- shrink it by removing "
+                    "the entries that are fixed (the Edit tool), never by deleting, moving or emptying the file.")
+
+
+def unplaced_guarded(relative):
+    """Report whether a file written by a relative path from an unknown directory may be one the
+    guards hold: a plan, a baseline, or PHP or JS/TS source as its own path reads (not under a test,
+    dependency, cache or build directory)."""
+    if rubric is None or debt is None:
+        return False
+    parts = relative.split("/")
+    if rubric.is_plan_file(relative) or debt.BASELINE.search(parts[-1]):
+        return True
+    extension = os.path.splitext(parts[-1])[1].lower()
+    if extension == ".php":
+        return not (rubric.PHP_SKIPPED_DIRS & set(parts[:-1]))
+    if extension in rubric.JS_EXTENSIONS:
+        return not (rubric.JS_SKIPPED_DIRS & set(parts[:-1]) or rubric.JS_NON_SOURCE.search(parts[-1]))
+    return False
+
+
+def tracked_baseline(path):
+    """Report whether `path` is a baseline HEAD tracks (debt_guard.baseline_tracked); a git that cannot
+    be asked counts as tracked, so a removal nobody could check is refused."""
+    if debt is None or not debt.BASELINE.search(os.path.basename(path)):
+        return False
+    try:
+        return debt.baseline_tracked(path)
+    except Exception:
+        return True
+
+
+def ignores_nothing(path):
+    """Report whether the baseline at `path` reads, in its format, as ignoring nothing: a paid-off
+    baseline, which may go (debt_guard.baseline_ignores_nothing; anything it cannot read does not)."""
+    try:
+        return debt is not None and debt.baseline_ignores_nothing(path)
+    except Exception:
+        return False
+
+
+def protected_baseline(path):
+    """Report whether removing `path` is refused: a baseline HEAD tracks that still ignores something."""
+    return tracked_baseline(path) and not ignores_nothing(path)
+
+
+GIT_LIST_TIMEOUT = 5  # seconds `git ls-files` may take to list what a directory holds
+DIRECTORY_OPERAND_LIMIT = 16  # directory operands of one command listed for tracked baselines
+
+
+def tracked_files(directory):
+    """The files the git index holds at or below `directory`; [] outside a repository.
+
+    @throws Unread when git cannot be asked in time
+    """
+    try:
+        res = subprocess.run(["git", "-C", directory, "ls-files", "-z", "--", "."], capture_output=True,
+                             timeout=GIT_LIST_TIMEOUT, stdin=subprocess.DEVNULL)
+    except Exception as error:
+        raise Unread(str(error))
+    if res.returncode != 0:
+        return []
+    return [os.path.join(directory, name) for name in res.stdout.decode("utf-8", "replace").split("\0") if name]
+
+
+def protected_under(directory):
+    """The first baseline below `directory` whose removal is refused (protected_baseline), else None."""
+    for path in tracked_files(directory):
+        if debt.BASELINE.search(os.path.basename(path)) and protected_baseline(path):
+            return path
+    return None
+
+
+REMOVAL_WORDS = {"rm": "deletes", "unlink": "deletes", "mv": "moves", "rsync": "moves", "truncate": "truncates"}
+MV_VALUE_OPTIONS = {"-t", "--target-directory", "-S", "--suffix"}
+TRUNCATE_VALUE_OPTIONS = {"-s", "--size", "-r", "--reference"}
+DRY_RUN_OPTIONS = {"-n", "--dry-run"}
+
+
+def removal_operands(name, args):
+    """What a deleting or moving command takes away: (the operands it removes, it recurses into
+    directories, the operand it moves them to or None), or None when it removes nothing (a dry run,
+    an rsync that keeps its sources)."""
+    words, target, recursive, j = [], None, False, 0
+    values = MV_VALUE_OPTIONS if name == "mv" else TRUNCATE_VALUE_OPTIONS if name == "truncate" else set()
+    ended = False
+    while j < len(args):
+        a = str(args[j])
+        j += 1
+        if ended or a == "-" or not a.startswith("-"):
+            words.append(args[j - 1])
+            continue
+        if a == "--":
+            ended = True
+            continue
+        option, eq, value = a.partition("=")
+        if option in values and not eq and option.startswith("--"):
+            value, j = (str(args[j]) if j < len(args) else ""), j + 1
+        elif not option.startswith("--") and len(a) > 2 and a[:2] in values:
+            option, value = a[:2], a[2:]
+        elif a in values:
+            value, j = (str(args[j]) if j < len(args) else ""), j + 1
+        if option in ("-t", "--target-directory"):
+            target = value
+        if name in ("rm", "rsync", "git rm") and (option in ("--recursive", "--archive") or (
+                not option.startswith("--") and set(option[1:]) & set("rRa"))):
+            recursive = True
+        if name in ("rsync", "git rm") and (option in DRY_RUN_OPTIONS or (
+                not option.startswith("--") and "n" in option[1:] and name == "git rm")):
+            return None
+    if name == "rsync":
+        if "--remove-source-files" not in {str(a) for a in args}:
+            return None
+        return words[:-1], recursive, None
+    if name == "mv":
+        return (words, False, target) if target is not None else (words[:-1], False, words[-1] if words else None)
+    return words, recursive, None
+
+
+def baseline_removal_danger(argv, cwd, ctx=None):
+    """Refuse deleting, moving or truncating a baseline the repository tracks while it still ignores
+    something: `rm`/`unlink`/`git rm` of it or of a directory holding it (recursively), `mv`/`git mv`
+    of it to another path (`-t` and `--target-directory` read), `rsync --remove-source-files` of it,
+    `truncate` of it. An operand that cannot be read is refused where the repository tracks such a
+    baseline, since it may be one.
+
+    @param ctx the ShellWrites of the line, whose variables and globs the operands are read with
+    """
+    if debt is None or not argv:
+        return None
+    name, args, run_cwd = os.path.basename(argv[0]), argv[1:], cwd
+    if name == "git":
+        sub, args, run_cwd = git_parts(argv, cwd)
+        name = {"rm": "git rm", "mv": "mv"}.get(sub or "")
+    if name not in REMOVAL_WORDS and name != "git rm":
+        return None
+    found = removal_operands(name, args)
+    if not found:
+        return None
+    removed, recursive, moved_to = found
+    what = "this command " + REMOVAL_WORDS.get(name, "deletes")
+    destination = resolve(run_cwd, str(moved_to)) if moved_to is not None else None
+    directories = 0
+    try:
+        for word in removed:
+            paths = ctx.paths(word, run_cwd) if ctx is not None else [resolve(run_cwd, str(word))]
+            if paths is None:
+                held = protected_under(run_cwd if os.path.isdir(run_cwd) else cwd)
+                if held is not None:
+                    return (f"{what} files it does not spell out ({word}), and the repository tracks the "
+                            f"static-analysis baseline {held}, which may be among them. Name the files.")
+                continue
+            for path in paths:
+                if path == destination:
+                    continue
+                if recursive and os.path.isdir(path) and directories < DIRECTORY_OPERAND_LIMIT:
+                    directories += 1
+                    held = protected_under(path)
+                    if held is not None:
+                        return BASELINE_REMOVAL.format(what=what, path=held)
+                elif protected_baseline(path):
+                    return BASELINE_REMOVAL.format(what=what, path=path)
+    except Unread:
+        return f"{what} files, and git could not be asked in time whether a tracked static-analysis baseline is among them."
+    return None
+
+
+GIT_SHOW_TIMEOUT = 5  # seconds a `git show` of a blob may take to be read
+
+
+def project_file(path):
+    """Report whether the debt guard reads what lands in `path`: a static-analysis baseline wherever
+    it is, a source file inside a project tree. A scratch directory outside every project holds no
+    source of a project, so text copied there carries no debt rule."""
+    name = os.path.basename(path)
+    if debt.BASELINE.search(name):
+        return True
+    return os.path.splitext(name)[1].lower() in debt.SOURCE_EXTENSIONS and tree_of(path) is not None
+
+
+# Commands whose output the guard knows without reading anything: nothing, or the text of echo/printf
+SILENT_PRODUCERS = {":", "true", "false"}
+TEXT_PRODUCERS = {"echo", "printf"}
+# Commands that pass on what reaches their stdin, or the files they name
+FILE_PRODUCERS = {"cat", "tee"}
+LINKERS = {"ln", "gln", "link"}  # every link they make leads where its target is
+COPY_LINK_LETTERS = set("sl")
+COPY_LINK_OPTIONS = {"--symbolic-link", "--link"}
+
+
+def makes_link(words):
+    """Report whether a command makes a link, symbolic or hard (`ln`, `ln -s`, `link`, `cp -s`,
+    `cp -l`, `cp -al`)."""
+    name = os.path.basename(words[0])
+    if name in LINKERS:
+        return True
+    if name not in ("cp", "gcp"):
+        return False
+    return any(w in COPY_LINK_OPTIONS or (w.startswith("-") and not w.startswith("--") and COPY_LINK_LETTERS & set(w[1:]))
+               for w in words[1:])
+
+
+def hard_linked(path):
+    """Report whether an existing file has another name (a hard link), which may lie in a project."""
+    try:
+        return os.stat(path).st_nlink > 1 and os.path.isfile(path)
+    except OSError:
+        return False
+
+
+def guarded_content(write):
+    """Report whether output the guard cannot read is refused in a write's file: a baseline anywhere,
+    a project's own PHP or JS/TS source (code_source). A dump, a report, a config, a log or a fixture
+    is none of them."""
+    if write.path is None or debt is None:
+        return False
+    return bool(debt.BASELINE.search(os.path.basename(write.path))) or code_source(write.path, write.cwd)
+
+
+def code_source(path, cwd):
+    """Report whether `path` is a project's own PHP or JS/TS source, as the rubric gate tells it."""
+    if rubric is None:
+        return False
+    extension = os.path.splitext(path)[1].lower()
+    if extension == ".php":
+        root = rubric.project_root(cwd, path)
+        return root is not None and rubric.is_php_source(root, cwd, path)
+    if extension in rubric.JS_EXTENSIONS:
+        root = rubric.nearest_root(cwd, path, ("package.json", "tsconfig.json", "composer.json"))
+        return root is not None and rubric.is_js_source(root, cwd, path)
+    return False
+
+
+def produced(producer, cwd, writes, ctx, before):
+    """The writes of a command's output (a redirect, or a tee it feeds), with the text that lands.
+
+    echo/printf, here-documents and here-strings give the line's text (as written already); `cat`
+    gives the files it names, or what reaches its stdin; `git show`/`git cat-file -p` of a blob
+    gives the blob; sed gives its input's lines and its script's text (sed_output). A copy of a repository's own source into that repository brings nothing new
+    (new_content), as `cp` does. Any other command's output is content the guard cannot read, and
+    is marked so where the debt guard reads it (guarded_content); elsewhere (scratch, var/, a log)
+    it passes as it was.
+
+    @param producer the program words of the command whose output is written
+    @param before   the (Segment, program words) of the commands before it in its pipeline
+    """
+    if not writes or not producer:
+        return writes
+    name = os.path.basename(producer[0])
+    if name in SILENT_PRODUCERS:
+        return [write._replace(text="") for write in writes]
+    if name in TEXT_PRODUCERS:
+        return writes
+    if name in FILE_PRODUCERS:
+        files = [a for a in producer[1:] if a == "-" or not a.startswith("-")] if name == "cat" else []
+        if not files or files == ["-"]:
+            if before:
+                segment, argv = before[-1]
+                return writes if segment.stdin else produced(argv, cwd, writes, ctx, before[:-1])
+            return writes
+        return [copied_text(write, [resolve(cwd, f) for f in files], ctx) if guarded_content(write) else write
+                for write in writes]
+    if name in ("sed", "gsed"):
+        return sed_output(producer, cwd, writes, ctx)
+    if name == "git":
+        source = blob_source(producer, cwd)
+        if source is not None:
+            spec, git_cwd, origin = source
+            out, blob = [], False
+            for write in writes:
+                if not guarded_content(write):
+                    out.append(write)
+                elif origin is not None and not new_content(origin, write.path, False, write.cwd):
+                    out.append(write._replace(text=None))
+                else:
+                    if blob is False:
+                        blob = git_blob(git_cwd, spec)
+                    out.append(write._replace(text=blob, unreadable=blob is None))
+            return out
+    return [write._replace(text=None, unreadable=True) if guarded_content(write) else write for write in writes]
+
+
+def copied_text(write, sources, ctx):
+    """A write of what `cat` prints of `sources`: their text where it is new to the file, none when
+    every one is a repository's own source already in the file's repository."""
+    if not any(new_content(source, write.path, False, write.cwd) for source in sources):
+        return write._replace(text=None)
+    texts = [ctx.read(source, COPY_FILE_LIMIT) for source in sources]
+    if any(text is None for text in texts):
+        return write._replace(text=None, unreadable=True)
+    return write._replace(text="\n".join(texts))
+
+
+def blob_source(argv, cwd):
+    """What a `git show <rev>:<path>` or `git cat-file -p <rev>:<path>` prints: (the spec, the
+    directory git runs in, the blob's file in the work tree or None); None for any other git command."""
+    sub, args, git_cwd = git_parts(argv, cwd)
+    specs = [a for a in args if not a.startswith("-")]
+    if sub == "cat-file" and "-p" in args:
+        pass
+    elif sub != "show":
+        return None
+    if len(specs) != 1 or ":" not in specs[0]:
+        return None
+    path = specs[0].split(":", 1)[1]
+    if path.startswith(("./", "../")):
+        origin = resolve(git_cwd, path)
+    else:
+        root = work_tree_root(git_cwd)
+        origin = resolve(root, path) if root and path else None
+    return specs[0], git_cwd, origin
+
+
+def git_blob(cwd, spec):
+    """The text `git show <spec>` prints from `cwd`, at most CONTENT_LIMIT of it; None when it fails."""
+    try:
+        res = subprocess.run(["git", "-C", cwd, "--no-pager", "show", spec], capture_output=True,
+                             timeout=GIT_SHOW_TIMEOUT, stdin=subprocess.DEVNULL)
+    except Exception:
+        return None
+    if res.returncode != 0:
+        return None
+    return res.stdout[:CONTENT_LIMIT].decode("utf-8", errors="replace")
 
 
 def own_source(path, cwd):
@@ -3005,6 +3639,14 @@ def write_danger(writes, transcript_path):
         return why
     for write in named_writes(writes):
         path, text = write.path, write.text
+        if path.startswith(UNREAD_DIRECTORY + os.sep):
+            relative = path[len(UNREAD_DIRECTORY) + 1:]
+            if unplaced_guarded(relative):
+                return (f"this command writes {relative} after a `cd` whose target cannot be read here, so "
+                        "which project the file lands in -- and whether the rubric and the debt rules apply "
+                        f"to it -- cannot be checked. {STANDARDS} §Architecture and tech debt). Write the "
+                        "file by its absolute path, or give the cd a literal one.")
+            continue
         if not os.environ.get("CLAUDE_NO_PLAN_SKILL_GATE"):
             verdict = rubric.missing_for(write.cwd, path, transcript_path, text)
             if verdict is not None:
@@ -3013,6 +3655,8 @@ def write_danger(writes, transcript_path):
         if os.environ.get("CLAUDE_NO_DEBT_GUARD") or debt.exempt(path):
             continue
         if debt.BASELINE.search(os.path.basename(path)):
+            if write.mode == "replace" and write.text is not None and not write.text.strip() and protected_baseline(path):
+                return BASELINE_REMOVAL.format(what="this command empties", path=path)
             if baseline_grows(write):
                 return (f"this command grows the static-analysis baseline {path}, or writes it with content "
                         f"that cannot be read. {STANDARDS} §PHP static analysis, §JavaScript and TypeScript "
@@ -3025,8 +3669,11 @@ def write_danger(writes, transcript_path):
                     f"of that kind, or a copied tree of more than {CANDIDATE_LIMIT} source files. {STANDARDS} "
                     "§Architecture and tech debt): what lands in source is checked for deferral markers and "
                     "suppressions. Make the content first in a command of its own, or copy fewer files at a time.")
-        if text and os.path.splitext(path)[1].lower() in debt.SOURCE_EXTENSIONS:
-            hit = debt.debt_in(added_text(write), path)
+        # a scratch directory outside every project holds no source, unless the line links it into one
+        linked = os.path.splitext(path)[1].lower() in debt.SOURCE_EXTENSIONS and (
+            getattr(writes, "links", False) or hard_linked(path))
+        if text and (project_file(path) or linked):
+            hit = debt.debt_added(replaced_text(write), text, path, fragment=write.mode != "replace")
             if hit:
                 kind, line = hit
                 return (f"this command writes a {kind} into the source file {path}:\n    {line}\n"
@@ -3056,7 +3703,7 @@ def command_danger(argv, cwd, cmd, stdin, ctx=None):
     """
     rule = SEGMENT_RULES.get(os.path.basename(argv[0]))
     return ((rule(argv, cwd, cmd) if rule else None) or baseline_danger(argv, cwd) or sql_danger(argv, stdin)
-            or board_queue_danger(argv, cwd, stdin, ctx))
+            or baseline_removal_danger(argv, cwd, ctx) or board_queue_danger(argv, cwd, stdin, ctx))
 
 
 def judge(text, cwd, cmd, writes, depth=0, fed=()):
@@ -3081,6 +3728,7 @@ def judge(text, cwd, cmd, writes, depth=0, fed=()):
     @param fed    what an enclosing pipeline feeds to this line's stdin
     """
     deeper = depth < SHELL_NESTING_LIMIT
+    previous = None
     for line in parse(text):
         commands = [[command_words(segment.argv) for segment in pipeline] for pipeline in line]
         written = line_text(line, commands)
@@ -3093,17 +3741,21 @@ def judge(text, cwd, cmd, writes, depth=0, fed=()):
                     if why:
                         return why
                 for target, operator in segment.written:
-                    writes.extend(redirect_writes(target, operator, cwd, written, writes))
+                    found = redirect_writes(target, operator, cwd, written, writes)
+                    writes.extend(produced(argv, cwd, found, writes, list(zip(pipeline[:k], argvs[:k]))))
                 writes.record(segment, cwd)
                 if not argv:
                     continue
-                moved = cd_target(argv, cwd)
+                moved = cd_target(argv, cwd, writes, previous)
                 if moved is not None:
-                    cwd = moved
+                    previous, cwd = cwd, moved
                     continue
                 stdin = [*fed, *(word for prev, prev_argv in zip(pipeline[:k], argvs[:k])
                                  for word in [*piped_words(prev_argv), *prev.stdin]), *segment.stdin]
-                writes.extend(command_writes(argv, cwd, written, writes, segment, argvs[:k]))
+                found = command_writes(argv, cwd, written, writes, segment, argvs[:k])
+                if argv and os.path.basename(argv[0]) == "tee" and k > 0 and not segment.stdin:
+                    found = produced(argvs[k - 1], cwd, found, writes, list(zip(pipeline[:k - 1], argvs[:k - 1])))
+                writes.extend(found)
                 why = command_danger(argv, cwd, cmd, stdin, writes)
                 if why:
                     return why
@@ -3142,7 +3794,7 @@ def main() -> int:
         return 0
     cwd = data.get("cwd") or os.getcwd()
     try:
-        why = check(cmd, cwd, data.get("transcript_path") or "")
+        why = check(cmd, cwd, rubric.evidence_transcript(data) if rubric is not None else "")
     except Exception:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",

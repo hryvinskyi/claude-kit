@@ -48,9 +48,20 @@ register() {
   printf '{"hook_event_name":"SessionStart","source":"startup","session_id":"%s","transcript_path":"%s"}' "$stem" "$1" \
     | python3 "$REG" >/dev/null 2>&1
 }
-CORE_PHP="/root/.claude/skills/clean-architecture-php"
-CORE_JS="/root/.claude/skills/clean-architecture-js"
-STACK_CACHE="/home/dev/.claude/plugins/cache/claude-kit/magento2/0.1.0/skills"
+# The rubric gate counts a rubric file only where skills are installed and only by its own text:
+# a config directory of these tests' own, holding the core skills and a plugin cache of this stack
+export CLAUDE_CONFIG_DIR="$TMP/claude"
+CORE_PHP="$CLAUDE_CONFIG_DIR/skills/clean-architecture-php"
+CORE_JS="$CLAUDE_CONFIG_DIR/skills/clean-architecture-js"
+STACK_CACHE="$CLAUDE_CONFIG_DIR/plugins/cache/claude-kit/magento2/0.1.0/skills"
+for d in "$CORE_PHP" "$CORE_JS" "$STACK_CACHE/magento2-architecture-php" "$STACK_CACHE/magento2-architecture-frontend"; do
+  for f in SKILL.md references/solid.md references/ddd.md references/clean-architecture.md references/javascript.md \
+    references/typescript.md references/react.md; do
+    mkdir -p "$(dirname "$d/$f")"
+    printf '# %s %s\n\nThe first lens of %s %s.\nThe second lens.\nThe third lens.\nThe fourth lens.\nThe fifth lens of %s %s.\n' \
+      "$(basename "$d")" "$f" "$(basename "$d")" "$f" "$(basename "$d")" "$f" > "$d/$f"
+  done
+done
 # t <transcript> <entry>... ; registered for its session. Entries: php, js (Skill calls of the core skills),
 # p:<ref> / j:<ref> (a core reference), mp / mf (the stack skills), anything else is a Read path.
 t() {
@@ -66,6 +77,7 @@ t() {
       *) printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s"}}]}}\n' "$e" >> "$out" ;;
     esac
   done
+  python3 "$ENGINE/transcript_fixture.py" "$out"  # the gate counts a call by the result logged for it
   register "$out"
 }
 

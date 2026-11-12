@@ -1,5 +1,5 @@
 {
-  "description": "Guard hooks: generated regions, the architecture-rubric gate and the debt guard before Edit/Write; the shell guard before Bash; a PHP syntax check after Edit/Write.",
+  "description": "Guard hooks: generated regions, the architecture-rubric gate and the debt guard before Edit/Write; the shell guard before Bash; the same rules before an MCP tool that writes a file, runs a shell command or runs SQL; a PHP syntax check after Edit/Write.",
   "hooks": {
     "PreToolUse": [
       {
@@ -14,6 +14,12 @@
         "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/bash_guard.py\"", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/mcp_guard.py\"", "timeout": 10 }
         ]
       }
     ],

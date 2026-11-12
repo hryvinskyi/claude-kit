@@ -363,28 +363,62 @@ mkdir -p "$TMP/php/.claude/plans/x" "$TMP/node/.claude/plans/x"
 echo '{}' > "$TMP/php/composer.json"
 echo '{}' > "$TMP/node/package.json"
 : > "$TMP/empty.jsonl"
+# the gate counts a call by its result: `logged` completes a fixture with the results a session
+# logs (transcript_fixture.py): a Read shows the file as it is on disk, a shell command what it prints.
+# A rubric file counts only where skills are installed: this config directory's skills/ and plugins/
+# (a plugin cache), and the marketplace clones it knows. Every skill directory below holds all its files.
+export CLAUDE_CONFIG_DIR="$TMP/claude"
+CC="$CLAUDE_CONFIG_DIR"
+mkdir -p "$CC/plugins"
+printf '{"kit":{"installLocation":"%s"},"kit-src":{"installLocation":"%s"}}\n' "$TMP/srv/claude-kit" "$TMP/srv/src/claude-kit" \
+  > "$CC/plugins/known_marketplaces.json"
+logged() { python3 "$H/transcript_fixture.py" --cwd "$TMP" "$@"; }
+mkrubric() { # skill directory, then files below it -> each holding lines of its own
+  local dir="$1" name; shift
+  name="$(basename "$dir")"
+  for f in "$@"; do
+    mkdir -p "$(dirname "$dir/$f")"
+    printf '# %s %s\n\nThe first lens of %s %s.\nThe second lens.\nThe third lens.\nThe fourth lens.\nThe fifth lens of %s %s.\n' \
+      "$name" "$f" "$name" "$f" "$name" "$f" > "$dir/$f"
+  done
+}
+RUBRIC_FILES="SKILL.md references/solid.md references/ddd.md references/clean-architecture.md references/javascript.md
+  references/typescript.md references/react.md references/implementer-checklist.md references/wiring.md"
+for d in "$CC/skills/clean-architecture-php" "$CC/skills/clean-architecture-js" \
+  "$CC/plugins/cache/claude-kit/architecture/0.1.0/skills/clean-architecture-php" \
+  "$CC/plugins/cache/claude-kit/architecture/0.1.0/skills/clean-architecture-js" \
+  "$CC/plugins/cache/claude-kit/alpha/0.3.1/skills/alpha-architecture-php" \
+  "$CC/plugins/cache/claude-kit/alpha/0.3.1/skills/alpha-architecture-frontend" \
+  "$TMP/srv/src/claude-kit/plugins/architecture/skills/clean-architecture-php" \
+  "$TMP/srv/claude-kit/plugins/alpha/skills/alpha-architecture-php" \
+  "$TMP/srv/claude-kit/plugins/beta/skills/beta-architecture-php"; do
+  mkrubric "$d" $RUBRIC_FILES  # unquoted: one argument per file name
+done
+RUB="$CC/skills"
 cat > "$TMP/loaded.jsonl" <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"clean-architecture-php"}}]}}
 EOF
-cat > "$TMP/read.jsonl" <<'EOF'
-{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/root/.claude/skills/clean-architecture-php/SKILL.md"}}]}}
+cat > "$TMP/read.jsonl" <<EOF
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"$RUB/clean-architecture-php/SKILL.md"}}]}}
 EOF
-cat > "$TMP/catfile.jsonl" <<'EOF'
-{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat ~/.claude/skills/clean-architecture-php/SKILL.md"}}]}}
+cat > "$TMP/catfile.jsonl" <<EOF
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat $RUB/clean-architecture-php/SKILL.md"}}]}}
 EOF
-cat > "$TMP/lsdir.jsonl" <<'EOF'
-{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls ~/.claude/skills/clean-architecture-php"}}]}}
+cat > "$TMP/lsdir.jsonl" <<EOF
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls $RUB/clean-architecture-php"}}]}}
 EOF
 cat > "$TMP/other.jsonl" <<'EOF'
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"journal"}}]}}
 EOF
+logged "$TMP/loaded.jsonl" "$TMP/read.jsonl" "$TMP/catfile.jsonl" "$TMP/lsdir.jsonl" "$TMP/other.jsonl"
 gate() { printf '{"tool_name":"%s","cwd":"%s","transcript_path":"%s","tool_input":{"file_path":"%s"}}' "$1" "$2" "$3" "$4"; }
 # a PHP plan is Plan mode, whose blast-radius audit runs against clean-architecture.md, solid.md and ddd.md:
 # every plan transcript below reads them, so each case still tests what it names
 plan_refs() { # transcript -> the same transcript with the PHP plan references read
   for ref in solid.md ddd.md clean-architecture.md; do
-    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/root/.claude/skills/clean-architecture-php/references/%s"}}]}}\n' "$ref" >> "$1"
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s/references/%s"}}]}}\n' "$RUB/clean-architecture-php" "$ref" >> "$1"
   done
+  logged "$1"
 }
 cp "$TMP/loaded.jsonl" "$TMP/loaded-plan.jsonl" && plan_refs "$TMP/loaded-plan.jsonl"
 for f in read catfile lsdir other; do plan_refs "$TMP/$f.jsonl"; done
@@ -434,8 +468,11 @@ OUT=$(gate Write "$TMP/php" "$TMP/loaded.jsonl" "$TMP/php/.claude/plans/x/_plan.
 case "$OUT" in *"a plan file"*"clean-architecture-php/references/clean-architecture.md"*"clean-architecture-php/references/ddd.md"*"clean-architecture-php/references/solid.md"*) ok ;;
   *) ko "plan gate: the denial names every missing plan reference"; echo "$OUT" ;; esac
 case "$OUT" in *"the clean-architecture-php skill itself"*) ko "plan gate: the denial asks for a skill already loaded"; echo "$OUT" ;; *) ok ;; esac
-# a subagent logs to <session>/subagents/agent-*.jsonl but its hooks are handed the
-# parent's <session>.jsonl — the gate must see the whole family, either way round
+# only the caller's own loads count: a subagent logs to <session>/subagents/agent-<id>.jsonl, and its
+# hooks are handed the session's <session>.jsonl with its agent_id
+gatea() { # tool cwd transcript path agent_id -> hook stdin for a subagent's call
+  printf '{"tool_name":"%s","cwd":"%s","transcript_path":"%s","agent_id":"%s","tool_input":{"file_path":"%s"}}' "$1" "$2" "$3" "$5" "$4"
+}
 mkdir -p "$TMP/proj/sess-a/subagents" "$TMP/proj/sess-b/subagents"
 : > "$TMP/proj/sess-a.jsonl"
 cp "$TMP/loaded-plan.jsonl" "$TMP/proj/sess-a/subagents/agent-1.jsonl"
@@ -444,14 +481,16 @@ cp "$TMP/loaded-plan.jsonl" "$TMP/proj/sess-b.jsonl"
 mkdir -p "$TMP/proj/sess-c/subagents"
 : > "$TMP/proj/sess-c.jsonl"
 cp "$TMP/other.jsonl" "$TMP/proj/sess-c/subagents/agent-1.jsonl"
-expect_exit "plan gate: subagent's own Skill call satisfies the parent's hook" 0 \
+expect_exit "plan gate: a subagent's own Skill call satisfies its hook" 0 \
+  "$(gatea Write "$TMP/php" "$TMP/proj/sess-a.jsonl" "$TMP/php/.claude/plans/x/_plan.md" 1)" "$P"
+expect_exit "plan gate: a subagent's Skill call does not serve the main thread" 2 \
   "$(gate Write "$TMP/php" "$TMP/proj/sess-a.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
-expect_exit "plan gate: parent's Skill call satisfies a subagent transcript" 0 \
+expect_exit "plan gate: the parent's Skill call does not serve a subagent" 2 \
+  "$(gatea Write "$TMP/php" "$TMP/proj/sess-b.jsonl" "$TMP/php/.claude/plans/x/_plan.md" 1)" "$P"
+expect_exit "plan gate: a transcript handed over as the subagent's own is judged alone" 2 \
   "$(gate Write "$TMP/php" "$TMP/proj/sess-b/subagents/agent-1.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
-expect_exit "plan gate: sibling subagent load counts" 0 \
-  "$(gate Write "$TMP/php" "$TMP/proj/sess-a/subagents/agent-1.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
 expect_exit "plan gate: nothing in the family loaded it, still blocked" 2 \
-  "$(gate Write "$TMP/php" "$TMP/proj/sess-c.jsonl" "$TMP/php/.claude/plans/x/_plan.md")" "$P"
+  "$(gatea Write "$TMP/php" "$TMP/proj/sess-c.jsonl" "$TMP/php/.claude/plans/x/_plan.md" 1)" "$P"
 # PHP source edits go through the rubric too (the standards' §Architecture and tech debt),
 # and the rubric is SKILL.md plus the references the target needs, not SKILL.md alone
 mkdir -p "$TMP/php/src/Service" "$TMP/php/tests/Service" "$TMP/php/vendor/acme/src" "$TMP/php/packages/billing/src" "$TMP/php/sub/dir"
@@ -462,18 +501,20 @@ tl() { # transcript path, then rubric files to show as loaded ("skill" = Skill c
     if [ "$f" = skill ]; then
       echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"clean-architecture-php"}}]}}' >> "$out"
     else
-      printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/root/.claude/skills/clean-architecture-php/references/%s"}}]}}\n' "$f" >> "$out"
+      printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s/references/%s"}}]}}\n' "$RUB/clean-architecture-php" "$f" >> "$out"
     fi
   done
+  logged "$out"
 }
 tl "$TMP/t-skill-solid.jsonl" skill solid.md
 tl "$TMP/t-checklist.jsonl" implementer-checklist.md
 tl "$TMP/t-checklist-solid.jsonl" implementer-checklist.md solid.md
 tl "$TMP/t-solid-only.jsonl" solid.md
 tl "$TMP/t-ddd.jsonl" skill solid.md ddd.md
-cat > "$TMP/lsrefs.jsonl" <<'EOF'
-{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls ~/.claude/skills/clean-architecture-php/references"}}]}}
+cat > "$TMP/lsrefs.jsonl" <<EOF
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls $RUB/clean-architecture-php/references"}}]}}
 EOF
+logged "$TMP/lsrefs.jsonl"
 expect_exit "source gate: php source write without skill blocked" 2 \
   "$(gate Write "$TMP/php" "$TMP/empty.jsonl" "$TMP/php/src/Service/Foo.php")" "$P"
 expect_exit "source gate: php source edit without skill blocked" 2 \
@@ -491,8 +532,8 @@ expect_exit "source gate: checklist alone still needs solid.md" 2 \
 expect_exit "source gate: listing the references dir does not count" 2 \
   "$(gate Edit "$TMP/php" "$TMP/lsrefs.jsonl" "$TMP/php/src/Service/Foo.php")" "$P"
 # the rubric read from where a plugin install puts it: the plugin cache, or a marketplace clone
-CACHE_SKILL="/home/dev/.claude/plugins/cache/claude-kit/architecture/0.1.0/skills/clean-architecture-php"
-CLONE_SKILL="/srv/src/claude-kit/plugins/architecture/skills/clean-architecture-php"
+CACHE_SKILL="$CC/plugins/cache/claude-kit/architecture/0.1.0/skills/clean-architecture-php"
+CLONE_SKILL="$TMP/srv/src/claude-kit/plugins/architecture/skills/clean-architecture-php"
 cat > "$TMP/t-cache.jsonl" <<EOF
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"architecture:clean-architecture-php"}}]}}
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"$CACHE_SKILL/references/solid.md"}}]}}
@@ -504,6 +545,7 @@ EOF
 cat > "$TMP/t-cache-skill-only.jsonl" <<EOF
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"$CACHE_SKILL/SKILL.md"}}]}}
 EOF
+logged "$TMP/t-cache.jsonl" "$TMP/t-clone.jsonl" "$TMP/t-cache-skill-only.jsonl"
 expect_exit "source gate: namespaced Skill + solid.md read from the plugin cache allowed" 0 \
   "$(gate Edit "$TMP/php" "$TMP/t-cache.jsonl" "$TMP/php/src/Service/Foo.php")" "$P"
 expect_exit "source gate: SKILL.md + solid.md read from a marketplace clone allowed" 0 \
@@ -564,9 +606,10 @@ tj() { # transcript path, then clean-architecture-js files to show as loaded ("s
     if [ "$f" = skill ]; then
       echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"clean-architecture-js"}}]}}' >> "$out"
     else
-      printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/root/.claude/skills/clean-architecture-js/references/%s"}}]}}\n' "$f" >> "$out"
+      printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s/references/%s"}}]}}\n' "$RUB/clean-architecture-js" "$f" >> "$out"
     fi
   done
+  logged "$out"
 }
 gatec() { # tool cwd transcript path content -> hook stdin carrying the written text
   python3 -c 'import json, sys
@@ -598,9 +641,10 @@ tj "$TMP/tj-react.jsonl" skill solid.md javascript.md react.md
 tj "$TMP/tj-plan-js.jsonl" skill javascript.md
 tj "$TMP/tj-plan-react.jsonl" skill react.md
 tj "$TMP/tj-skill-only.jsonl" skill
-cat > "$TMP/tj-cat.jsonl" <<'EOF'
-{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat ~/.claude/skills/clean-architecture-js/SKILL.md ~/.claude/skills/clean-architecture-js/references/solid.md ~/.claude/skills/clean-architecture-js/references/javascript.md"}}]}}
+cat > "$TMP/tj-cat.jsonl" <<EOF
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat $RUB/clean-architecture-js/SKILL.md $RUB/clean-architecture-js/references/solid.md $RUB/clean-architecture-js/references/javascript.md"}}]}}
 EOF
+logged "$TMP/tj-cat.jsonl"
 cat "$TMP/loaded-plan.jsonl" "$TMP/tj-plan-js.jsonl" > "$TMP/t-plan-php-js.jsonl"
 expect_exit "js gate: js source write without rubric blocked" 2 \
   "$(gate Write "$TMP/js" "$TMP/empty.jsonl" "$TMP/js/src/widgets/coupon.js")" "$P"
@@ -612,12 +656,13 @@ expect_exit "js gate: Skill call alone is not enough (solid, javascript)" 2 \
   "$(gate Write "$TMP/js" "$TMP/tj-skill-only.jsonl" "$TMP/js/src/widgets/coupon.js")" "$P"
 expect_exit "js gate: cat of SKILL.md and references counts" 0 \
   "$(gate Write "$TMP/js" "$TMP/tj-cat.jsonl" "$TMP/js/src/widgets/coupon.mjs")" "$P"
-JS_CACHE="/home/dev/.claude/plugins/cache/claude-kit/architecture/0.1.0/skills/clean-architecture-js/references"
+JS_CACHE="$CC/plugins/cache/claude-kit/architecture/0.1.0/skills/clean-architecture-js/references"
 cat > "$TMP/tj-ns-cache.jsonl" <<EOF
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"architecture:clean-architecture-js"}}]}}
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"$JS_CACHE/solid.md"}}]}}
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"$JS_CACHE/javascript.md"}}]}}
 EOF
+logged "$TMP/tj-ns-cache.jsonl"
 expect_exit "js gate: namespaced Skill + references from the plugin cache allowed" 0 \
   "$(gate Write "$TMP/js" "$TMP/tj-ns-cache.jsonl" "$TMP/js/src/widgets/coupon.js")" "$P"
 expect_exit "js gate: implementer checklist stands in for SKILL.md" 0 \
@@ -732,11 +777,12 @@ tr_() {
       *) printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s"}}]}}\n' "$e" >> "$out" ;;
     esac
   done
+  logged "$out"
 }
-CORE="/root/.claude/skills/clean-architecture-php/references"
-A_CACHE="/home/dev/.claude/plugins/cache/claude-kit/alpha/0.3.1/skills/alpha-architecture-php"
-A_CLONE="/srv/claude-kit/plugins/alpha/skills/alpha-architecture-php"
-B_DIR="/srv/claude-kit/plugins/beta/skills/beta-architecture-php"
+CORE="$RUB/clean-architecture-php/references"
+A_CACHE="$CC/plugins/cache/claude-kit/alpha/0.3.1/skills/alpha-architecture-php"
+A_CLONE="$TMP/srv/claude-kit/plugins/alpha/skills/alpha-architecture-php"
+B_DIR="$TMP/srv/claude-kit/plugins/beta/skills/beta-architecture-php"
 mkdir -p "$TMP/st" "$TMP/pa/src/Service" "$TMP/pa/assets" "$TMP/pa/.claude/plans/x" "$TMP/pb/src" "$TMP/pab/src" \
   "$TMP/proot/modules/m/src" "$TMP/proot/modules/n/src" "$TMP/proot/bin" "$TMP/pdir/src" "$TMP/pdir/etc/alpha" \
   "$TMP/pfile/src" "$TMP/pfile/etc" "$TMP/ptype/src" "$TMP/php/src/Contracts/Data" "$TMP/js/src/stores"
@@ -815,7 +861,7 @@ case "$OUT" in *"Skill tool with \`alpha:alpha-architecture-php\`"*"Read alpha-a
 case "$OUT" in *"implementer-checklist.md in the alpha"*) ko "stacks: the denial offers a stack skill a checklist it does not have"; echo "$OUT" ;; *) ok ;; esac
 # JavaScript and plans
 tj "$TMP/st/j-base.jsonl" skill solid.md javascript.md
-tr_ "$TMP/st/j-a.jsonl" skill=clean-architecture-js /r/clean-architecture-js/references/solid.md /r/clean-architecture-js/references/javascript.md \
+tr_ "$TMP/st/j-a.jsonl" skill=clean-architecture-js $RUB/clean-architecture-js/references/solid.md $RUB/clean-architecture-js/references/javascript.md \
   "$A_CACHE/../alpha-architecture-frontend/SKILL.md"
 cp "$TMP/st/j-base.jsonl" "$TMP/st/j-base-r.jsonl"
 cp "$TMP/st/j-base.jsonl" "$TMP/st/j-dom.jsonl"
@@ -835,7 +881,7 @@ expect_exit "stacks: that directory is no domain directory when the stack is not
 tr_ "$TMP/st/p-php.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md"
 tr_ "$TMP/st/p-php-unreg.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md"
 tr_ "$TMP/st/p-a.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md" "$A_CLONE/SKILL.md"
-tr_ "$TMP/st/p-a-js.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md" "$A_CLONE/SKILL.md" skill=clean-architecture-js /r/clean-architecture-js/references/javascript.md
+tr_ "$TMP/st/p-a-js.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md" "$A_CLONE/SKILL.md" skill=clean-architecture-js $RUB/clean-architecture-js/references/javascript.md
 tr_ "$TMP/st/p-a-front.jsonl" skill=clean-architecture-php "$CORE/solid.md" "$CORE/ddd.md" "$CORE/clean-architecture.md" "$A_CLONE/SKILL.md" skill=clean-architecture-js "$A_CACHE/../alpha-architecture-frontend/SKILL.md"
 for s in p-php p-a p-a-js p-a-front; do reg "$s" "$TMP/decl/alpha.json"; done
 expect_exit "stacks: a plan on a registered stack's project needs its skill" 2 \
@@ -901,6 +947,626 @@ expect_exit "stacks: a shell-written plan naming a browser marker needs the JS s
   "$(bash_json "cat > .claude/plans/x/_plan.md <<'EOF'
 | 1 | a w-mount panel |
 EOF" "$TMP/php" "$TMP/st/p-php.jsonl")" "$B"
+
+# ========== plan_skill_gate.py: evidence and scope; mcp_guard.py — begin ==========
+# The rubric counts only what reached the model: a successful Read result, the Skill tool's
+# base-directory announcement, a shell command whose output holds the file's text. Naming a
+# rubric file (ls, test -f, git log, wc, a failed Read, Grep) loads nothing, and only the caller's
+# own transcript counts: a subagent's for a subagent, the session's for the main thread.
+FX="$H/transcript_fixture.py"
+M="$H/mcp_guard.py"
+EV="$TMP/ev"
+EVK="$CC/plugins/cache/ev/architecture/1.0.0/skills/clean-architecture-php"
+mkdir -p "$EVK/references" "$EV/php/src/Service" "$EV/php/docs" "$EV/t" "$EV/proj/sess/subagents" "$EV/proj/sess2/subagents"
+echo '{}' > "$EV/php/composer.json"
+for f in SKILL.md references/solid.md; do
+  printf '# %s\n\nThe first rule of %s.\nThe second rule.\nThe third rule.\nThe fourth rule.\nThe fifth rule of %s.\n' "$f" "$f" "$f" > "$EVK/$f"
+done
+# the markers and suppressions the debt guard refuses, spelled so that this file carries none
+MK_TODO="TO""DO"
+MK_FIXME="FIX""ME"
+MK_XXX="XX""X"
+SUP_PHPSTAN="@phpstan""-ignore-next-line"
+SUP_PSALM="@psalm""-suppress All"
+# evt <transcript> <entry>... -> a transcript completed with the results a session logs. Entries: skill (a
+# Skill call), read=<path> (a Read), sh=<command> (a Bash call), grep=<path> (a Grep), raw=<json> (as is)
+evt() {
+  local out="$1"; shift; : > "$out"
+  for e in "$@"; do
+    python3 -c 'import json, sys
+e = sys.argv[1]
+def use(name, args):
+    return json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": args}]}})
+if e == "skill":
+    print(use("Skill", {"skill": "architecture:clean-architecture-php"}))
+elif e.startswith("read="):
+    print(use("Read", {"file_path": e[5:]}))
+elif e.startswith("read1="):
+    print(use("Read", {"file_path": e[6:], "limit": 1}))
+elif e.startswith("sh="):
+    print(use("Bash", {"command": e[3:]}))
+elif e.startswith("grep="):
+    print(use("Grep", {"pattern": "rule", "path": e[5:]}))
+else:
+    print(e[4:])' "$e" >> "$out"
+  done
+  python3 "$FX" --cwd "$EV" "$out"
+}
+EVT="$EV/php/src/Service/Foo.php"
+SOLID="$EVK/references/solid.md"
+evt "$EV/t/ok.jsonl" skill "read=$SOLID"
+expect_exit "evidence: a Skill call with its announcement and a read reference allowed" 0 \
+  "$(gate Write "$EV/php" "$EV/t/ok.jsonl" "$EVT")" "$P"
+n=0
+for shape in "ls -la" "test -f" "git log --" "wc -l" "stat"; do
+  n=$((n + 1)); evt "$EV/t/m$n.jsonl" skill "sh=$shape $SOLID"
+  expect_exit "evidence: \`$shape\` of a reference loads nothing" 2 "$(gate Write "$EV/php" "$EV/t/m$n.jsonl" "$EVT")" "$P"
+done
+for shape in "cat" "cat -n" "sed -n 1,40p" "head -n 40" "tail -n 6"; do
+  n=$((n + 1)); evt "$EV/t/m$n.jsonl" skill "sh=$shape $SOLID"
+  expect_exit "evidence: \`$shape\` of a reference shows its text" 0 "$(gate Write "$EV/php" "$EV/t/m$n.jsonl" "$EVT")" "$P"
+done
+evt "$EV/t/pipe.jsonl" skill "sh=cat $SOLID | wc -l"
+expect_exit "evidence: a cat piped into wc shows no text" 2 "$(gate Write "$EV/php" "$EV/t/pipe.jsonl" "$EVT")" "$P"
+evt "$EV/t/var-cat.jsonl" skill "sh=D=$EVK/references; cat \$D/solid.md"
+expect_exit "evidence: a cat through a variable set on the line counts" 0 "$(gate Write "$EV/php" "$EV/t/var-cat.jsonl" "$EVT")" "$P"
+evt "$EV/t/var-wc.jsonl" skill "sh=D=$EVK/references; wc -l \$D/solid.md"
+expect_exit "evidence: a wc through a variable set on the line loads nothing" 2 "$(gate Write "$EV/php" "$EV/t/var-wc.jsonl" "$EVT")" "$P"
+evt "$EV/t/cat-both.jsonl" "sh=cat $EVK/SKILL.md $SOLID"
+expect_exit "evidence: SKILL.md and a reference shown by one cat count without the Skill tool" 0 \
+  "$(gate Write "$EV/php" "$EV/t/cat-both.jsonl" "$EVT")" "$P"
+evt "$EV/t/gone.jsonl" skill "sh=cat /nowhere/clean-architecture-php/references/solid.md"
+expect_exit "evidence: a cat of a reference that is not there loads nothing" 2 "$(gate Write "$EV/php" "$EV/t/gone.jsonl" "$EVT")" "$P"
+evt "$EV/t/failed.jsonl" skill \
+  'raw={"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bad1","name":"Read","input":{"file_path":"clean-architecture-php/references/solid.md"}}]}}' \
+  'raw={"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bad1","is_error":true,"content":"<tool_use_error>File does not exist.</tool_use_error>"}]}}'
+expect_exit "evidence: a failed Read of the relative path a denial prints loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/failed.jsonl" "$EVT")" "$P"
+evt "$EV/t/unanswered.jsonl" skill \
+  'raw={"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_q1","name":"Read","input":{"file_path":"/k/clean-architecture-php/references/solid.md"}}]}}'
+expect_exit "evidence: a Read with no result loads nothing" 2 "$(gate Write "$EV/php" "$EV/t/unanswered.jsonl" "$EVT")" "$P"
+evt "$EV/t/short.jsonl" skill \
+  'raw={"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s1","name":"Read","input":{"file_path":"/k/clean-architecture-php/references/solid.md","offset":900}}]}}' \
+  'raw={"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_s1","content":"<system-reminder>Warning: the file exists but is shorter than the provided offset (900).</system-reminder>"}]}}'
+expect_exit "evidence: a Read past the end of the file shows no text" 2 "$(gate Write "$EV/php" "$EV/t/short.jsonl" "$EVT")" "$P"
+evt "$EV/t/grep.jsonl" skill "grep=$SOLID"
+expect_exit "evidence: a Grep of a reference loads nothing" 2 "$(gate Write "$EV/php" "$EV/t/grep.jsonl" "$EVT")" "$P"
+evt "$EV/t/no-announce.jsonl" "read=$SOLID" \
+  'raw={"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_k1","name":"Skill","input":{"skill":"architecture:clean-architecture-php"}}]}}' \
+  'raw={"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_k1","content":"Launching skill: architecture:clean-architecture-php"}]}}'
+expect_exit "evidence: a Skill call whose skill never reached the conversation loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/no-announce.jsonl" "$EVT")" "$P"
+evt "$EV/t/unknown.jsonl" "read=$SOLID" \
+  'raw={"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_k2","name":"Skill","input":{"skill":"clean-architecture-php"}}]}}' \
+  'raw={"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_k2","is_error":true,"content":"<tool_use_error>Unknown skill: clean-architecture-php</tool_use_error>"}]}}' \
+  'raw={"type":"user","isMeta":true,"sourceToolUseID":"toolu_k2","message":{"content":[{"type":"text","text":"Base directory for this skill: /k/skills/clean-architecture-php\n\n# Clean Architecture"}]}}'
+expect_exit "evidence: an announcement tied to a refused Skill call loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/unknown.jsonl" "$EVT")" "$P"
+evt "$EV/t/slash.jsonl" "read=$SOLID" \
+  'raw={"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Base directory for this skill: /k/skills/clean-architecture-php\n\n# Clean Architecture\n\nThe lenses."}]}}'
+expect_exit "evidence: a skill the person invoked, announced by the harness, counts" 0 \
+  "$(gate Write "$EV/php" "$EV/t/slash.jsonl" "$EVT")" "$P"
+evt "$EV/t/bare-announce.jsonl" "read=$SOLID" \
+  'raw={"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Base directory for this skill: /k/skills/clean-architecture-php"}]}}'
+expect_exit "evidence: an announcement with no skill text after it loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/bare-announce.jsonl" "$EVT")" "$P"
+evt "$EV/t/typed.jsonl" "read=$SOLID" \
+  'raw={"type":"user","message":{"content":[{"type":"text","text":"Base directory for this skill: /k/skills/clean-architecture-php\n\n# Clean Architecture"}]}}'
+expect_exit "evidence: an announcement typed into a prompt loads nothing" 2 "$(gate Write "$EV/php" "$EV/t/typed.jsonl" "$EVT")" "$P"
+# scope: the caller's own transcript. The hook of a subagent's call is handed the session's
+# transcript and the subagent's agent_id; its own turns are <session>/subagents/agent-<id>.jsonl
+S="$EV/proj/sess"
+S2="$EV/proj/sess2"
+evt "$S.jsonl"
+evt "$S/subagents/agent-a1.jsonl" skill "read=$SOLID"
+evt "$S/subagents/agent-a2.jsonl"
+evt "$S2.jsonl" skill "read=$SOLID"
+evt "$S2/subagents/agent-a2.jsonl"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_w1","name":"Write","input":{"file_path":"src/Service/Foo.php"}}]}}' \
+  >> "$S/subagents/agent-a1.jsonl"
+scoped() { # transcript agent_id [tool_use_id] -> hook stdin for a Write of PHP source in $EV/php
+  python3 -c 'import json, sys
+d = {"tool_name": "Write", "cwd": sys.argv[1], "transcript_path": sys.argv[2],
+     "tool_input": {"file_path": sys.argv[1] + "/src/Service/Foo.php", "content": "<?php\n"}}
+if sys.argv[3]:
+    d["agent_id"] = sys.argv[3]
+if sys.argv[4]:
+    d["tool_use_id"] = sys.argv[4]
+print(json.dumps(d))' "$EV/php" "$1" "$2" "${3:-}"
+}
+expect_exit "scope: a subagent's load does not serve the main thread" 2 "$(scoped "$S.jsonl" "")" "$P"
+expect_exit "scope: the subagent's own load serves it" 0 "$(scoped "$S.jsonl" a1)" "$P"
+expect_exit "scope: a sibling subagent's load does not serve another" 2 "$(scoped "$S.jsonl" a2)" "$P"
+expect_exit "scope: the main thread's load does not serve a subagent" 2 "$(scoped "$S2.jsonl" a2)" "$P"
+expect_exit "scope: the main thread's own load serves it" 0 "$(scoped "$S2.jsonl" "")" "$P"
+expect_exit "scope: a subagent whose transcript is not there cannot be proven unloaded" 0 "$(scoped "$S.jsonl" a9)" "$P"
+expect_exit "scope: without an agent_id, the subagent transcript holding the call is the caller's" 0 \
+  "$(scoped "$S.jsonl" "" toolu_w1)" "$P"
+expect_exit "scope: without an agent_id, a call no subagent holds is the main thread's" 2 \
+  "$(scoped "$S.jsonl" "" toolu_none)" "$P"
+expect_exit "scope: a malformed agent_id proves nothing either way" 0 "$(scoped "$S.jsonl" "../sess2")" "$P"
+shell_scoped() { # agent_id -> hook stdin for a Bash heredoc write of PHP source in $EV/php
+  python3 -c 'import json, sys
+d = {"tool_name": "Bash", "cwd": sys.argv[1], "transcript_path": sys.argv[2],
+     "tool_input": {"command": "cat > src/Service/Foo.php <<'"'"'EOF'"'"'\n<?php\nEOF"}}
+if sys.argv[3]:
+    d["agent_id"] = sys.argv[3]
+print(json.dumps(d))' "$EV/php" "$S.jsonl" "$1"
+}
+expect_exit "scope: a subagent's shell write is judged on its own transcript" 0 "$(shell_scoped a1)" "$B"
+expect_exit "scope: the main thread's shell write is judged on its own" 2 "$(shell_scoped "")" "$B"
+
+# mcp_guard.py: an MCP tool is routed by the shape of its input, whatever the server
+[ -f "$M" ] && ok || ko "mcp: mcp_guard.py exists"
+mcp() { # tool cwd transcript input-json -> hook stdin for an MCP call
+  python3 -c 'import json, sys
+print(json.dumps({"tool_name": sys.argv[1], "cwd": sys.argv[2], "transcript_path": sys.argv[3], "tool_input": json.loads(sys.argv[4])}))' "$@"
+}
+mj() { # key=value... -> a JSON object of strings
+  python3 -c 'import json, sys
+print(json.dumps(dict(a.split("=", 1) for a in sys.argv[1:])))' "$@"
+}
+ej() { # path old new -> a filesystem server's edit_file input with one edit
+  python3 -c 'import json, sys
+print(json.dumps({"path": sys.argv[1], "edits": [{"oldText": sys.argv[2], "newText": sys.argv[3]}]}))' "$@"
+}
+OKT="$EV/t/ok.jsonl"
+NOT="$TMP/empty.jsonl"
+PP="$EV/php"
+printf '<?php\n// keeps the old note\n' > "$PP/src/Service/Foo.php"
+expect_exit "mcp: an IDE's new PHP file before the rubric blocked" 2 \
+  "$(mcp mcp__ide__create_new_file "$TMP" "$NOT" "$(mj pathInProject=src/Service/New.php "text=<?php" projectPath="$PP")")" "$M"
+expect_exit "mcp: an IDE's new PHP file after the rubric allowed" 0 \
+  "$(mcp mcp__ide__create_new_file "$TMP" "$OKT" "$(mj pathInProject=src/Service/New.php "text=<?php" projectPath="$PP")")" "$M"
+expect_exit "mcp: an IDE's new PHP file with a deferral marker blocked" 2 \
+  "$(mcp mcp__ide__create_new_file "$PP" "$OKT" "$(mj pathInProject=src/Service/New.php "text=<?php
+// $MK_TODO later")")" "$M"
+expect_exit "mcp: a filesystem server's write of PHP before the rubric blocked" 2 \
+  "$(mcp mcp__fs__write_file "$TMP" "$NOT" "$(mj path="$PP/src/Service/W.php" "content=<?php")")" "$M"
+expect_exit "mcp: a filesystem server's write carrying a suppression blocked" 2 \
+  "$(mcp mcp__fs__write_file "$TMP" "$OKT" "$(mj path="$PP/src/Service/W.php" "content=<?php
+/** $SUP_PHPSTAN */")")" "$M"
+expect_exit "mcp: a filesystem server's write of a note untouched" 0 \
+  "$(mcp mcp__fs__write_file "$TMP" "$NOT" "$(mj path="$PP/docs/n.md" "content=- $MK_TODO anything")")" "$M"
+expect_exit "mcp: an edit list adding a deferral marker blocked" 2 \
+  "$(mcp mcp__fs__edit_file "$PP" "$OKT" "$(ej src/Service/Foo.php '<?php' "<?php
+// $MK_FIXME soon")")" "$M"
+expect_exit "mcp: an edit list moving a marker that is there allowed" 0 \
+  "$(mcp mcp__fs__edit_file "$PP" "$OKT" "$(ej src/Service/Foo.php "// $MK_TODO keep" "// $MK_TODO keep
+\$x = 1;")")" "$M"
+expect_exit "mcp: an IDE text replacement adding a suppression blocked" 2 \
+  "$(mcp mcp__ide__replace_text_in_file "$PP" "$OKT" "$(mj pathInProject=src/Service/Foo.php oldText=a "newText=/* $SUP_PSALM */")")" "$M"
+expect_exit "mcp: an IDE text replacement before the rubric blocked" 2 \
+  "$(mcp mcp__ide__replace_text_in_file "$PP" "$NOT" "$(mj pathInProject=src/Service/Foo.php oldText=a newText=b)")" "$M"
+expect_exit "mcp: an apply_patch envelope adding PHP with a marker blocked" 2 \
+  "$(mcp mcp__ide__apply_patch "$PP" "$OKT" "$(mj "input=*** Begin Patch
+*** Add File: src/Service/P.php
++<?php
++// $MK_TODO later
+*** End Patch")")" "$M"
+expect_exit "mcp: a clean apply_patch envelope after the rubric allowed" 0 \
+  "$(mcp mcp__ide__apply_patch "$PP" "$OKT" "$(mj "input=*** Begin Patch
+*** Add File: src/Service/P.php
++<?php
+*** End Patch")")" "$M"
+expect_exit "mcp: a clean apply_patch envelope before the rubric blocked" 2 \
+  "$(mcp mcp__ide__apply_patch "$PP" "$NOT" "$(mj "patch=*** Begin Patch
+*** Update File: src/Service/Foo.php
+@@
+-// keeps the old note
++// a new note
+*** End Patch")")" "$M"
+expect_exit "mcp: a unified diff adding a marker blocked" 2 \
+  "$(mcp mcp__ide__apply_patch "$PP" "$OKT" "$(mj "patch=--- a/src/Service/Foo.php
++++ b/src/Service/Foo.php
+@@ -1,1 +1,2 @@
+ <?php
++// $MK_XXX later
+")")" "$M"
+expect_exit "mcp: a unified diff of a note untouched" 0 \
+  "$(mcp mcp__ide__apply_patch "$PP" "$NOT" "$(mj "patch=--- a/docs/n.md
++++ b/docs/n.md
+@@ -0,0 +1 @@
++- $MK_TODO anything
+")")" "$M"
+expect_exit "mcp: input that is no patch passes" 0 \
+  "$(mcp mcp__x__translate "$PP" "$NOT" "$(mj "input=hello" "path=src/Service/Foo.php")")" "$M"
+neon_entries() { # message... -> a PHPStan baseline ignoring one error of src/A.php per message
+  printf 'parameters:\n  ignoreErrors:\n'
+  for m in "$@"; do printf '    -\n      message: "#%s#"\n      path: src/A.php\n' "$m"; done
+}
+neon_entries a b > "$PP/phpstan-baseline.neon"
+expect_exit "mcp: a write that grows a baseline blocked" 2 \
+  "$(mcp mcp__fs__write_file "$PP" "$NOT" "$(mj path=phpstan-baseline.neon "content=$(neon_entries a b c)")")" "$M"
+expect_exit "mcp: a write that shrinks a baseline allowed" 0 \
+  "$(mcp mcp__fs__write_file "$PP" "$NOT" "$(mj path=phpstan-baseline.neon "content=$(neon_entries a)")")" "$M"
+expect_exit "mcp: a patch that grows a baseline blocked" 2 \
+  "$(mcp mcp__ide__apply_patch "$PP" "$NOT" "$(mj "patch=--- a/phpstan-baseline.neon
++++ b/phpstan-baseline.neon
+@@ -1,2 +1,5 @@
+ parameters:
+   ignoreErrors:
++    -
++      message: \"#c#\"
++      path: src/A.php
+")")" "$M"
+printf '<?php\n// %s from elsewhere\n' "$MK_TODO" > "$PP/draft.txt"
+expect_exit "mcp: a move bringing a marker into PHP source blocked" 2 \
+  "$(mcp mcp__fs__move_file "$PP" "$OKT" "$(mj source=draft.txt destination=src/Service/Moved.php)")" "$M"
+printf '<?php\n' > "$PP/clean.txt"
+expect_exit "mcp: a move into PHP source before the rubric blocked" 2 \
+  "$(mcp mcp__fs__move_file "$PP" "$NOT" "$(mj source=clean.txt destination=src/Service/Moved.php)")" "$M"
+expect_exit "mcp: a clean move into PHP source after the rubric allowed" 0 \
+  "$(mcp mcp__fs__move_file "$PP" "$OKT" "$(mj source=clean.txt destination=src/Service/Moved.php)")" "$M"
+expect_exit "mcp: a terminal's rm -rf / blocked" 2 "$(mcp mcp__ide__execute_terminal_command "$PP" "$NOT" "$(mj 'command=rm -rf /')")" "$M"
+expect_exit "mcp: a terminal's force-push to main blocked" 2 \
+  "$(mcp mcp__ide__execute_terminal_command "$PP" "$NOT" "$(mj 'command=git push --force origin main')")" "$M"
+expect_exit "mcp: a command given as a list of words is judged" 2 \
+  "$(mcp mcp__sh__run "$PP" "$NOT" '{"command":["rm","-rf","/"]}')" "$M"
+expect_exit "mcp: a terminal's listing allowed" 0 "$(mcp mcp__ide__execute_terminal_command "$PP" "$NOT" "$(mj 'command=ls -la')")" "$M"
+expect_exit "mcp: a terminal's write of PHP source before the rubric blocked" 2 \
+  "$(mcp mcp__ide__execute_terminal_command "$PP" "$NOT" "$(mj "command=printf '<?php\n' > src/Service/Sh.php")")" "$M"
+expect_exit "mcp: an IDE's DELETE without WHERE blocked" 2 \
+  "$(mcp mcp__ide__execute_sql_query "$PP" "$NOT" "$(mj 'queryText=DELETE FROM users' connectionId=c1)")" "$M"
+expect_exit "mcp: an IDE's DELETE with WHERE allowed" 0 \
+  "$(mcp mcp__ide__execute_sql_query "$PP" "$NOT" "$(mj 'queryText=DELETE FROM users WHERE id = 1' connectionId=c1)")" "$M"
+expect_exit "mcp: an IDE's DROP TABLE blocked" 2 \
+  "$(mcp mcp__ide__execute_sql_query "$PP" "$NOT" "$(mj 'queryText=DROP TABLE orders')")" "$M"
+expect_exit "mcp: a database server's TRUNCATE in sql blocked" 2 "$(mcp mcp__pg__query "$PP" "$NOT" "$(mj 'sql=TRUNCATE orders')")" "$M"
+expect_exit "mcp: a database server's SELECT allowed" 0 "$(mcp mcp__pg__query "$PP" "$NOT" "$(mj 'sql=select 1')")" "$M"
+expect_exit "mcp: a query of a tool named for a database is SQL" 2 \
+  "$(mcp mcp__store__run_db_query "$PP" "$NOT" "$(mj 'query=DROP TABLE x')")" "$M"
+expect_exit "mcp: a search query is no SQL" 0 "$(mcp mcp__docs__search "$PP" "$NOT" "$(mj 'query=truncate long titles')")" "$M"
+expect_exit "mcp: a read tool untouched" 0 "$(mcp mcp__ide__read_file "$PP" "$NOT" "$(mj file_path="$PP/src/Service/Foo.php")")" "$M"
+expect_exit "mcp: a search tool with a path and a text untouched" 0 \
+  "$(mcp mcp__ide__search_in_files_by_text "$PP" "$NOT" "$(mj path=src/Service/Foo.php "text=// $MK_TODO")")" "$M"
+expect_exit "mcp: a path with nothing to write passes" 0 "$(mcp mcp__ide__open_file_in_editor "$PP" "$NOT" "$(mj path=src/Service/Foo.php)")" "$M"
+expect_exit "mcp: a built-in tool is left to its own hooks" 0 \
+  "$(mcp Write "$PP" "$NOT" "$(mj file_path=src/Service/Foo.php "content=// $MK_TODO")")" "$M"
+OUT=$(mcp mcp__ide__create_new_file "$PP" "$NOT" "$(mj pathInProject=src/Service/New.php "text=<?php")" | CLAUDE_NO_PLAN_SKILL_GATE=1 python3 "$M" 2>&1; echo "rc=$?")
+case "$OUT" in *"rc=0"*) ok ;; *) ko "mcp: the rubric gate's kill switch holds for MCP writes"; echo "$OUT" ;; esac
+OUT=$(mcp mcp__ide__create_new_file "$PP" "$NOT" "$(mj pathInProject=src/Service/New.php "text=<?php")" | python3 "$M" 2>&1)
+case "$OUT" in *"mcp__ide__create_new_file"*"Skill tool with \`architecture:clean-architecture-php\`"*) ok ;;
+  *) ko "mcp: the denial names the tool and the rubric it needs"; echo "$OUT" ;; esac
+expect_exit "mcp: a subagent's MCP write is judged on its own transcript" 0 \
+  "$(python3 -c 'import json, sys
+print(json.dumps({"tool_name": "mcp__ide__create_new_file", "cwd": sys.argv[1], "transcript_path": sys.argv[2], "agent_id": "a1",
+                  "tool_input": {"pathInProject": "src/Service/New.php", "text": "<?php"}}))' "$PP" "$S.jsonl")" "$M"
+# shell writes: a variable assigned earlier on the line is read in a `cd` target, a scratch directory outside
+# every project is held to no debt rule, and `git show <rev>:<path> >` brings the blob's text into project source
+SUP_NOQA="# no""qa: N802"
+SCR="$EV/scratch"
+GR="$EV/repo"
+mkdir -p "$SCR/tree/tests" "$GR/tests" "$GR/src"
+echo '{}' > "$GR/composer.json"
+printf 'def do_POST(self) -> None:  %s\n' "$SUP_NOQA" > "$GR/tests/test_decide.py"
+printf '<?php\n// %s replace this\n' "$MK_TODO" > "$GR/src/Old.php"
+printf '<?php\n// %s from a note\n' "$MK_TODO" > "$GR/notes.txt"
+git -C "$GR" init -q && git -C "$GR" add -A && git -C "$GR" -c user.email=t@example.com -c user.name=t commit -qm fixture
+OR="$EV/other-repo"
+mkdir -p "$OR"
+printf '<?php\n// %s elsewhere\n' "$MK_TODO" > "$OR/Marked.php"
+git -C "$OR" init -q && git -C "$OR" add -A && git -C "$OR" -c user.email=t@example.com -c user.name=t commit -qm fixture
+cp "$GR/tests/test_decide.py" "$SCR/main_test_decide.py"
+expect_exit "shell scratch: a cd through a variable set on the line lands in the scratch directory" 0 \
+  "$(bash_json "S=$SCR && cd $GR && git show HEAD:tests/test_decide.py > \$S/tree/tests/test_decide.py && cd \$S/tree && cp \$S/main_test_decide.py tests/test_decide.py; uptime" "$EV/php" "$NOT")" "$B"
+expect_exit "shell scratch: after a cd that cannot be read, a relative PHP source write is refused" 2 \
+  "$(bash_json "cd \$NOT_SET_ANYWHERE/tree && cp $SCR/main_test_decide.py src/Decide.php" "$GR" "$NOT")" "$B"
+expect_exit "shell scratch: after a cd that cannot be read, a relative test file passes" 0 \
+  "$(bash_json "cd \$NOT_SET_ANYWHERE/tree && cp $SCR/main_test_decide.py tests/test_decide.py" "$GR" "$NOT")" "$B"
+expect_exit "shell scratch: a write outside every project carries no debt rule" 0 \
+  "$(bash_json "cp $GR/tests/test_decide.py $SCR/tree/tests/copy.py" "$GR" "$NOT")" "$B"
+expect_exit "shell scratch: git show of another repository's blob with a marker into project source blocked" 2 \
+  "$(bash_json "git -C $OR show HEAD:Marked.php > src/New.php" "$GR" "$OKT")" "$B"
+expect_exit "shell scratch: git show of a clean blob into project source allowed" 0 \
+  "$(bash_json "git show HEAD:composer.json > src/copy.json" "$GR" "$OKT")" "$B"
+expect_exit "shell scratch: git show of a blob with a marker into scratch allowed" 0 \
+  "$(bash_json "git -C $GR show HEAD:src/Old.php > $SCR/Old.php" "$EV/php" "$NOT")" "$B"
+# a patch onto a baseline is applied to the file in memory and judged by what the baseline ignores after it
+BLP="$EV/bl"
+mkdir -p "$BLP"
+echo '{}' > "$BLP/composer.json"
+neon_entries a b > "$BLP/phpstan-baseline.neon"
+printf -- '--- a/phpstan-baseline.neon\n+++ b/phpstan-baseline.neon\n@@ -6,3 +6,3 @@\n     -\n-      message: "#b#"\n+      message: "#c#"\n       path: src/A.php\n' > "$BLP/swap.patch"
+printf -- '--- a/phpstan-baseline.neon\n+++ b/phpstan-baseline.neon\n@@ -6,3 +5,0 @@\n-    -\n-      message: "#b#"\n-      path: src/A.php\n' > "$BLP/drop.patch"
+printf -- '--- a/phpstan-baseline.neon\n+++ b/phpstan-baseline.neon\n@@ -6,3 +6,3 @@\n     -\n-      message: "#z#"\n+      message: "#c#"\n       path: src/A.php\n' > "$BLP/stale.patch"
+expect_exit "baseline patch: git apply swapping one entry for another of the same size blocked" 2 \
+  "$(bash_json "git apply swap.patch" "$BLP" "$NOT")" "$B"
+expect_exit "baseline patch: patch(1) swapping one entry for another blocked" 2 "$(bash_json "patch -p1 < swap.patch" "$BLP" "$NOT")" "$B"
+expect_exit "baseline patch: a patch that only drops an entry allowed" 0 "$(bash_json "git apply drop.patch" "$BLP" "$NOT")" "$B"
+expect_exit "baseline patch: a patch that does not apply to the baseline blocked" 2 "$(bash_json "git apply stale.patch" "$BLP" "$NOT")" "$B"
+expect_exit "baseline patch: an MCP patch swapping one entry for another blocked" 2 \
+  "$(mcp mcp__ide__apply_patch "$BLP" "$NOT" "$(mj "patch=$(cat "$BLP/swap.patch")")")" "$M"
+expect_exit "baseline patch: an MCP patch that only drops an entry allowed" 0 \
+  "$(mcp mcp__ide__apply_patch "$BLP" "$NOT" "$(mj "patch=$(cat "$BLP/drop.patch")")")" "$M"
+printf 'parameters:\n  level: 10\n' > "$BLP/phpstan.neon"
+expect_exit "mcp: a write adding ignoreErrors to the PHPStan configuration blocked" 2 \
+  "$(mcp mcp__fs__write_file "$BLP" "$NOT" "$(mj path=phpstan.neon "content=parameters:
+  level: 10
+  ignoreErrors:
+    - '#x#'")")" "$M"
+expect_exit "mcp: moving a marker that is there, as an Edit would, allowed" 0 \
+  "$(mcp mcp__ide__replace_text_in_file "$GR" "$OKT" "$(mj pathInProject=src/Old.php "oldText=// $MK_TODO replace this" "newText=\$a = 1;
+// $MK_TODO replace this")")" "$M"
+# a cd is read as far as it can be: $CLAUDE_PROJECT_DIR, $PWD, `cd -`, $(git rev-parse --show-toplevel) and
+# $(dirname <path>); after one that cannot be read, a relative source, plan or baseline write is refused
+CDT="printf '<?php\n// $MK_TODO later\n'"
+CLAUDE_PROJECT_DIR="$GR" expect_exit "cd: \$CLAUDE_PROJECT_DIR, set for the hook only, leaves a relative source write unplaced" 2 \
+  "$(bash_json "cd \"\$CLAUDE_PROJECT_DIR\" && $CDT > src/New.php" "$SCR" "$OKT")" "$B"
+OUT=$(bash_json "cd \"\$CLAUDE_PROJECT_DIR\" && printf '<?php /* $SUP_PHPSTAN */\n' > src/Service/New.php" "$SCR" "$OKT" \
+  | env -u CLAUDE_PROJECT_DIR python3 "$B" >/dev/null 2>&1; echo "rc=$?")
+case "$OUT" in "rc=2") ok ;; *) ko "cd: an unset project directory leaves a relative source write unplaced ($OUT)" ;; esac
+expect_exit "cd: \$(git rev-parse --show-toplevel) is the work tree" 2 \
+  "$(bash_json "cd \"\$(git rev-parse --show-toplevel)\" && $CDT > src/New.php" "$GR/src" "$OKT")" "$B"
+expect_exit "cd: \$(dirname <path>) is read" 2 \
+  "$(bash_json "cd \"\$(dirname $GR/src/Old.php)\" && $CDT > New.php" "$SCR" "$OKT")" "$B"
+expect_exit "cd: \$PWD is the directory the line is in" 2 "$(bash_json "cd \"\$PWD\" && $CDT > src/New.php" "$GR" "$OKT")" "$B"
+expect_exit "cd: cd - returns to the directory before" 2 \
+  "$(bash_json "cd $GR && cd $SCR && cd - && $CDT > src/New.php" "$SCR" "$OKT")" "$B"
+expect_exit "cd: a substitution that cannot be read leaves a baseline append unplaced" 2 \
+  "$(bash_json "cd \"\$(some-tool --where)\" && echo x >> phpstan-baseline.neon" "$BLP" "$NOT")" "$B"
+expect_exit "cd: after an unread cd, a log written by a relative path passes" 0 \
+  "$(bash_json "cd \"\$NOT_SET_ANYWHERE\" && make test > build.log 2>&1" "$GR" "$NOT")" "$B"
+expect_exit "cd: after an unread cd, a write under an absolute scratch path passes" 0 \
+  "$(bash_json "cd \"\$NOT_SET_ANYWHERE\" && cp $SCR/main_test_decide.py $SCR/tree/abs.py" "$GR" "$NOT")" "$B"
+expect_exit "cd: after an unread cd, an in-place edit of files the line does not name is refused" 2 \
+  "$(bash_json "cd \"\$NOT_SET_ANYWHERE\" && git ls-files | xargs sed -i 's/a/b/'" "$GR" "$OKT")" "$B"
+# what lands through a redirect or tee: a repository's own source copied within it brings nothing new;
+# a blob, a cat of named files and an unknown command's output into project source are read or refused
+expect_exit "blob: a repository's own source shown into its var/ allowed" 0 \
+  "$(bash_json "git show HEAD:src/Old.php > var/Old.php" "$GR" "$OKT")" "$B"
+expect_exit "blob: a repository's own source shown into its src/ allowed, as cp is" 0 \
+  "$(bash_json "git show HEAD:src/Old.php > src/Copy.php" "$GR" "$OKT")" "$B"
+expect_exit "output: git cat-file -p of a note with a marker into project source blocked" 2 \
+  "$(bash_json "git cat-file -p HEAD:notes.txt > src/B.php" "$GR" "$OKT")" "$B"
+expect_exit "output: git show of a note piped into tee onto project source blocked" 2 \
+  "$(bash_json "git show HEAD:notes.txt | tee src/B.php" "$GR" "$OKT")" "$B"
+expect_exit "output: cat of a note with a marker into project source blocked" 2 "$(bash_json "cat notes.txt > src/B.php" "$GR" "$OKT")" "$B"
+expect_exit "output: an unknown command's output into project source blocked" 2 \
+  "$(bash_json "some-generator --emit > src/B.php" "$GR" "$OKT")" "$B"
+expect_exit "output: an unknown command's output into var/ allowed" 0 "$(bash_json "some-generator --emit > var/B.php" "$GR" "$OKT")" "$B"
+expect_exit "output: an unknown command's output into scratch allowed" 0 \
+  "$(bash_json "some-generator --emit > $SCR/B.php" "$GR" "$OKT")" "$B"
+expect_exit "output: truncating project source with : allowed" 0 "$(bash_json ": > src/Old.php" "$GR" "$OKT")" "$B"
+# a symbolic link made on the line keeps the debt rule on source written through scratch; an existing one is followed
+mkdir -p "$SCR/links" && ln -s "$GR/src" "$SCR/links/existing"
+expect_exit "links: a source write through a link the line makes blocked" 2 \
+  "$(bash_json "ln -s $GR/src $SCR/links/new && $CDT > $SCR/links/new/Foo.php" "$SCR" "$NOT")" "$B"
+expect_exit "links: a source write through an existing link is a write of its target" 2 \
+  "$(bash_json "$CDT > $SCR/links/existing/Foo.php" "$SCR" "$OKT")" "$B"
+# sed commands that copy lines (p, h, H, g, G, x) write what cannot be read; d and friends write nothing
+printf '<?php\n/** %s */\n$a = 1;\n$b = 2;\n' "$SUP_PHPSTAN" > "$GR/src/Sup.php"
+expect_exit "sed: holding and getting a line copies it, refused onto project source" 2 \
+  "$(bash_json "sed -i '' '2h;4G' src/Sup.php" "$GR" "$OKT")" "$B"
+expect_exit "sed: printing a line under -i copies it, refused onto project source" 2 \
+  "$(bash_json "sed -i '' '/phpstan/p' src/Sup.php" "$GR" "$OKT")" "$B"
+expect_exit "sed: deleting a line still allowed" 0 "$(bash_json "sed -i '' '/phpstan/d' src/Sup.php" "$GR" "$OKT")" "$B"
+# a long patch onto a large baseline is placed hunk by hunk where it says, in bounded time
+BIGB="$EV/bigbl"
+mkdir -p "$BIGB" && echo '{}' > "$BIGB/composer.json"
+python3 -c 'import sys
+d = sys.argv[1]
+n = 20000
+with open(d + "/phpstan-baseline.neon", "w") as fh:
+    fh.write("parameters:\n  ignoreErrors:\n")
+    for i in range(n):
+        fh.write("    -\n      message: \"#e%d#\"\n      path: src/A.php\n" % i)
+with open(d + "/drop.patch", "w") as fh:
+    fh.write("--- a/phpstan-baseline.neon\n+++ b/phpstan-baseline.neon\n")
+    removed = 0
+    for i in range(0, n, 20):
+        start = 3 + 3 * i
+        fh.write("@@ -%d,3 +%d,0 @@\n" % (start, start - 1 - removed))
+        fh.write("-    -\n-      message: \"#e%d#\"\n-      path: src/A.php\n" % i)
+        removed += 3' "$BIGB"
+OUT=$(python3 -c 'import json, subprocess, sys, time
+start = time.time()
+data = json.dumps({"tool_input": {"command": "git apply drop.patch"}, "cwd": sys.argv[2]})
+rc = subprocess.run([sys.executable, sys.argv[1]], input=data, text=True, capture_output=True).returncode
+print("rc=%d seconds=%.1f" % (rc, time.time() - start))' "$B" "$BIGB")
+case "$OUT" in "rc=0 seconds="[0-4].*) ok ;; *) ko "baseline patch: 1,000 hunks onto a 20,000-entry baseline judged in under five seconds"; echo "$OUT" ;; esac
+# the plan gate: a Read counts only of the installed file, showing a run of its own lines
+mkdir -p "$EV/fake/clean-architecture-php/references"
+cp "$RUB/clean-architecture-php/references/solid.md" "$EV/fake/clean-architecture-php/references/solid.md"
+evt "$EV/t/fake.jsonl" skill "read=$EV/fake/clean-architecture-php/references/solid.md"
+expect_exit "evidence: a copy of a reference outside where skills are installed loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/fake.jsonl" "$EVT")" "$P"
+evt "$EV/t/one-line.jsonl" skill "read1=$RUB/clean-architecture-php/references/solid.md"
+expect_exit "evidence: a Read of one line of the installed reference loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/one-line.jsonl" "$EVT")" "$P"
+evt "$EV/t/full-line.jsonl" skill "read=$RUB/clean-architecture-php/references/solid.md"
+expect_exit "evidence: a Read of the installed reference loads it" 0 "$(gate Write "$EV/php" "$EV/t/full-line.jsonl" "$EVT")" "$P"
+TW="$CC/plugins/cache/twin/architecture/1.0.0/skills"
+mkdir -p "$TW/clean-architecture-php" "$TW/clean-architecture-js"
+for lang in php js; do
+  printf '# Clean architecture for %s\n\nThe %s lenses come first.\n### Review Report format\n- Findings: one per line\n- Severity: high, medium, low\n- Fix: what to change\n- Test: what proves it\n- Overall: a verdict\n' \
+    "$lang" "$lang" > "$TW/clean-architecture-$lang/SKILL.md"
+done
+evt "$EV/t/twin.jsonl" "sh=cat $TW/clean-architecture-php/SKILL.md; wc -l $TW/clean-architecture-js/SKILL.md" \
+  "read=$RUB/clean-architecture-js/references/solid.md" "read=$RUB/clean-architecture-js/references/javascript.md"
+expect_exit "evidence: a section two SKILL.md files share proves neither" 2 \
+  "$(gate Write "$TMP/js" "$EV/t/twin.jsonl" "$TMP/js/src/widgets/coupon.js")" "$P"
+evt "$EV/t/twin-own.jsonl" "sh=cat $TW/clean-architecture-js/SKILL.md" \
+  "read=$RUB/clean-architecture-js/references/solid.md" "read=$RUB/clean-architecture-js/references/javascript.md"
+expect_exit "evidence: a SKILL.md shown whole proves itself" 0 "$(gate Write "$TMP/js" "$EV/t/twin-own.jsonl" "$TMP/js/src/widgets/coupon.js")" "$P"
+# mcp: previews, remote repositories, moves within a repository, commands with arguments or a script on
+# stdin, more path and content keys, SQL by name or shape, the envelope only when it opens the patch
+expect_exit "mcp: a filesystem server's edit preview writes nothing" 0 \
+  "$(mcp mcp__fs__edit_file "$PP" "$OKT" "$(python3 -c 'import json, sys
+print(json.dumps({"path": "src/Service/Foo.php", "edits": [{"oldText": "<?php", "newText": "<?php\n// " + sys.argv[1]}], "dryRun": True}))' "$MK_TODO")")" "$M"
+expect_exit "mcp: a remote repository's file is no file here" 0 \
+  "$(mcp mcp__forge__create_or_update_file "$PP" "$NOT" '{"owner":"o","repo":"other","path":"src/Service/Remote.php","content":"<?php\n","branch":"main"}')" "$M"
+expect_exit "mcp: a remote repository's baseline is not the local one" 0 \
+  "$(mcp mcp__forge__create_or_update_file "$PP" "$NOT" "$(mj owner=o repo=other path=phpstan-baseline.neon "content=$(neon_entries a b c d)")")" "$M"
+expect_exit "mcp: moving a repository's own source within it brings nothing new" 0 \
+  "$(mcp mcp__fs__move_file "$GR" "$OKT" "$(mj source=src/Old.php destination=src/Moved.php)")" "$M"
+expect_exit "mcp: a command's args are part of the line" 2 \
+  "$(mcp mcp__proc__start_process "$PP" "$NOT" '{"command":"bash","args":["-c","printf x > src/Service/Foo.php"]}')" "$M"
+expect_exit "mcp: a script on a shell's stdin is judged" 2 \
+  "$(mcp mcp__proc__start_process "$PP" "$NOT" '{"command":"bash","stdin":"printf x > src/Service/Foo.php"}')" "$M"
+expect_exit "mcp: input written to a running process is judged" 2 \
+  "$(mcp mcp__proc__interact_with_process "$PP" "$NOT" '{"pid":1,"input":"printf x > src/Service/Foo.php"}')" "$M"
+OUT=$(mcp mcp__proc__start_process "$PP" "$NOT" '{"command":{"program":"bash"}}' | python3 "$M" 2>&1; echo "rc=$?")
+case "$OUT" in *'"ask"'*"rc=0"*) ok ;; *) ko "mcp: a command that cannot be read is asked about"; echo "$OUT" ;; esac
+expect_exit "mcp: a relative_path with content is a write" 2 \
+  "$(mcp mcp__code__create_text_file "$PP" "$OKT" "$(mj relative_path=src/Service/T.php "content=<?php
+// $MK_TODO later")")" "$M"
+expect_exit "mcp: a symbol body is a write" 2 \
+  "$(mcp mcp__code__replace_symbol_body "$PP" "$OKT" "$(mj relative_path=src/Service/Foo.php "body=/* $MK_TODO */")")" "$M"
+expect_exit "mcp: a query of a tool named for a query is SQL" 2 "$(mcp mcp__lite__write_query "$PP" "$NOT" "$(mj 'query=DELETE FROM users')")" "$M"
+expect_exit "mcp: a query of a server named for a database is SQL" 2 "$(mcp mcp__postgres__run "$PP" "$NOT" "$(mj 'query=DROP TABLE users')")" "$M"
+expect_exit "mcp: a destructive statement in any query is SQL" 2 "$(mcp mcp__kb__ask "$PP" "$NOT" "$(mj 'query=TRUNCATE orders;')")" "$M"
+expect_exit "mcp: a question that reads like SQL is no statement" 0 \
+  "$(mcp mcp__kb__ask "$PP" "$NOT" "$(mj 'query=delete from the list the old items')")" "$M"
+expect_exit "mcp: a unified diff mentioning the envelope is read as a diff" 2 \
+  "$(mcp mcp__ide__apply_patch "$PP" "$OKT" "$(mj "patch=--- a/src/Service/Foo.php
++++ b/src/Service/Foo.php
+@@ -1,1 +1,3 @@
+ <?php
++// $MK_TODO later
++*** Begin Patch
+")")" "$M"
+OUT=$(python3 -c 'print("{\"tool_name\":\"mcp__x__y\",\"tool_input\":{\"a\":" + "[" * 5000 + "]" * 5000 + "}}")' | python3 "$M" 2>&1; echo "rc=$?")
+case "$OUT" in *'"ask"'*"rc=0"*) ok ;; *) ko "mcp: an input too deep to parse is asked about"; echo "$OUT" ;; esac
+expect_exit "mcp: a reading verb does not skip a tool that overwrites" 2 \
+  "$(mcp mcp__store__get_or_overwrite_file "$PP" "$OKT" "$(mj path=src/Service/Foo.php "content=<?php // $MK_TODO")")" "$M"
+# a baseline the repository tracks is never deleted, moved or emptied through the shell, and one written
+# where it is gone is measured against what HEAD holds
+TB="$EV/tracked"
+mkdir -p "$TB/old"
+echo '{}' > "$TB/composer.json"
+neon_entries a b > "$TB/phpstan-baseline.neon"
+git -C "$TB" init -q && git -C "$TB" add -A && git -C "$TB" -c user.email=t@example.com -c user.name=t commit -qm base
+neon_entries a > "$TB/untracked-baseline.neon"
+for cmd in "rm phpstan-baseline.neon" "rm -f phpstan-baseline.neon" "git rm -q phpstan-baseline.neon" \
+  "mv phpstan-baseline.neon $SCR/kept.neon" "git mv phpstan-baseline.neon old/phpstan-baseline.neon" \
+  "> phpstan-baseline.neon" ": > phpstan-baseline.neon" "cp /dev/null phpstan-baseline.neon" \
+  "truncate -s 0 phpstan-baseline.neon"; do
+  expect_exit "tracked baseline: \`$cmd\` refused" 2 "$(bash_json "$cmd" "$TB" "$NOT")" "$B"
+done
+OUT=$(bash_json "rm phpstan-baseline.neon" "$TB" "$NOT" | python3 "$B" 2>&1)
+case "$OUT" in *"removing"*"entries"*) ok ;; *) ko "tracked baseline: the refusal says to shrink it by removing entries"; echo "$OUT" ;; esac
+expect_exit "tracked baseline: an untracked baseline may be deleted" 0 "$(bash_json "rm untracked-baseline.neon" "$TB" "$NOT")" "$B"
+expect_exit "tracked baseline: other files may be deleted" 0 "$(bash_json "rm -f notes.txt" "$TB" "$NOT")" "$B"
+TB2="$EV/tracked-gone"
+mkdir -p "$TB2"
+echo '{}' > "$TB2/composer.json"
+neon_entries a b > "$TB2/phpstan-baseline.neon"
+git -C "$TB2" init -q && git -C "$TB2" add -A && git -C "$TB2" -c user.email=t@example.com -c user.name=t commit -qm base
+rm "$TB2/phpstan-baseline.neon"
+expect_exit "tracked baseline: written back wider than HEAD's refused" 2 \
+  "$(bash_json "cat > phpstan-baseline.neon <<'EOF'
+$(neon_entries a b c)
+EOF" "$TB2" "$NOT")" "$B"
+expect_exit "tracked baseline: written back narrower than HEAD's allowed" 0 \
+  "$(bash_json "cat > phpstan-baseline.neon <<'EOF'
+$(neon_entries a)
+EOF" "$TB2" "$NOT")" "$B"
+expect_exit "tracked baseline: a second baseline beside a tracked one refused" 2 \
+  "$(bash_json "cat > phpstan-baseline-more.neon <<'EOF'
+$(neon_entries z)
+EOF" "$TB" "$NOT")" "$B"
+expect_exit "tracked baseline: a first baseline where none is tracked allowed" 0 \
+  "$(bash_json "cat > phpstan-baseline.neon <<'EOF'
+$(neon_entries a)
+EOF" "$SCR" "$NOT")" "$B"
+expect_exit "tracked baseline: an MCP move of a tracked baseline away refused" 2 \
+  "$(mcp mcp__fs__move_file "$TB" "$NOT" "$(mj source=phpstan-baseline.neon destination=old/phpstan-baseline.neon)")" "$M"
+expect_exit "tracked baseline: an MCP write over a gone baseline is measured against HEAD" 2 \
+  "$(mcp mcp__fs__write_file "$TB2" "$NOT" "$(mj path=phpstan-baseline.neon "content=$(neon_entries a b c)")")" "$M"
+# command output that cannot be read is refused only onto PHP/JS own source and baselines
+for cmd in "pg_dump app > var/backup.sql" "mysqldump app > dump.sql" \
+  "vendor/bin/phpstan analyse --error-format=checkstyle > checkstyle.xml" \
+  "php bin/console config:dump-reference framework > config/packages/framework.yaml" \
+  "npx eslint -f html src > var/eslint.html" "rg -n Foo > var/hits.xml" "kubectl get deploy app -o yaml > deploy.yaml" \
+  "curl -s https://example.com/openapi.yaml > docs/openapi.yaml" "envsubst < tpl.yaml > k8s.yaml" \
+  "git log -p > var/history.sh" "some-generator > tests/fixtures/data.yaml" "some-generator > vendor/x.sh"; do
+  expect_exit "output: \`$cmd\` passes" 0 "$(bash_json "$cmd" "$GR" "$OKT")" "$B"
+done
+CLAUDE_PROJECT_DIR="$GR" expect_exit "cd: after a hook-only variable, a yaml write passes" 0 \
+  "$(bash_json "cd \"\$CLAUDE_PROJECT_DIR\" && echo x > var/z.yaml" "$SCR" "$OKT")" "$B"
+OUT=$(bash_json "cd \"\$NOT_SET_ANYWHERE\" && $CDT > src/New.php" "$GR" "$OKT" | python3 "$B" 2>&1)
+case "$OUT" in *CLAUDE_PROJECT_DIR*) ko "cd: the refusal does not advise a variable the shell does not have"; echo "$OUT" ;; *"absolute path"*) ok ;;
+  *) ko "cd: the refusal advises an absolute path"; echo "$OUT" ;; esac
+expect_exit "cd: \$(mktemp -d) is a directory outside every project" 0 \
+  "$(bash_json "cd \"\$(mktemp -d)\" && echo x > a.php" "$GR" "$NOT")" "$B"
+expect_exit "cd: after an unread cd, a yaml write passes" 0 "$(bash_json "cd \"\$WORKTREE_NOT_SET\" && echo 'a: 1' > config.yaml" "$GR" "$NOT")" "$B"
+expect_exit "cd: after an unread cd, an xml report into var/ passes" 0 \
+  "$(bash_json "cd \"\$(ls -d packages/*/ | head -1)\" && vendor/bin/phpunit > var/out.xml" "$GR" "$NOT")" "$B"
+expect_exit "cd: after an unread cd, PHP into var/ passes" 0 "$(bash_json "cd \"\$WORKTREE_NOT_SET\" && echo x > var/A.php" "$GR" "$NOT")" "$B"
+# tracked baselines: every way of deleting or moving one, a directory holding one, an operand that cannot be read
+TB3="$EV/tracked3"
+mkdir -p "$TB3/build" "$TB3/var/cache"
+echo '{}' > "$TB3/composer.json"
+neon_entries a b > "$TB3/phpstan-baseline.neon"
+neon_entries c > "$TB3/build/phpstan-baseline.neon"
+git -C "$TB3" init -q && git -C "$TB3" add -A && git -C "$TB3" -c user.email=t@example.com -c user.name=t commit -qm base
+for cmd in "mv -t $SCR phpstan-baseline.neon" "mv --target-directory=$SCR phpstan-baseline.neon" "rm -rf build" "rm -r build/" \
+  "git rm -r -q build" "unlink phpstan-baseline.neon" "rsync --remove-source-files phpstan-baseline.neon $SCR/" \
+  "rm \$(git ls-files '*baseline*')"; do
+  expect_exit "tracked baseline: \`$cmd\` refused" 2 "$(bash_json "$cmd" "$TB3" "$NOT")" "$B"
+done
+expect_exit "tracked baseline: removing a directory holding none passes" 0 "$(bash_json "rm -rf var/cache" "$TB3" "$NOT")" "$B"
+expect_exit "tracked baseline: copying one passes" 0 "$(bash_json "cp phpstan-baseline.neon $SCR/bl.neon" "$TB3" "$NOT")" "$B"
+TE="$EV/tracked-empty"
+mkdir -p "$TE"
+echo '{}' > "$TE/composer.json"
+printf 'parameters:\n  ignoreErrors: []\n' > "$TE/phpstan-baseline.neon"
+git -C "$TE" init -q && git -C "$TE" add -A && git -C "$TE" -c user.email=t@example.com -c user.name=t commit -qm base
+expect_exit "tracked baseline: one that ignores nothing may be deleted" 0 "$(bash_json "rm phpstan-baseline.neon" "$TE" "$NOT")" "$B"
+expect_exit "tracked baseline: one that ignores nothing may be git-rm'd" 0 "$(bash_json "git rm -q phpstan-baseline.neon" "$TE" "$NOT")" "$B"
+expect_exit "tracked baseline: one that ignores nothing may be moved by an MCP tool" 0 \
+  "$(mcp mcp__fs__move_file "$TE" "$NOT" "$(mj source=phpstan-baseline.neon destination=old-baseline.neon)")" "$M"
+# hard links lead into a project as symbolic ones do
+mkdir -p "$SCR/hl"
+ln "$GR/src/Sup.php" "$SCR/hl/existing.php"
+expect_exit "links: a hard link the line makes keeps the debt rule" 2 \
+  "$(bash_json "ln $GR/src/Old.php $SCR/hl/Old.php && printf '// $MK_TODO later\n' >> $SCR/hl/Old.php" "$SCR" "$OKT")" "$B"
+expect_exit "links: a tree of hard links the line makes keeps the debt rule" 2 \
+  "$(bash_json "cp -al $GR/src $SCR/hl/tree && printf '// $MK_TODO later\n' >> $SCR/hl/tree/Old.php" "$SCR" "$OKT")" "$B"
+expect_exit "links: an existing hard link into a project keeps the debt rule" 2 \
+  "$(bash_json "printf '// $MK_TODO later\n' >> $SCR/hl/existing.php" "$SCR" "$OKT")" "$B"
+expect_exit "links: a plain scratch file stays free" 0 "$(bash_json "printf '// $MK_TODO later\n' >> $SCR/hl/plain.php" "$SCR" "$OKT")" "$B"
+# sed commands are read with their s bodies skipped
+for script in 's/{x}/{y}/g' 's/a;p;b/c/' '$!N;s/\n\n\n/\n\n/;P;D'; do
+  expect_exit "sed: \`$script\` copies no line" 0 "$(bash_json "sed -i '' '$script' src/Sup.php" "$GR" "$OKT")" "$B"
+done
+expect_exit "sed: printing under -n keeps lines once" 0 "$(bash_json "sed -i '' -n '/class/p' src/Sup.php" "$GR" "$OKT")" "$B"
+# sed's output into project source: the repository's own lines plus the script's replacement text
+mkdir -p "$GR/src/Service"
+printf '<?php\nfinal class Foo\n{\n}\n' > "$GR/src/Service/Foo.php"
+for cmd in "sed 's/Foo/Bar/' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed 's/Foo/Bar/' src/Service/Foo.php | tee src/Service/Bar.php" \
+  "sed -n '/class/p' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed -e 's/Foo/Bar/' -e '/^{/d' -e 'y/F/B/' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed 's/replace/keep/' src/Old.php > src/Kept.php"; do
+  expect_exit "sed output: \`$cmd\` passes" 0 "$(bash_json "$cmd" "$GR" "$OKT")" "$B"
+done
+for cmd in "sed 's/Foo/Bar \/\/ $MK_TODO/' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed 's/Foo/date/e' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed '1e date' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed 's/Foo/Bar/w var/log.txt' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed '/class/r src/Old.php' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed '/class/p' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed '2h;4G' src/Service/Foo.php > src/Service/Bar.php" \
+  "sed 's/elsewhere/here/' $OR/Marked.php > src/Service/Bar.php" \
+  "sed 's/Foo/Bar/' src/Service/Missing.php > src/Service/Bar.php" \
+  "cat src/Service/Foo.php | sed 's/Foo/Bar/' > src/Service/Bar.php"; do
+  expect_exit "sed output: \`$cmd\` refused" 2 "$(bash_json "$cmd" "$GR" "$OKT")" "$B"
+done
+# mcp: a search's query is SQL only when it is a statement; arguments that are not words leave the command alone
+expect_exit "mcp: a docs search about deleting is no SQL" 0 \
+  "$(mcp mcp__docs__query-docs "$PP" "$NOT" "$(mj 'query=how to delete from a table in batches without locking')")" "$M"
+expect_exit "mcp: a docs search about dropping is no SQL" 0 "$(mcp mcp__docs__query-docs "$PP" "$NOT" "$(mj 'query=drop table if exists in a migration')")" "$M"
+expect_exit "mcp: a log query mentioning DROP TABLE is no SQL" 0 \
+  "$(mcp mcp__dash__query_loki_logs "$PP" "$NOT" "$(mj 'query={app="x"} |= "DROP TABLE"')")" "$M"
+expect_exit "mcp: prose to a database tool is no statement" 0 "$(mcp mcp__sqlite__run "$PP" "$NOT" "$(mj 'query=how to drop table safely')")" "$M"
+expect_exit "mcp: a statement to a database tool is SQL" 2 "$(mcp mcp__sqlite__run "$PP" "$NOT" "$(mj 'query=DROP TABLE x')")" "$M"
+OUT=$(mcp mcp__editor__execute_command "$PP" "$NOT" '{"command":"editor.action.formatDocument","args":[{"uri":"file:///x"}]}' | python3 "$M" 2>&1; echo "rc=$?")
+case "$OUT" in "rc=0") ok ;; *) ko "mcp: an editor command with object arguments passes"; echo "$OUT" ;; esac
+OUT=$(mcp mcp__proc__start_process "$PP" "$NOT" '{"command":"bash","args":[{"x":1}]}' | python3 "$M" 2>&1; echo "rc=$?")
+case "$OUT" in *'"ask"'*"rc=0"*) ok ;; *) ko "mcp: a shell with arguments that cannot be read is asked about"; echo "$OUT" ;; esac
+# ========== plan_skill_gate.py: evidence and scope; mcp_guard.py — end ==========
 
 # ---------- bash_guard.py: baseline regeneration ----------
 mkdir -p "$TMP/bl-has" "$TMP/bl-none"
@@ -1973,6 +2639,263 @@ with open(sys.argv[2]) as fh:
     rc = subprocess.run([sys.executable, sys.argv[1]], stdin=fh).returncode
 print("rc=%d seconds=%.1f" % (rc, time.time() - start))' "$B" "$BIG")
 case "$OUT" in "rc=0 seconds="[01].*) ok ;; *) ko "shell: a 58 KB heredoc with an apostrophe is judged in under two seconds"; echo "$OUT" ;; esac
+
+# ---------- debt_guard.py: comment directives, counted occurrences, what a baseline ignores ----------
+# (every directive is assembled from parts by dx, so this file carries none of its own;
+#  @@NAME@@ in an argument is replaced by the part named NAME, and the two characters \n by a newline)
+DX="$TMP/dx"
+mkdir -p "$DX/src"
+DX_PY='import json, sys
+P = {"TD": "TO" "DO", "TODOTAG": "@" "todo", "PI": "@php" "stan-ignore-next-line", "ED": "eslint" "-disable",
+     "NQ": "no" "qa", "TI": "type" ": ignore", "CS": "@codingStandards" "IgnoreLine",
+     "CSS": "@codingStandards" "IgnoreStart", "PCS": "php" "cs:ignore", "SC": "shellcheck" " disable=SC2086",
+     "TE": "@ts-expect" "-error", "NS": "NO" "SONAR", "SW": "Suppress" "Warnings", "PS": "@psalm" "-suppress",
+     "RC": "rubo" "cop:disable", "MD": "php" "md.xml", "UC": "as unknown" " as", "PM": "PHP" "MD.StaticAccess",
+     "PL": "@php" "stan-ignore-line"}
+def fill(s):
+    for k in sorted(P, key=len, reverse=True):
+        s = s.replace("@@%s@@" % k, P[k])
+    return s.replace("\\n", "\n").replace("\\t", "\t")
+mode, args = sys.argv[1], [fill(a) for a in sys.argv[2:]]
+if mode == "file":
+    open(args[0], "w").write(args[1])
+elif mode == "text":
+    sys.stdout.write(args[0])
+elif mode == "edit":
+    print(json.dumps({"tool_name": "Edit", "tool_input": {"file_path": args[0], "old_string": args[1], "new_string": args[2]}}))
+else:
+    print(json.dumps({"tool_name": "Write", "tool_input": {"file_path": args[0], "content": args[1]}}))'
+dx() { python3 -c "$DX_PY" "$@"; }
+# de <name> <want> <path> <old> <new>: an Edit;  dw2 <name> <want> <path> <content>: a Write
+de() { expect_exit "debt: $1" "$2" "$(dx edit "$3" "$4" "$5")" "$D"; }
+dw2() { expect_exit "debt: $1" "$2" "$(dx write "$3" "$4")" "$D"; }
+
+# a baseline is measured in what it ignores, never in lines
+NEON='parameters:\n    ignoreErrors:\n        -\n            message: "#^a$#"\n            identifier: argument.type\n            count: 1\n            path: src/A.php\n        -\n            message: "#^b$#"\n            count: 2\n            path: src/B.php\n'
+dx file "$DX/phpstan-baseline.neon" "$NEON"
+de "neon: an entry moved to another file, same line count, blocked" 2 "$DX/phpstan-baseline.neon" "path: src/A.php" "path: src/C.php"
+de "neon: a count raised from 1 to 40 blocked" 2 "$DX/phpstan-baseline.neon" "count: 1" "count: 40"
+de "neon: one entry removed and another added blocked" 2 "$DX/phpstan-baseline.neon" 'message: "#^a$#"' 'message: "#^c$#"'
+de "neon: dropping an entry's path widens it, blocked" 2 "$DX/phpstan-baseline.neon" '            path: src/B.php\n' ''
+de "neon: dropping an entry's count widens it, blocked" 2 "$DX/phpstan-baseline.neon" '            count: 2\n' ''
+de "neon: dropping an entry's identifier widens it, blocked" 2 "$DX/phpstan-baseline.neon" '            identifier: argument.type\n' ''
+de "neon: an includes added to a baseline blocked" 2 "$DX/phpstan-baseline.neon" 'parameters:' 'includes:\n    - more.neon\nparameters:'
+de "neon: a count lowered allowed" 0 "$DX/phpstan-baseline.neon" "count: 2" "count: 1"
+de "neon: an entry removed whole allowed" 0 "$DX/phpstan-baseline.neon" '        -\n            message: "#^b$#"\n            count: 2\n            path: src/B.php\n' ''
+de "neon: a reformatting edit that changes nothing ignored allowed" 0 "$DX/phpstan-baseline.neon" 'message: "#^b$#"' "message: '#^b\$#'"
+OUT=$(dx edit "$DX/phpstan-baseline.neon" "count: 1" "count: 40" | python3 "$D" 2>&1)
+case "$OUT" in *"grows the static-analysis baseline phpstan-baseline.neon"*"#^a\$#"*"src/A.php"*"§PHP static analysis"*) ok ;;
+  *) ko "debt: a baseline denial names the entry that grew"; echo "$OUT" ;; esac
+OUT=$(dx edit "$DX/phpstan-baseline.neon" "            path: src/B.php" "               path: src/B.php" | python3 "$D" 2>&1; echo "rc=$?")
+case "$OUT" in *"cannot read"*"rc=2"*) ok ;; *) ko "debt: a baseline left unreadable is refused and says so"; echo "$OUT" ;; esac
+dx file "$DX/phpstan-baseline.php" '<?php declare(strict_types = 1);\n\n$ignoreErrors = [];\n$ignoreErrors[] = [\n    '"'"'message'"'"' => '"'"'#^a$#'"'"',\n    '"'"'count'"'"' => 2,\n    '"'"'path'"'"' => __DIR__ . '"'"'/src/A.php'"'"',\n];\n\nreturn ['"'"'parameters'"'"' => ['"'"'ignoreErrors'"'"' => $ignoreErrors]];\n'
+de "php baseline: an entry added blocked" 2 "$DX/phpstan-baseline.php" '$ignoreErrors = [];' '$ignoreErrors = [];\n$ignoreErrors[] = ['"'"'message'"'"' => '"'"'#^x$#'"'"', '"'"'count'"'"' => 1, '"'"'path'"'"' => __DIR__ . '"'"'/src/X.php'"'"'];'
+de "php baseline: a count raised blocked" 2 "$DX/phpstan-baseline.php" "=> 2," "=> 3,"
+de "php baseline: a count lowered allowed" 0 "$DX/phpstan-baseline.php" "=> 2," "=> 1,"
+de "php baseline: code beyond its entries is unreadable, blocked" 2 "$DX/phpstan-baseline.php" 'return [' '$ignoreErrors = array_merge($ignoreErrors, require '"'"'more.php'"'"');\nreturn ['
+dx file "$DX/cycles-baseline.json" '{"cycles": [["a", "b"], ["c", "d"]]}\n'
+de "json: a one-line baseline gaining two cycles blocked" 2 "$DX/cycles-baseline.json" '["c", "d"]]' '["c", "d"], ["e", "f"], ["g", "h"]]'
+de "json: a cycle swapped for another blocked" 2 "$DX/cycles-baseline.json" '["c", "d"]' '["e", "f"]'
+de "json: a cycle removed allowed" 0 "$DX/cycles-baseline.json" ', ["c", "d"]' ''
+de "json: a baseline left invalid blocked" 2 "$DX/cycles-baseline.json" ']]}' ']]'
+de "eslint: a suppression moved to another file blocked" 2 "$TMP/eslint-suppressions.json" '"src/a.js"' '"src/b.js"'
+dx file "$DX/deptrac.baseline.yaml" 'deptrac:\n  skip_violations:\n    App\\Order\\Service:\n      - App\\Billing\\Invoice\n      - App\\Billing\\Payment\n'
+de "deptrac: a violation swapped for another blocked" 2 "$DX/deptrac.baseline.yaml" "Billing\\\\Payment" "Billing\\\\Refund"
+de "deptrac: a class gaining a violation blocked" 2 "$DX/deptrac.baseline.yaml" '      - App\\Billing\\Payment\n' '      - App\\Billing\\Payment\n      - App\\Billing\\Refund\n'
+de "deptrac: a violation removed allowed" 0 "$DX/deptrac.baseline.yaml" '      - App\\Billing\\Payment\n' ''
+dx file "$DX/psalm-baseline.xml" '<?xml version="1.0" encoding="UTF-8"?>\n<files psalm-version="5.0.0@x">\n  <file src="src/A.php">\n    <MixedAssignment>\n      <code>$a</code>\n      <code>$b</code>\n    </MixedAssignment>\n    <InvalidArgument occurrences="1">\n      <code>$c</code>\n    </InvalidArgument>\n  </file>\n</files>\n'
+de "psalm: an occurrence swapped for another blocked" 2 "$DX/psalm-baseline.xml" '<code>$b</code>' '<code>$z</code>'
+de "psalm: occurrences raised blocked" 2 "$DX/psalm-baseline.xml" 'occurrences="1"' 'occurrences="4"'
+de "psalm: an occurrence removed allowed" 0 "$DX/psalm-baseline.xml" '      <code>$b</code>\n' ''
+de "psalm: a file's last issue removed allowed" 0 "$DX/psalm-baseline.xml" '    <MixedAssignment>\n      <code>$a</code>\n      <code>$b</code>\n    </MixedAssignment>\n    <InvalidArgument occurrences="1">\n      <code>$c</code>\n    </InvalidArgument>\n' ''
+# the ignoreErrors of a PHPStan configuration may only shrink as well
+dx file "$DX/phpstan.neon" 'includes:\n    - phpstan-baseline.neon\nparameters:\n    level: 10\n    ignoreErrors:\n        - "#^old$#"\n'
+de "phpstan.neon: an inline ignoreErrors entry added blocked" 2 "$DX/phpstan.neon" '        - "#^old$#"' '        - "#^old$#"\n        - identifier: missingType.iterableValue'
+de "phpstan.neon: an inline ignoreErrors entry removed allowed" 0 "$DX/phpstan.neon" '    ignoreErrors:\n        - "#^old$#"\n' ''
+de "phpstan.neon: a change outside ignoreErrors allowed" 0 "$DX/phpstan.neon" 'level: 10' 'level: 9'
+dx file "$DX/phpstan.neon.dist" 'parameters:\n    level: 10\n'
+de "phpstan.neon.dist: ignoreErrors added blocked" 2 "$DX/phpstan.neon.dist" 'level: 10' 'level: 10\n    ignoreErrors:\n        - "#^x$#"'
+dw2 "a new phpstan.neon that ignores errors blocked" 2 "$DX/fresh/phpstan.neon" 'parameters:\n    ignoreErrors:\n        - "#^x$#"\n'
+de "a class named after a baseline is source, not a baseline" 0 "$DX/src/BaselineService.php" "x" 'final class BaselineService {}'
+
+# markers and suppressions are counted, not looked up as lines
+dx file "$DX/src/Old.php" '<?php\n// @@PI@@\n$a = 1;\n// @@TD@@: split the loader\n$z = 1;\n'
+de "one existing suppression lets no copy through" 2 "$DX/src/Old.php" '// @@PI@@\n$a = 1;' '// @@PI@@\n$a = 1;\n// @@PI@@\n$b = 1;\n// @@PI@@\n$c = 1;'
+de "re-indenting a block that carries a marker allowed" 0 "$DX/src/Old.php" '// @@TD@@: split the loader\n$z = 1;' 'if ($x) {\n    // @@TD@@: split the loader\n    $z = 1;\n}'
+de "moving a suppression within the edit allowed" 0 "$DX/src/Old.php" '// @@PI@@\n$a = 1;' '$y = 0;\n// @@PI@@\n$a = 1;'
+dw2 "a Write repeating the file's one suppression blocked" 2 "$DX/src/Old.php" '<?php\n// @@PI@@\n$a = 1;\n// @@PI@@\n$b = 1;\n// @@TD@@: split the loader\n$z = 1;\n'
+dw2 "a Write keeping the file's markers allowed" 0 "$DX/src/Old.php" '<?php\n\n    // @@PI@@\n    $a = 1;\n    // @@TD@@: split the loader\n    $z = 2;\n'
+
+# a directive counts in a comment, not as a substring anywhere in a line
+de "a CI line naming the mess detector's config allowed" 0 "$DX/ci.yml" "x" '      - run: vendor/bin/phpmd src text @@MD@@'
+de "a string literal naming a directive allowed" 0 "$DX/src/hint.ts" "x" "const hint = 'remove the @@ED@@ comment';"
+de "a comment mentioning a directive in prose allowed" 0 "$DX/src/hint.ts" "x" '// remove the @@ED@@ comment once the rule passes'
+de "a shell string with a marker allowed" 0 "$DX/a.sh" "x" 'echo "# @@TD@@ list"'
+de "a shell array length is no comment" 0 "$DX/a.sh" "x" 'n=${#items[@]}'
+de "a ts string with a double cast allowed" 0 "$DX/src/hint.ts" "x" "const doc = 'b @@UC@@ C';"
+de "a docblock line opening with a marker blocked" 2 "$DX/src/A.php" "x" '/**\n * @@TD@@   the task is open\n */'
+de "a docblock todo tag blocked" 2 "$DX/src/A.php" "x" '    /** @@TODOTAG@@ split */'
+de "codingStandardsIgnoreLine blocked" 2 "$DX/src/A.php" "x" '$a = 1; // @@CS@@'
+de "codingStandardsIgnoreStart blocked" 2 "$DX/src/A.php" "x" '// @@CSS@@'
+de "phpcs ignore blocked" 2 "$DX/src/A.php" "x" '$a = 1; // @@PCS@@ Generic.Files.LineLength'
+de "a shellcheck directive blocked" 2 "$DX/a.sh" "x" '# @@SC@@\necho $x'
+de "a chained noqa blocked" 2 "$DX/a.py" "x" 'import os  # unused  # @@NQ@@: F401'
+de "a mypy ignore blocked" 2 "$DX/a.py" "x" 'x = f()  # @@TI@@[attr-defined]'
+de "ts-expect-error in source blocked" 2 "$DX/src/a.ts" "x" 'f(); // @@TE@@ legacy'
+de "an eslint block comment blocked" 2 "$DX/src/a.ts" "x" '/* @@ED@@ */'
+de "an eslint directive in a vue template blocked" 2 "$DX/src/A.vue" "x" '<!-- @@ED@@ -->'
+de "a double cast in ts blocked" 2 "$DX/src/a.ts" "x" 'const a = b @@UC@@ C;'
+de "a psalm suppress tag blocked" 2 "$DX/src/A.php" "x" '/** @@PS@@ MixedAssignment */'
+de "a docblock SuppressWarnings tag blocked" 2 "$DX/src/A.php" "x" '/**\n * @@@SW@@(@@PM@@)\n */'
+de "a SuppressWarnings attribute blocked" 2 "$DX/src/A.php" "x" '#[\@@SW@@(@@PM@@)]'
+de "a sonar marker blocked" 2 "$DX/src/A.java" "x" 'int a = 1; // @@NS@@'
+de "a rubocop directive blocked" 2 "$DX/a.rb" "x" 'x = 1 # @@RC@@ Style/Foo'
+
+# through the shell: a sed that removes a suppression adds none, and a replaced file is counted too
+dx file "$TMP/php/src/Twice.php" '<?php\n// @@PI@@\n$a = 1;\n'
+expect_exit "bash write: sed deleting a suppression line allowed" 0 \
+  "$(bash_json "$(dx text "sed -i '' '\\|// @@PI@@|d' src/Twice.php")" "$TMP/php" "$TMP/t-skill-solid.jsonl")" "$B"
+expect_exit "bash write: sed deleting lines by a directive address allowed" 0 \
+  "$(bash_json "$(dx text "sed -i '' '/@@PI@@/,/x/d' src/Twice.php")" "$TMP/php" "$TMP/t-skill-solid.jsonl")" "$B"
+expect_exit "bash write: sed appending a marker after an address blocked" 2 \
+  "$(bash_json "$(dx text "sed -i '' '/x/a // @@TD@@ y' src/Twice.php")" "$TMP/php" "$TMP/t-skill-solid.jsonl")" "$B"
+expect_exit "bash write: a heredoc repeating the file's one suppression blocked" 2 \
+  "$(bash_json "$(dx text "cat > src/Twice.php <<'EOF'\n<?php\n// @@PI@@\n\$a = 1;\n// @@PI@@\n\$b = 1;\nEOF")" "$TMP/php" "$TMP/t-skill-solid.jsonl")" "$B"
+expect_exit "bash write: a heredoc keeping the file's one suppression allowed" 0 \
+  "$(bash_json "$(dx text "cat > src/Twice.php <<'EOF'\n<?php\n    // @@PI@@\n    \$a = 2;\nEOF")" "$TMP/php" "$TMP/t-skill-solid.jsonl")" "$B"
+expect_exit "bash write: a py string naming a directive allowed" 0 \
+  "$(bash_json "$(dx text "printf '%s' \"s = 'remove the @@ED@@ comment'\" > src/hint.py")" "$TMP/node" "$TMP/empty.jsonl")" "$B"
+
+# a *baseline*.json that is no suppression list (a size budget) keeps the line rule: its values are not entries
+dx file "$DX/size-baseline.json" '{\n  "dist/main.js": 120400\n}\n'
+de "json: a size budget lowered allowed" 0 "$DX/size-baseline.json" '120400' '118000'
+de "json: a size budget raised on its own line is not read, allowed" 0 "$DX/size-baseline.json" '120400' '130000'
+de "json: a size budget gaining a line blocked" 2 "$DX/size-baseline.json" '"dist/main.js": 120400' '"dist/main.js": 120400,\n  "dist/vendor.js": 90000'
+dx file "$DX/records-baseline.json" '[{"message": "a", "path": "src/A.php"}]\n'
+de "json: a list of message records is read entry by entry, a swap blocked" 2 "$DX/records-baseline.json" '"message": "a"' '"message": "b"'
+
+# a PHP baseline is read in linear time, with the comments PHPStan 1.12 writes, and `?>` ends nothing quietly
+P12='<?php declare(strict_types = 1);\n\n$ignoreErrors = [];\n$ignoreErrors[] = [\n\t// identifier: argument.type\n\t'"'"'message'"'"' => '"'"'#^a$#'"'"',\n\t'"'"'count'"'"' => 2,\n\t'"'"'path'"'"' => __DIR__ . '"'"'/src/A.php'"'"',\n];\n$ignoreErrors[] = [\n\t// identifier: method.notFound\n\t'"'"'message'"'"' => '"'"'#^b$#'"'"',\n\t'"'"'count'"'"' => 1,\n\t'"'"'path'"'"' => __DIR__ . '"'"'/src/B.php'"'"',\n];\n\nreturn ['"'"'parameters'"'"' => ['"'"'ignoreErrors'"'"' => $ignoreErrors]];\n'
+mkdir -p "$DX/p12"
+dx file "$DX/p12/phpstan-baseline.php" "$P12"
+de "php baseline with identifier comments: an entry removed allowed" 0 "$DX/p12/phpstan-baseline.php" '$ignoreErrors[] = [\n\t// identifier: method.notFound\n\t'"'"'message'"'"' => '"'"'#^b$#'"'"',\n\t'"'"'count'"'"' => 1,\n\t'"'"'path'"'"' => __DIR__ . '"'"'/src/B.php'"'"',\n];\n' ''
+de "php baseline with identifier comments: a count raised blocked" 2 "$DX/p12/phpstan-baseline.php" "=> 2," "=> 9,"
+de "php baseline: a line comment closed by ?> hiding a statement blocked" 2 "$DX/p12/phpstan-baseline.php" '$ignoreErrors = [];' '$ignoreErrors = []; // regenerated ?><?php $ignoreErrors = array_merge($ignoreErrors, [['"'"'message'"'"' => '"'"'#.*#'"'"']]);'
+mkdir -p "$DX/big"
+python3 -c 'import sys
+entry = "$ignoreErrors[] = [\n\t\x27message\x27 => \x27#^m%d$#\x27,\n\t\x27count\x27 => 1,\n\t\x27path\x27 => __DIR__ . \x27/src/F%d.php\x27,\n];\n"
+body = "".join(entry % (i, i) for i in range(300))
+open(sys.argv[1], "w").write("<?php declare(strict_types = 1);\n\n$ignoreErrors = [];\n" + body + "$ignoreErrors = array_merge($ignoreErrors, []);\n\nreturn [\x27parameters\x27 => [\x27ignoreErrors\x27 => $ignoreErrors]];\n")' "$DX/big/phpstan-baseline.php"
+# dx_timed <json-file>: run the debt guard on it, print rc and seconds (stopped after 10 s, as the hook would be)
+dx_timed() { python3 -c 'import subprocess, sys, time
+start = time.time()
+try:
+    with open(sys.argv[2]) as fh:
+        rc = subprocess.run([sys.executable, sys.argv[1]], stdin=fh, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=10).returncode
+except subprocess.TimeoutExpired:
+    rc = -1
+print("rc=%d seconds=%.1f" % (rc, time.time() - start))' "$D" "$1"; }
+python3 -c 'import json, sys
+print(json.dumps({"tool_name": "Edit", "tool_input": {"file_path": sys.argv[1], "old_string": "\t\x27count\x27 => 1,\n\t\x27path\x27 => __DIR__ . \x27/src/F7.php\x27,", "new_string": "\t\x27path\x27 => __DIR__ . \x27/src/F7.php\x27,"}}))' "$DX/big/phpstan-baseline.php" > "$DX/big.json"
+OUT=$(dx_timed "$DX/big.json")
+case "$OUT" in "rc=2 seconds="[01].*) ok ;; *) ko "debt: a 300-entry PHP baseline with a foreign statement is refused in under two seconds"; echo "$OUT" ;; esac
+# a NEON line with a long run of spaces and no colon is read in linear time; a line past the bound is unreadable
+for n in 60000 120000; do
+  mkdir -p "$DX/sp$n"
+  printf 'parameters:\n\tignoreErrors:\n\t\t-\n\t\t\tmessage: "#^a$#"\n\t\t\tcount: 1\n\t\t\tpath: src/A.php\n' > "$DX/sp$n/phpstan-baseline.neon"
+  python3 -c 'import json, sys
+new = "\t\t\tpath: src/A.php\n\t\t- \x27#.*#\x27\n\t\t- ~^a" + " " * int(sys.argv[2]) + "b$~"
+print(json.dumps({"tool_name": "Edit", "tool_input": {"file_path": sys.argv[1], "old_string": "\t\t\tpath: src/A.php", "new_string": new}}))' "$DX/sp$n/phpstan-baseline.neon" "$n" > "$DX/sp$n.json"
+  OUT=$(dx_timed "$DX/sp$n.json")
+  case "$OUT" in "rc=2 seconds="[01].*) ok ;; *) ko "debt: a NEON line of $n spaces is judged in under two seconds"; echo "$OUT" ;; esac
+done
+
+# `#` opens a comment anywhere outside a string in Python, Ruby and PHP (not PHP's `#[`)
+de "py: a mypy ignore glued to code blocked" 2 "$DX/b.py" "x" 'x = f()# @@TI@@'
+de "py: a noqa glued to code blocked" 2 "$DX/b.py" "x" 'import os#@@NQ@@'
+de "rb: a rubocop directive glued to code blocked" 2 "$DX/b.rb" "x" 'x = 1# @@RC@@ Metrics'
+de "php: a marker glued to code blocked" 2 "$DX/src/B.php" "x" 'return $x;# @@TD@@ later'
+de "php: an ignore tag glued to code blocked" 2 "$DX/src/B.php" "x" '$y = $x->foo();#@@PL@@'
+# a PHP file is a baseline only under PHPStan's names
+mkdir -p "$DX/database/migrations"
+dx file "$DX/database/migrations/2024_01_01_000000_create_baselines_table.php" '<?php\nreturn new class {};\n'
+de "php: a migration named after baselines is source, allowed" 0 "$DX/database/migrations/2024_01_01_000000_create_baselines_table.php" 'return new class {};' 'return new class { public function up(): void {} };'
+dx file "$DX/src/price-baseline.php" '<?php\n$a = 1;\n'
+de "php: price-baseline.php is source, allowed" 0 "$DX/src/price-baseline.php" '$a = 1;' '$a = 2;'
+# strings that run over lines are strings; the docblock guess is for an Edit fragment only
+dw2 "py: a marker inside a docstring allowed" 0 "$DX/doc.py" 'def f():\n    """\n    Example:\n        x = 1  # @@TD@@ is prose here\n    """\n    return 1\n'
+dw2 "py: a suppression after a closed docstring blocked" 2 "$DX/doc2.py" 'def f():\n    """Doc."""\n    import os  # @@NQ@@\n'
+dw2 "ts: a directive inside a template literal allowed" 0 "$DX/src/tpl.ts" 'const t = `\n// @@ED@@\n`;\nexport default t;\n'
+dw2 "ts: a multiplication continuation does not open a comment in a whole file" 0 "$DX/src/mul.ts" 'const a = b\n  * c;\nconst hint = "// @@ED@@ is not allowed";\n'
+de "ts: a quote in a regex literal does not hide a trailing directive" 2 "$DX/src/re.ts" "x" 'const r = /"/; foo(); // @@ED@@-line -- "why"'
+# a NEON baseline may hold a multi-line string
+mkdir -p "$DX/ml"
+dx file "$DX/ml/phpstan-baseline.neon" "parameters:\n\tignoreErrors:\n\t\t-\n\t\t\tmessage: '''\n\t\t\t\t#^Multi\n\t\t\t\tline$#\n\t\t\t'''\n\t\t\tcount: 3\n\t\t\tpath: src/A.php\n"
+de "neon: a multi-line message's count lowered allowed" 0 "$DX/ml/phpstan-baseline.neon" 'count: 3' 'count: 2'
+de "neon: a multi-line message's count raised blocked" 2 "$DX/ml/phpstan-baseline.neon" 'count: 3' 'count: 4'
+# psalm: a counted element is an entry, whether or not it still holds children
+mkdir -p "$DX/ps"
+dx file "$DX/ps/psalm-baseline.xml" '<?xml version="1.0" encoding="UTF-8"?>\n<files psalm-version="5.0.0@x">\n  <file src="src/A.php">\n    <MixedAssignment>\n      <code>$x</code>\n    </MixedAssignment>\n  </file>\n</files>\n'
+de "psalm: an issue turned into a counted empty element blocked" 2 "$DX/ps/psalm-baseline.xml" '<MixedAssignment>\n      <code>$x</code>\n    </MixedAssignment>' '<MixedAssignment occurrences="50"/>'
+de "psalm: a file turned into a counted empty element blocked" 2 "$DX/ps/psalm-baseline.xml" '<file src="src/A.php">\n    <MixedAssignment>\n      <code>$x</code>\n    </MixedAssignment>\n  </file>' '<file src="src/A.php" occurrences="9"/>'
+# a PHPStan configuration: ignoreErrors in flow style, and a new include, are read
+mkdir -p "$DX/cfg"
+dx file "$DX/cfg/phpstan.neon" 'parameters:\n    level: 10\n    paths:\n        - src\n'
+de "phpstan.neon: flow-style parameters with ignoreErrors blocked" 2 "$DX/cfg/phpstan.neon" 'parameters:\n    level: 10\n    paths:\n        - src\n' "parameters: {level: 10, paths: [src], ignoreErrors: ['#.*#']}\n"
+de "phpstan.neon: an include that cannot be read blocked" 2 "$DX/cfg/phpstan.neon" 'parameters:' 'includes:\n    - phpstan-extra.neon\nparameters:'
+# an added include is judged by the file it names: a rule set that ignores nothing is no growth
+mkdir -p "$DX/cfg/vendor/acme/strict" "$DX/cfg/conf"
+dx file "$DX/cfg/vendor/acme/strict/rules.neon" 'parameters:\n    strictRules:\n        allRules: true\nconditionalTags:\n    Acme\\Strict\\Rule:\n        phpstan.rules.rule: %strictRules.allRules%\nservices:\n    -\n        class: Acme\\Strict\\Rule\n        tags:\n            - phpstan.rules.rule\n'
+dx file "$DX/cfg/conf/loose.neon" 'parameters:\n    ignoreErrors:\n        - "#.*#"\n'
+dx file "$DX/cfg/conf/chain.neon" 'includes:\n    - loose.neon\n'
+dx file "$DX/cfg/conf/phpstan-baseline.neon" 'parameters:\n    ignoreErrors: []\n'
+de "phpstan.neon: an include of a rule set that ignores nothing allowed" 0 "$DX/cfg/phpstan.neon" 'parameters:' 'includes:\n    - vendor/acme/strict/rules.neon\nparameters:'
+de "phpstan.neon: an include of a file that ignores errors blocked" 2 "$DX/cfg/phpstan.neon" 'parameters:' 'includes:\n    - conf/loose.neon\nparameters:'
+de "phpstan.neon: an include whose own include ignores errors blocked" 2 "$DX/cfg/phpstan.neon" 'parameters:' 'includes:\n    - conf/chain.neon\nparameters:'
+de "phpstan.neon: an include of a baseline blocked" 2 "$DX/cfg/phpstan.neon" 'parameters:' 'includes:\n    - conf/phpstan-baseline.neon\nparameters:'
+# whether a baseline ignores nothing, for a caller that removes a paid-off one
+OUT=$(python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import debt_guard
+print(debt_guard.baseline_ignores_nothing(sys.argv[2]), debt_guard.baseline_ignores_nothing(sys.argv[3]),
+      debt_guard.baseline_ignores_nothing(sys.argv[4]))' "$H" "$DX/cfg/conf/phpstan-baseline.neon" "$DX/ml/phpstan-baseline.neon" "$DX/cfg/conf/missing-baseline.neon" 2>&1)
+case "$OUT" in "True False False") ok ;; *) ko "debt: baseline_ignores_nothing tells an empty baseline from a full or missing one"; echo "$OUT" ;; esac
+# a baseline the repository tracks cannot be recreated wider, nor joined by a second one beside it
+GR="$DX/repo"
+mkdir -p "$GR"
+git -C "$GR" init -q
+printf 'parameters:\n\tignoreErrors:\n\t\t-\n\t\t\tmessage: "#^a$#"\n\t\t\tcount: 1\n\t\t\tpath: src/A.php\n' > "$GR/phpstan-baseline.neon"
+git -C "$GR" add phpstan-baseline.neon
+git -C "$GR" -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false commit -qm base --no-verify
+rm "$GR/phpstan-baseline.neon"
+dw2 "a deleted tracked baseline written back wider blocked" 2 "$GR/phpstan-baseline.neon" "parameters:\n\tignoreErrors:\n\t\t- '#.*#'\n"
+dw2 "a deleted tracked baseline written back narrower allowed" 0 "$GR/phpstan-baseline.neon" "parameters:\n\tignoreErrors: []\n"
+dw2 "a second baseline beside a tracked one blocked" 2 "$GR/phpstan-baseline-new.neon" "parameters:\n\tignoreErrors:\n\t\t- '#.*#'\n"
+mkdir -p "$DX/repo2"
+git -C "$DX/repo2" init -q
+dw2 "the first baseline of a repository allowed" 0 "$DX/repo2/phpstan-baseline.neon" "parameters:\n\tignoreErrors:\n\t\t- '#^a$#'\n"
+OUT=$(dx write "$GR/phpstan-baseline.before.neon" "parameters:\n\tignoreErrors:\n\t\t- '#^a\$#'\n" | python3 "$D" 2>&1; echo "rc=$?")
+case "$OUT" in *"second-baseline rule"*"var/"*"rc=2"*) ok ;; *) ko "debt: a copy beside a tracked baseline is refused as a second baseline, pointing to var/"; echo "$OUT" ;; esac
+
+# a JSX closing tag is no regular expression: a directive after it is read
+dw2 "tsx: a directive after a closing tag blocked" 2 "$DX/src/A.tsx" 'export const A = ({ x }) => {\n  return <div>{x}</div>; // @@ED@@-line react/no-danger\n};\n'
+dw2 "tsx: a block-comment directive after a closing tag blocked" 2 "$DX/src/B.tsx" 'export const B = () => (\n  <p>\n    <span>a</span>{/* @@ED@@-line */}\n  </p>\n);\n'
+dw2 "jsx: a closing tag followed by text with a slash allowed" 0 "$DX/src/C.jsx" 'export const C = () => <p><b>a</b> and/or b</p>;\n'
+# a line of many unclosed regex, string or comment starts is read in linear time
+python3 -c 'import json, sys
+cases = [("re.json", "/re.js", "(/[" * 8000), ("q.json", "/q.js", "\"\\\"" * 8000),
+         ("nq.json", "/nq.py", "x = 1  # " + "# no" "qa " * 8000)]
+for name, file, line in cases:
+    json.dump({"tool_name": "Write", "tool_input": {"file_path": sys.argv[1] + file, "content": line + "\n"}},
+              open(sys.argv[1] + "/" + name, "w"))' "$DX/src"
+for c in re q; do
+  OUT=$(dx_timed "$DX/src/$c.json")
+  case "$OUT" in "rc=0 seconds="[01].*) ok ;; *) ko "debt: a 24 KB line of unclosed starts ($c) is judged in under two seconds"; echo "$OUT" ;; esac
+done
+OUT=$(dx_timed "$DX/src/nq.json")
+case "$OUT" in "rc=2 seconds="[01].*) ok ;; *) ko "debt: a line of 8000 chained directives is refused in under two seconds"; echo "$OUT" ;; esac
+# ---------- end of debt_guard.py: comment directives, counted occurrences, what a baseline ignores ----------
 
 echo "----------------------------------------"
 echo "hooks tests: $PASS passed, $FAIL failed"

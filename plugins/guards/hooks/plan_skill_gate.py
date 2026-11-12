@@ -18,20 +18,44 @@ rubric being loaded, when the target is
 
 Two core skills, one rule each, published by the `architecture` plugin as
 `architecture:clean-architecture-php` and `architecture:clean-architecture-js`.
-A skill counts as loaded after a `Skill` tool call for it (namespaced or bare),
-or a Read/Bash/Grep that names its SKILL.md or its
-references/implementer-checklist.md (agents whose tool list excludes Skill; the
-implementer's cut of the rubric). Files are recognised by their
+
+Only evidence that a rubric file's text reached the model counts as loading it:
+
+  - the skill's base-directory announcement: the harness-written user entry
+    (`isMeta`) whose text starts "Base directory for this skill: <dir>" and
+    carries the skill's text after it. The Skill tool writes it right after
+    its launch result (`sourceToolUseID` names the call, which must not have
+    failed); a skill the person invokes writes it with no tool call. It stands
+    for the skill's SKILL.md.
+  - a successful Read of the file by its absolute path: the tool result paired
+    with that Read's id, not an error, holding the file's text (below).
+  - a Bash call naming the file whose output holds the file's text — so `cat`,
+    `sed -n`, `head` and `tail` count, and `ls`, `test -f`, `wc`, `stat`,
+    `git log` and a `cat … | wc` do not. `~`, `$HOME` and variables assigned
+    on the same command line are expanded to find the file.
+
+"The file's text" is a run of consecutive non-blank lines of the file as it is
+on disk now (five, or all of a shorter file), line numbers aside, that no
+sibling skill's file of the same name also holds (two SKILL.md files share a
+section). The file must lie, symbolic links resolved, where skills are
+installed: the Claude config directory's `skills/` or `plugins/`, a known
+marketplace's install location, the marketplace clone this hook ships in, or a
+base directory the transcript announced. A copy elsewhere, a file that cannot
+be found, or a result showing a line or two proves nothing.
+
+A mention is not a load: a Grep, a failed or unanswered Read, a listing, or
+the denial's own relative path read back. SKILL.md may also be shown through
+references/implementer-checklist.md (agents whose tool list excludes Skill;
+the implementer's cut of the rubric). Files are recognised by their
 `<skill directory>/…` suffix, so a plugin cache (with its version segment), a
 marketplace clone, a `--plugin-dir` checkout and a user skill directory all
-count. Merely mentioning the skill directory (`ls`, `git log`) does not count,
-and one skill never stands in for another.
+count, and one skill never stands in for another.
 
 Loading SKILL.md alone is not loading the skill — a session that read only the
 main file shipped a closed value object in a module's published data contract
 with no extension point, exactly what the references would have caught. So the
-gate also requires the references the target needs, each as a Read/Bash/Grep
-that names `<skill>/references/<name>.md`:
+gate also requires the references the target needs, each shown as above from
+`<skill>/references/<name>.md`:
 
   PHP source   solid.md; ddd.md in a domain directory (Api/Data, Model, Entity,
                Domain, ValueObject, Aggregate).
@@ -85,12 +109,17 @@ skipped, and the core rules run as if no stack were installed.
 The denial names exactly the files still missing, and tells the model to read
 each reference from the base directory the Skill tool reports for the skill.
 
-A subagent's turns are recorded in its own file, `<session
-id>/subagents/agent-*.jsonl`, but its PreToolUse hooks are handed the PARENT's
-`<session id>.jsonl` — so reading only `transcript_path` cannot see the Skill
-call the subagent just made, and `pipeline:devils-advocate` (the agent this gate
-exists for) got stuck in a load-retry-blocked loop. Hence the whole family is scanned:
-the given transcript, its parent, and the session's subagent transcripts.
+Whose evidence counts: the caller's own transcript, and nothing else. A
+subagent starts with a fresh context, so its parent's loads never reached it;
+a sibling's never did either, and a subagent's loads never reach the main
+thread. A subagent's turns are recorded in `<session id>/subagents/agent-<agent
+id>.jsonl`, while its PreToolUse hooks are handed the session's `<session
+id>.jsonl` together with an `agent_id`; the gate reads that subagent's own
+file (evidence_transcript). Without an `agent_id`, a call whose
+`tool_use_id` is logged in one of the session's subagent transcripts is that
+subagent's; any other call is the main thread's, judged on the transcript it
+was handed. A subagent transcript that is not there, or an agent id that is
+not a plain name, proves nothing either way, and the gate does not block.
 
 Denial is exit 2: the message goes back to the model, which loads the rubric and
 retries. Kill switch: CLAUDE_NO_PLAN_SKILL_GATE=1.
@@ -166,6 +195,23 @@ REQUIRED_FILE = re.compile(r"^([A-Za-z0-9_][\w.-]*)/([\w.-]+\.md)$")
 REQUIREMENT_KINDS = ("php_source", "js_source", "plan_php", "plan_js")
 DECLARATION_LIMIT = 64_000  # bytes; a declaration is a short list of words
 REGISTRY_LIMIT = 16  # declarations read per session
+
+# What proves a rubric file reached the model
+ANNOUNCEMENT = "Base directory for this skill:"
+NUMBERED_LINE = re.compile(r"^\s*\d+(?:\t|→)\s*\S", re.M)  # a line of a Read result, or of `cat -n`
+LINE_NUMBER = re.compile(r"^\s*\d+(?:\t|→)")
+TEXT_RUN = 5  # consecutive non-blank lines of a file that a command's output must hold
+POSITIONS_PER_LINE = 16  # places one repeated line (a fence, a rule) is tried at
+RUBRIC_TEXT_LIMIT = 1_000_000  # bytes of a rubric file read to compare
+OUTPUT_LIMIT = 2_000_000  # characters of a command's output compared
+ASSIGNMENT = re.compile(r"(?:^|(?<=[\s;&|(]))([A-Za-z_]\w*)=(?:\"([^\"$`]*)\"|'([^']*)'|([^\s;&|()<>\"'`$]*))")
+VARIABLE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+TOKEN_BREAK = set(" \t\n\"'`;&|()<>=")
+# Whose transcript a call is judged on
+AGENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+TOOL_USE_ID = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
+SUBAGENT_SCAN_LIMIT = 64  # subagent transcripts searched for a call's id, newest first
+SIBLING_LIMIT = 32  # sibling skill directories a shown run is compared with
 
 
 @dataclass(frozen=True)
@@ -335,25 +381,63 @@ def browser_pattern(stacks):
     return re.compile(r"\b(?:" + "|".join(re.escape(marker) for marker in markers) + r")\b")
 
 
-def related_transcripts(transcript_path: str) -> list:
-    """List the transcripts that could hold this session's load of the rubric.
+def transcript_holding(subagents: str, use_id: str):
+    """The subagent transcript that logs the tool call `use_id`, newest first; None when none does.
 
-    @param transcript_path Path the hook was handed — a session or subagent JSONL.
-    @return Existing paths: the given one, its parent session, and that session's subagents.
+    @param subagents The session's `subagents` directory.
+    @param use_id The call's id, matched only as a tool_use's own `"id"` field.
     """
-    directory, base = os.path.split(transcript_path)
-    paths = [transcript_path]
-    if os.path.basename(directory) == "subagents":
-        session_dir = os.path.dirname(directory)
-        paths.append(f"{session_dir}.jsonl")
-    else:
-        session_dir = os.path.join(directory, base[: -len(".jsonl")] if base.endswith(".jsonl") else base)
-    paths.extend(sorted(glob.glob(os.path.join(session_dir, "subagents", "*.jsonl"))))
-    seen = []
-    for path in paths:
-        if path not in seen and os.path.isfile(path):
-            seen.append(path)
-    return seen
+    marker = '"id":"' + use_id + '"'
+    try:
+        names = [name for name in os.listdir(subagents) if name.startswith("agent-") and name.endswith(".jsonl")]
+    except OSError:
+        return None
+    paths = [os.path.join(subagents, name) for name in names]
+
+    def newest(path):
+        try:
+            return -os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    for path in sorted(paths, key=newest)[:SUBAGENT_SCAN_LIMIT]:
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                if any(marker in line for line in fh):
+                    return path
+        except OSError:
+            continue
+    return None
+
+
+def evidence_transcript(data) -> str:
+    """The transcript whose loads count for one hook call: the caller's own.
+
+    A subagent's call comes with an `agent_id` and the session's transcript; its own turns are
+    `<session>/subagents/agent-<agent id>.jsonl`. Without an `agent_id`, the subagent transcript
+    that logs the call's `tool_use_id` is the caller's; otherwise the transcript handed over is.
+
+    @param data The hook input.
+    @return A transcript path, or "" when the caller cannot be told safely (nothing is then proven).
+    """
+    if not isinstance(data, dict):
+        return ""
+    transcript = data.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript:
+        return ""
+    if os.path.basename(os.path.dirname(transcript)) == "subagents":
+        return transcript
+    session_dir = transcript[: -len(".jsonl")] if transcript.endswith(".jsonl") else transcript
+    subagents = os.path.join(session_dir, "subagents")
+    agent = data.get("agent_id")
+    if agent not in (None, ""):
+        if not isinstance(agent, str) or not AGENT_ID.match(agent):
+            return ""
+        return os.path.join(subagents, f"agent-{agent}.jsonl")
+    use_id = data.get("tool_use_id")
+    if isinstance(use_id, str) and TOOL_USE_ID.match(use_id):
+        return transcript_holding(subagents, use_id) or transcript
+    return transcript
 
 
 def skill_called(value, skills=SKILLS) -> str:
@@ -366,51 +450,284 @@ def skill_called(value, skills=SKILLS) -> str:
     return name if name in skills else ""
 
 
+def result_text(item: dict) -> str:
+    """The text of a tool result: its string content, or its text blocks joined."""
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(block.get("text", "")) for block in content
+                         if isinstance(block, dict) and block.get("type") == "text")
+    return ""
+
+
+def failed(item: dict, text: str) -> bool:
+    """Report whether a tool result is an error."""
+    return item.get("is_error") is True or text.lstrip().startswith("<tool_use_error>")
+
+
+def announced_skill(text: str, skills) -> str:
+    """The rubric skill a base-directory announcement brings in with its text, else "".
+
+    @param text A text block of a harness-written user entry.
+    """
+    if not text.startswith(ANNOUNCEMENT):
+        return ""
+    header, _, body = text.partition("\n")
+    directory = header[len(ANNOUNCEMENT):].strip().rstrip("/")
+    skill = os.path.basename(directory)
+    return skill if skill in skills and body.strip() else ""
+
+
+def rubric_suffix(path: str, rubric_file):
+    """The rubric file a path ends in, as "<skill>/<basename>", or "" when it ends in none."""
+    for match in rubric_file.finditer(path):
+        if match.end() == len(path):
+            skill, main, ref = match.groups()
+            return f"{skill}/{main or ref}"
+    return ""
+
+
+def expand_command(command: str) -> str:
+    """The command with `~`, `$HOME` and the variables it assigns itself replaced by their values.
+
+    Only literal values count: an assignment whose value holds an expansion is not read.
+    """
+    home = os.path.expanduser("~")
+    text = re.sub(r"(?:(?<=^)|(?<=[\s=:\"']))~(?=/)", lambda _: home, command)
+    text = VARIABLE.sub(lambda m: home if (m.group(1) or m.group(2)) == "HOME" else m.group(0), text)
+    values = {}
+    for match in ASSIGNMENT.finditer(text):
+        values[match.group(1)] = next(value for value in match.groups()[1:] if value is not None)
+    return VARIABLE.sub(lambda m: values.get(m.group(1) or m.group(2), m.group(0)), text)
+
+
+def shell_named_files(command: str, cwd, rubric_file) -> list:
+    """The rubric files a shell command names, each with the file on disk it names.
+
+    @param cwd The directory the command ran in, for a relative path; None when unknown.
+    @return [(key "<skill>/<basename>", existing path)], a file that cannot be found left out.
+    """
+    text = expand_command(command)
+    found = []
+    for match in rubric_file.finditer(text):
+        if match.end() < len(text) and text[match.end()] not in TOKEN_BREAK:
+            continue  # the name runs on: "solid.md.bak" is another file
+        start = match.start()
+        while start > 0 and text[start - 1] not in TOKEN_BREAK:
+            start -= 1
+        path = text[start:match.end()]
+        if not os.path.isabs(path):
+            if not (isinstance(cwd, str) and os.path.isabs(cwd)):
+                continue
+            path = os.path.join(cwd, path)
+        if os.path.isfile(path):
+            skill, main, ref = match.groups()
+            found.append((f"{skill}/{main or ref}", path))
+    return found
+
+
+def nonblank_lines(path: str):
+    """The file's non-blank lines, right-trimmed; None when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            text = fh.read(RUBRIC_TEXT_LIMIT)
+    except OSError:
+        return None
+    return [line.rstrip() for line in text.splitlines() if line.strip()]
+
+
+def sibling_texts(path: str, key: str) -> list:
+    """The same file of the other skills beside this one (`<skills>/*/<file>`), as non-blank lines.
+
+    A run of lines one of them also holds (a section two SKILL.md files share) proves nothing.
+    """
+    skill, name = key.split("/", 1)
+    relative = "SKILL.md" if name == "SKILL.md" else "references/" + name
+    skill_dir = path[: -len(relative)].rstrip("/")
+    if os.path.basename(skill_dir) != skill:
+        return []
+    parent = os.path.dirname(skill_dir)
+    try:
+        names = sorted(os.listdir(parent))[:SIBLING_LIMIT]
+    except OSError:
+        return []
+    out = []
+    for other in names:
+        if other == skill:
+            continue
+        lines = nonblank_lines(os.path.join(parent, other, relative))
+        if lines:
+            out.append(lines)
+    return out
+
+
+def held_by(window: list, texts: list) -> bool:
+    """Report whether one of `texts` holds the lines of `window` in a row."""
+    width = len(window)
+    return any(text[i:i + width] == window for text in texts for i in range(len(text) - width + 1))
+
+
+def shows_text(output: str, path: str, key: str = "") -> bool:
+    """Report whether a tool's output holds the text of the rubric file at `path`.
+
+    It must hold TEXT_RUN consecutive non-blank lines of the file (all of a shorter one) in a row,
+    blank lines and line numbers (`cat -n`, the Read tool's) aside, and a run no sibling skill's
+    file of the same name holds as well.
+    """
+    wanted = nonblank_lines(path)
+    if not wanted:
+        return False
+    need = min(TEXT_RUN, len(wanted))
+    places = {}
+    for j, line in enumerate(wanted):
+        spots = places.setdefault(line, [])
+        if len(spots) < POSITIONS_PER_LINE:
+            spots.append(j)
+    shown = [LINE_NUMBER.sub("", line, count=1).rstrip() for line in output[:OUTPUT_LIMIT].splitlines()]
+    shown = [line for line in shown if line.strip()]
+    siblings = None
+    for i, line in enumerate(shown):
+        for j in places.get(line, ()):
+            k = 1
+            while k < need and i + k < len(shown) and j + k < len(wanted) and shown[i + k] == wanted[j + k]:
+                k += 1
+            if k < need:
+                continue
+            if siblings is None:
+                siblings = sibling_texts(path, key) if key else []
+            if not held_by(wanted[j:j + need], siblings):
+                return True
+    return False
+
+
+def installed_roots(announced) -> list:
+    """The directories a rubric file must lie under to count: where skills and plugins are installed.
+
+    The Claude config directory's `skills/` and `plugins/`, the install location of every known
+    marketplace, the marketplace clone this hook ships in, and each skill base directory the
+    transcript announced. A copy of a rubric file anywhere else proves nothing.
+    """
+    config = os.path.realpath(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"))
+    roots = {os.path.join(config, "skills"), os.path.join(config, "plugins")}
+    try:
+        with open(os.path.join(config, "plugins", "known_marketplaces.json"), encoding="utf-8") as fh:
+            marketplaces = json.loads(fh.read(DECLARATION_LIMIT))
+    except Exception:
+        marketplaces = {}
+    if isinstance(marketplaces, dict):
+        for entry in list(marketplaces.values())[:REGISTRY_LIMIT]:
+            location = entry.get("installLocation") if isinstance(entry, dict) else None
+            if isinstance(location, str) and os.path.isabs(location):
+                roots.add(os.path.realpath(location))
+    kit = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))))
+    if os.path.isfile(os.path.join(kit, ".claude-plugin", "marketplace.json")):
+        roots.add(kit)
+    roots |= {os.path.realpath(directory) for directory in announced}
+    return sorted(roots)
+
+
+def installed(path: str, roots) -> bool:
+    """Report whether `path`, symbolic links resolved, lies under one of `roots`."""
+    real = os.path.realpath(path)
+    return any(real.startswith(root.rstrip(os.sep) + os.sep) for root in roots)
+
+
 def loaded_files(path: str, skills=SKILLS):
-    """Collect the rubric files one transcript shows being loaded.
+    """Collect the rubric files one transcript shows reaching the model.
+
+    A call counts by its result, matched by id: a Skill call's announcement, a Read's or a Bash
+    command's output holding a run of the installed file's own text. A call is only a claim
+    until then.
 
     @param path Path to a JSONL transcript.
     @param skills The skill directories the gate recognises.
-    @return Set of "<skill>/<basename>": "<skill>/SKILL.md" for a Skill call or a read of
-            SKILL.md, "<skill>/<name>.md" for each reference read; None when unreadable.
+    @return Set of "<skill>/<basename>": "<skill>/SKILL.md" for an announced skill or a shown
+            SKILL.md, "<skill>/<name>.md" for each reference shown; None when unreadable.
     """
     found = set()
+    shown = []  # (key, path): a file whose text a result held, kept once its place is known to be installed
+    announced = set()  # base directories of the skills announced
     rubric_file = rubric_file_pattern(skills)
+    claims = {}  # tool_use id -> ("Skill", None) | ("Read", [(key, path)]) | ("Bash", [(key, path)])
+    skill_calls = set()  # ids of Skill calls for a rubric skill that did not fail
     try:
         with open(path, encoding="utf-8", errors="ignore") as fh:
             for line in fh:
-                if not any(skill in line for skill in skills):  # cheap filter: transcripts run to tens of MB
+                # cheap filter: transcripts run to tens of MB
+                if not any(skill in line for skill in skills) and not (
+                        claims and '"tool_use_id"' in line and any(use_id in line for use_id in claims)):
                     continue
                 try:
                     entry = json.loads(line)
                 except Exception:
                     continue
+                if not isinstance(entry, dict) or entry.get("type") not in ("user", "assistant"):
+                    continue
                 content = (entry.get("message") or {}).get("content")
                 if not isinstance(content, list):
                     continue
                 for item in content:
-                    if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    if not isinstance(item, dict):
                         continue
-                    name = item.get("name")
-                    args = item.get("input") or {}
-                    if not isinstance(args, dict):
-                        continue
-                    if name == "Skill":
-                        skill = skill_called(args.get("skill"), skills)
-                        if skill:
+                    kind = item.get("type")
+                    if kind == "tool_use" and entry["type"] == "assistant":
+                        claim = claim_of(item, rubric_file, skills, entry.get("cwd"))
+                        if claim is not None and isinstance(item.get("id"), str):
+                            claims[item["id"]] = claim
+                    elif kind == "tool_result" and entry["type"] == "user":
+                        claim = claims.pop(item.get("tool_use_id"), None)
+                        if claim is not None:
+                            shown += proven(claim, item, item.get("tool_use_id"), skill_calls)
+                    elif kind == "text" and entry["type"] == "user" and entry.get("isMeta") is True:
+                        text = str(item.get("text", ""))
+                        skill = announced_skill(text, skills)
+                        source = entry.get("sourceToolUseID")
+                        if skill and (source is None or source in skill_calls):
                             found.add(f"{skill}/SKILL.md")
-                    if name in ("Read", "Bash", "Grep"):
-                        for skill, main, ref in rubric_file.findall(json.dumps(args)):
-                            found.add(f"{skill}/{main or ref}")
+                            announced.add(text.partition("\n")[0][len(ANNOUNCEMENT):].strip())
     except OSError:
         return None  # unreadable — never block on what cannot be proven absent
+    if shown:
+        roots = installed_roots(announced)
+        found |= {key for key, file in shown if installed(file, roots)}
     return found
 
 
-def loaded_in(transcript_path: str, skills=SKILLS):
-    """Collect what this session — main turn or subagents — loaded of the rubrics.
+def claim_of(item: dict, rubric_file, skills, cwd):
+    """What a tool call would load if its result shows it, or None when it names no rubric file."""
+    name, args = item.get("name"), item.get("input")
+    if not isinstance(args, dict):
+        return None
+    if name == "Skill":
+        return ("Skill", None) if skill_called(args.get("skill"), skills) else None
+    if name == "Read" and isinstance(args.get("file_path"), str):
+        file_path = args["file_path"]
+        key = rubric_suffix(file_path, rubric_file)
+        return ("Read", [(key, file_path)]) if key and os.path.isabs(file_path) else None
+    if name == "Bash" and isinstance(args.get("command"), str):
+        named = shell_named_files(args["command"], cwd, rubric_file)
+        return ("Bash", named) if named else None
+    return None
 
-    @param transcript_path Path to the transcript the hook was handed.
+
+def proven(claim, item: dict, use_id, skill_calls: set) -> list:
+    """The rubric files a tool result shows, as (key, path), for the call it answers."""
+    kind, detail = claim
+    text = result_text(item)
+    if kind == "Skill":
+        if not failed(item, text):
+            skill_calls.add(use_id)
+        return []  # the skill's text arrives in its announcement
+    if kind == "Read" and (failed(item, text) or not NUMBERED_LINE.search(text)):
+        return []
+    return [(key, path) for key, path in detail if shows_text(text, path, key)]
+
+
+def loaded_in(transcript_path: str, skills=SKILLS):
+    """Collect what the caller's own transcript shows of the rubrics.
+
+    @param transcript_path The caller's transcript (evidence_transcript).
     @param skills The skill directories the gate recognises.
     @return Set of "<skill>/<basename>" loaded, with each skill's implementer checklist also
             counting as its SKILL.md; None when nothing can be proven (missing or unreadable
@@ -418,12 +735,9 @@ def loaded_in(transcript_path: str, skills=SKILLS):
     """
     if not transcript_path or not os.path.isfile(transcript_path):
         return None  # cannot prove absence — never block on a missing transcript
-    found = set()
-    for path in related_transcripts(transcript_path):
-        files = loaded_files(path, skills)
-        if files is None:
-            return None
-        found |= files
+    found = loaded_files(transcript_path, skills)
+    if found is None:
+        return None
     for skill in skills:
         if any(f"{skill}/{equivalent}" in found for equivalent in SKILL_EQUIVALENTS):
             found.add(f"{skill}/SKILL.md")
@@ -686,7 +1000,7 @@ def missing_for(cwd: str, path: str, transcript_path: str, text=None):
 
     @param cwd The hook's working directory.
     @param path The target file (any separator).
-    @param transcript_path The transcript the hook was handed.
+    @param transcript_path The caller's own transcript (evidence_transcript of the hook input).
     @param text The text being written, when visible (plan files use it to tell what they order).
     @return (what the target is, set of missing "<skill>/<basename>", the plugin publishing each
             skill directory) when the write must be refused; None when the target is out of
@@ -791,7 +1105,7 @@ def main() -> int:
     if not path:
         return 0
     try:
-        verdict = missing_for(data.get("cwd") or os.getcwd(), path, data.get("transcript_path") or "",
+        verdict = missing_for(data.get("cwd") or os.getcwd(), path, evidence_transcript(data),
                               written_text(tool_input))
     except Exception:
         return 0  # fail open: a broken gate must not wedge the session
