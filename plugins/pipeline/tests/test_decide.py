@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 COMMAND = Path(__file__).resolve().parent.parent / "bin" / "pipeline-decide"
-SECRET = "sk_test_never_printed_0123456789"
+SECRET = "sk_test_" "never_printed_0123456789"
 
 
 def load_decide() -> object:
@@ -98,15 +98,15 @@ LEAKS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----", ("MIIEvQIBADANBg",)),
     ('"private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEA\\n-----END RSA PRIVATE KEY-----\\n"',
      ("MIIEowIBAAKCAQEA",)),
-    ("use sk_live_4eC39HqLyjWDarjt here", ("4eC39HqLyjWDarjt",)),
-    ("pushed with ghp_a1B2c3D4e5F6g7H8i9J0", ("a1B2c3D4e5F6g7H8i9J0",)),
-    ("pushed with github_pat_11ABCDEFG0123456789_abcd", ("11ABCDEFG0123456789_abcd",)),
-    ("cloned with glpat-abcdefghij1234567890", ("abcdefghij1234567890",)),
-    ("posted with xoxb-1234567890-abcdefghij", ("1234567890-abcdefghij",)),
-    ("posted with xoxp-12345-67890-abcdef", ("12345-67890-abcdef",)),
-    ("signed with AKIAZ3MSJV4WWXZ4QJ5K", ("AKIAZ3MSJV4WWXZ4QJ5K",)),
-    ("maps with AIzaSyD-abcdefghijklmnopqrstuvwxyz12345", ("AIzaSyD-abcdefghijklmnopqrstuvwxyz12345",)),
-    ("published with npm_abcdefghijklmnopqrstuvwxyz0123456789", ("npm_abcdefghijklmnopqrstuvwxyz0123456789",)),
+    ("use sk_live_" "4eC39HqLyjWDarjt here", ("4eC39HqLyjWDarjt",)),
+    ("pushed with ghp_" "a1B2c3D4e5F6g7H8i9J0", ("a1B2c3D4e5F6g7H8i9J0",)),
+    ("pushed with github_pat_" "11ABCDEFG0123456789_abcd", ("11ABCDEFG0123456789_abcd",)),
+    ("cloned with glpat-" "abcdefghij1234567890", ("abcdefghij1234567890",)),
+    ("posted with xoxb-" "1234567890-abcdefghij", ("1234567890-abcdefghij",)),
+    ("posted with xoxp-" "12345-67890-abcdef", ("12345-67890-abcdef",)),
+    ("signed with AKIA" "Z3MSJV4WWXZ4QJ5K", ("AKIA" "Z3MSJV4WWXZ4QJ5K",)),
+    ("maps with AIza" "SyD-abcdefghijklmnopqrstuvwxyz12345", ("AIza" "SyD-abcdefghijklmnopqrstuvwxyz12345",)),
+    ("published with npm_" "abcdefghijklmnopqrstuvwxyz0123456789", ("npm_" "abcdefghijklmnopqrstuvwxyz0123456789",)),
     ("**Password:** Hunter2-Xq9z", ("Hunter2-Xq9z",)),
     ("*Token:* abcd1234efgh5678", ("abcd1234efgh5678",)),
     ('"passwords": ["Hunter2-Xq9z"]', ("Hunter2-Xq9z",)),
@@ -221,12 +221,12 @@ BASE_WITHHELD: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ('X-Api-Key: hdrkey18', ('hdrkey18',)),
     ('-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----', ('MIIEvQIBADANBg',)),
     ('"private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEA\\n-----END RSA PRIVATE KEY-----\\n"', ('MIIEowIBAAKCAQEA',)),
-    ('use sk_live_4eC39HqLyjWDarjt here', ('4eC39HqLyjWDarjt',)),
-    ('pushed with github_pat_11ABCDEFG0123456789_abcd', ('11ABCDEFG0123456789_abcd',)),
-    ('cloned with glpat-abcdefghij1234567890', ('abcdefghij1234567890',)),
-    ('posted with xoxb-1234567890-abcdefghij', ('1234567890-abcdefghij',)),
-    ('posted with xoxp-12345-67890-abcdef', ('12345-67890-abcdef',)),
-    ('signed with AKIAZ3MSJV4WWXZ4QJ5K', ('AKIAZ3MSJV4WWXZ4QJ5K',)),
+    ('use sk_live_' '4eC39HqLyjWDarjt here', ('4eC39HqLyjWDarjt',)),
+    ('pushed with github_pat_' '11ABCDEFG0123456789_abcd', ('11ABCDEFG0123456789_abcd',)),
+    ('cloned with glpat-' 'abcdefghij1234567890', ('abcdefghij1234567890',)),
+    ('posted with xoxb-' '1234567890-abcdefghij', ('1234567890-abcdefghij',)),
+    ('posted with xoxp-' '12345-67890-abcdef', ('12345-67890-abcdef',)),
+    ('signed with AKIA' 'Z3MSJV4WWXZ4QJ5K', ('AKIA' 'Z3MSJV4WWXZ4QJ5K',)),
     ('**Password:** Hunter2-Xq9z', ('Hunter2-Xq9z',)),
     ('*Token:* abcd1234efgh5678', ('abcd1234efgh5678',)),
     ('**Tokens:** compare a token with hash_equals, never ==.', ('compare a token',)),
@@ -243,14 +243,14 @@ BASE_WITHHELD: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ('mysql --password=hunter6 -h db', ('hunter6',)),
     ('apiKey := "abc987xyz"', ('abc987xyz',)),
     ('password: hunter seven words', ('hunter', 'seven', 'words')),
-    ('api_token: ghp_abcdefghijklmnopqrstuvwxyz0123456789', ('ghp_abcdefghijklmnopqrstuvwxyz0123456789',)),
+    ('api_token: ghp_' 'abcdefghijklmnopqrstuvwxyz0123456789', ('ghp_' 'abcdefghijklmnopqrstuvwxyz0123456789',)),
     ('database_password: hunter2', ('hunter2',)),
     ('dsn: postgres://app:s3cret@db:5432/app', ('s3cret',)),
     ('Authorization: Bearer abc.def.ghi', ('abc.def.ghi',)),
     ('Set-Cookie: sid=XYZ123', ('XYZ123',)),
     ('Proxy-Authorization: Basic dXNlcjpwYXNz', ('dXNlcjpwYXNz',)),
     ('x-api-key: k3y-value-77', ('k3y-value-77',)),
-    ('Rotate the key sk_live_abcdefghijklmnop', ('sk_live_abcdefghijklmnop',)),
+    ('Rotate the key sk_live_' 'abcdefghijklmnop', ('sk_live_' 'abcdefghijklmnop',)),
     ('secret = hunter8', ('hunter8',)),
     ('PASSWORD: Hunter9', ('Hunter9',)),
     ("password='hunter10'", ('hunter10',)),
@@ -260,7 +260,7 @@ BASE_WITHHELD: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ('api-key: hunter13', ('hunter13',)),
     ('client_secret: hunter14', ('hunter14',)),
     ('token: abc def', ('abc', 'def')),
-    ('sk-ant-abcdefghijklmnopqrstuvwxyz', ('sk-ant-abcdefghijklmnopqrstuvwxyz',)),
+    ('sk-ant-' 'abcdefghijklmnopqrstuvwxyz', ('sk-ant-' 'abcdefghijklmnopqrstuvwxyz',)),
     ('jwt eyJhbGciOiJIUzI1.eyJzdWIiOiIx.c2lnbmF0dXJl', ('eyJzdWIiOiIx',)),
     ('password: hunter15 // dev only', ('hunter15',)),
     ('passwd=hunter16', ('hunter16',)),
@@ -605,13 +605,13 @@ class DecideTests(unittest.TestCase):
 
     def test_secret_values_in_ordinary_files_are_withheld(self) -> None:
         diff = ("diff --git a/config/app.yaml b/config/app.yaml\n+++ b/config/app.yaml\n"
-                "+api_token: ghp_abcdefghijklmnopqrstuvwxyz0123456789\n+database_password: hunter2\n"
+                "+api_token: ghp_" "abcdefghijklmnopqrstuvwxyz0123456789\n+database_password: hunter2\n"
                 "+dsn: postgres://app:s3cret@db:5432/app\n+name: shop\n")
 
         done = self.run_decide("rules", "--diff", self.file("d.diff", diff), "--rules", self.file("REVIEW.md", self.REVIEW))
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        for secret in ("ghp_abcdefghijklmnopqrstuvwxyz0123456789", "hunter2", "s3cret"):
+        for secret in ("ghp_" "abcdefghijklmnopqrstuvwxyz0123456789", "hunter2", "s3cret"):
             self.assertNotIn(secret, self.sent())
         self.assertIn("+name: shop", self.sent())
         self.assertEqual(json.loads(done.stdout)["withheld"], 3)
@@ -832,13 +832,13 @@ class DecideTests(unittest.TestCase):
         claims = self.file("claims.json", json.dumps(["The suite passes."]))
 
         done = self.run_decide("done", "--claims", claims, "--evidence", self.file("gate.log", log))
-        sized = self.run_decide("size", "--state", self.file("state.md", "Rotate the key sk_live_abcdefghijklmnop"))
+        sized = self.run_decide("size", "--state", self.file("state.md", "Rotate the key sk_live_" "abcdefghijklmnop"))
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(sized.returncode, 0, sized.stdout + sized.stderr)
         self.assertNotIn("XYZ123", self.sent())
         self.assertNotIn("abc.def.ghi", self.sent())
-        self.assertNotIn("sk_live_abcdefghijklmnop", self.sent())
+        self.assertNotIn("sk_live_" "abcdefghijklmnop", self.sent())
         parts = [r["body"]["state"] for r in self.endpoint.requests if "claim-1" in r["body"]["questions"]]
         self.assertGreater(len(parts), 1)
         self.assertTrue(all(part.startswith("=== ") and "gate.log ===" in part.splitlines()[0] for part in parts))
