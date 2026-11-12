@@ -1136,6 +1136,439 @@ case "$OUT" in *"deferral marker"*"CLAUDE.standards.md §Architecture and tech d
   *) ko "bash write: debt denial names the standards"; echo "$OUT" ;; esac
 case "$OUT" in *"~/.claude"*) ko "bash write: denial points at a personal path"; echo "$OUT" ;; *) ok ;; esac
 
+# ---------- bash_guard.py: the other shell forms that write files ----------
+# each form is a write of its targets, held to the rubric gate and the debt guard like a redirect;
+# a target the command does not spell out (xargs, find -exec, a loop variable, an unreadable patch)
+# is every source file the command names, or that lies in a directory or glob it names
+# (the markers are assembled, so this file carries none of its own)
+TD="TO""DO"
+FM="FIX""ME"
+mkdir -p "$TMP/php/docs" "$TMP/inbox/pkg/Domain" "$TMP/patches"
+printf '<?php\n' > "$TMP/inbox/Foo.php"
+printf '<?php\n' > "$TMP/inbox/pkg/Domain/Order.php"
+printf '<?php\n// %s: later\n' "$TD" > "$TMP/inbox/Debt.php"
+printf '# notes\n' > "$TMP/php/docs/a.md"
+cat > "$TMP/patches/add.patch" <<'EOF'
+diff --git a/src/Service/Patched.php b/src/Service/Patched.php
+new file mode 100644
+--- /dev/null
++++ b/src/Service/Patched.php
+@@ -0,0 +1,2 @@
++<?php
++final class Patched {}
+EOF
+cat > "$TMP/patches/debt.patch" <<EOF
+--- a/src/Old.php
++++ b/src/Old.php
+@@ -1 +1,2 @@
+ <?php
++// $TD: handle nulls
+EOF
+cat > "$TMP/patches/docs.patch" <<EOF
+--- a/docs/a.md
++++ b/docs/a.md
+@@ -1 +1,2 @@
+ # notes
++$TD: write the rest
+EOF
+bw() { expect_exit "bash write form: $1" "$2" "$(bash_json "$3" "$TMP/php" "$TMP/${4:-empty}.jsonl")" "$B"; }
+bw "sed -Ei with an empty suffix" 2 "sed -Ei '' 's/a/b/' src/Old.php"
+bw "sed -ri" 2 "sed -ri 's/a/b/' src/Old.php"
+bw "sed -ni.bak" 2 "sed -ni.bak 's/a/b/p' src/Old.php"
+bw "sed -i with a BSD suffix word" 2 "sed -i .orig 's/a/b/' src/Old.php"
+bw "sed -Ei with the rubric loaded" 0 "sed -Ei '' 's/a/b/' src/Old.php" t-skill-solid
+bw "sed -ri inserting a marker" 2 "sed -ri 's|x|// $TD y|' src/Old.php" t-skill-solid
+bw "sed -n without -i writes nothing" 0 "sed -n 's/a/b/p' src/Old.php"
+bw "grep -rl | xargs sed -i" 2 "grep -rl foo src | xargs sed -i 's/a/b/'"
+bw "grep -rl | xargs sed -i with the rubric loaded" 0 "grep -rl foo src | xargs sed -i 's/a/b/'" t-skill-solid
+bw "grep -rl | xargs sed -i inserting a marker" 2 "grep -rl foo src | xargs sed -i 's|x|// $TD y|'" t-skill-solid
+bw "git ls-files glob | xargs perl -pi" 2 "git ls-files '*.php' | xargs perl -pi -e 's/a/b/'"
+bw "grep -rl over docs | xargs sed -i" 0 "grep -rl foo docs | xargs sed -i 's/a/b/'"
+bw "find -exec sed -i {} +" 2 "find src -name '*.php' -exec sed -i 's/a/b/' {} +"
+bw "find -exec sed -i {} \\;" 2 "find src -name '*.php' -exec sed -i 's/a/b/' {} \\;"
+bw "find -execdir sed -Ei" 2 "find . -name '*.php' -execdir sed -Ei '' 's/a/b/' {} +"
+bw "find over markdown -exec sed -i" 0 "find docs -name '*.md' -exec sed -i 's/a/b/' {} +"
+bw "find -exec grep writes nothing" 0 "find src -name '*.php' -exec grep -l foo {} +"
+bw "for loop over a glob" 2 "for f in src/*.php; do sed -i 's/a/b/' \"\$f\"; done"
+bw "for loop over a substitution" 2 "for f in \$(grep -rl foo src); do sed -i 's/a/b/' \"\$f\"; done"
+bw "while read from find" 2 "find src -name '*.php' | while read -r f; do sed -i 's/a/b/' \"\$f\"; done"
+bw "for loop redirect into the loop variable" 2 "for f in src/Service/A.php src/Service/B.php; do echo '<?php' > \"\$f\"; done"
+bw "for loop over markdown" 0 "for f in docs/*.md; do sed -i 's/a/b/' \"\$f\"; done"
+bw "assigned target" 2 "out=src/Service/Gen.php; echo '<?php' > \"\$out\""
+bw "mktemp target beside source reads" 0 "tmp=\$(mktemp); grep -n foo src/Old.php > \"\$tmp\""
+bw "cp into a source directory" 2 "cp $TMP/inbox/Foo.php src/Service/"
+bw "cp -t into a source directory" 2 "cp -t src/Service $TMP/inbox/Foo.php"
+bw "cp --target-directory=" 2 "cp --target-directory=src/Service $TMP/inbox/Foo.php"
+bw "cp -r of a tree into source" 2 "cp -R $TMP/inbox/pkg src/"
+bw "cp of a file carrying a marker" 2 "cp $TMP/inbox/Debt.php src/Service/" t-skill-solid
+bw "cp into a source directory with the rubric loaded" 0 "cp $TMP/inbox/Foo.php src/Service/" t-skill-solid
+bw "cp of source out of the project" 0 "cp src/Old.php $TMP/inbox/"
+bw "mv into a source directory" 2 "mv $TMP/inbox/Foo.php src/Service/"
+bw "install -m into a source directory" 2 "install -m 644 $TMP/inbox/Foo.php src/Service/"
+bw "rsync onto a source file" 2 "rsync -a $TMP/inbox/Foo.php src/Service/Foo.php"
+bw "rsync into a source directory" 2 "rsync -av --exclude '*.md' $TMP/inbox/ src/Service/"
+bw "git mv" 2 "git mv src/Old.php src/Service/Renamed.php"
+bw "git mv of markdown" 0 "git mv docs/a.md docs/b.md"
+bw "git apply" 2 "git apply $TMP/patches/add.patch"
+bw "git apply with the rubric loaded" 0 "git apply $TMP/patches/add.patch" t-skill-solid
+bw "git apply adding a marker" 2 "git apply $TMP/patches/debt.patch" t-skill-solid
+bw "git apply --check writes nothing" 0 "git apply --check $TMP/patches/add.patch"
+bw "git apply of a docs patch" 0 "git apply $TMP/patches/docs.patch"
+bw "git apply of an unreadable patch beside source" 2 "git apply $TMP/patches/missing.patch src/Old.php"
+bw "patch -p1 < file" 2 "patch -p1 < $TMP/patches/add.patch"
+bw "patch -p1 -i file" 2 "patch -p1 -i $TMP/patches/add.patch"
+bw "patch from a here-document adding a marker" 2 "patch -p1 <<'EOF'
+--- a/src/Old.php
++++ b/src/Old.php
+@@ -1 +1,2 @@
+ <?php
++// $FM later
+EOF" t-skill-solid
+bw "cat patch | git apply" 2 "cat $TMP/patches/add.patch | git apply"
+bw "patch --dry-run writes nothing" 0 "patch -p1 --dry-run < $TMP/patches/add.patch"
+bw "dd of=" 2 "dd if=$TMP/inbox/Foo.php of=src/Service/Foo.php"
+bw "curl -o" 2 "curl -o src/Service/Foo.php https://example.com/Foo.php"
+bw "curl -so" 2 "curl -so src/Service/Foo.php https://example.com/Foo.php"
+bw "curl --output=" 2 "curl -s --output=src/Service/Foo.php https://example.com/Foo.php"
+bw "curl -O into a source directory" 2 "curl --output-dir src/Service -O https://example.com/Foo.php"
+bw "wget -O" 2 "wget -q -O src/Service/Foo.php https://example.com/Foo.php"
+bw "curl -o out of the project" 0 "curl -so $TMP/inbox/x.json https://example.com/x.json"
+bw "tee -a" 2 "printf '<?php' | tee -a src/Old.php"
+bw "tee --append carrying a marker" 2 "printf '// $TD\n' | tee --append src/Old.php >/dev/null" t-skill-solid
+# a target behind a variable or substitution the guard cannot read stands for source files only
+# when nothing in the word rules a source file out: its literal tail names another kind of file
+bw "unread variable with a text tail" 0 "grep -rn Legacy src > \"\$UNSET_VAR_X/hits.txt\""
+bw "substitution with a log tail in a loop" 0 "for f in src/*.php; do php -l \"\$f\" > \"\$OUTDIR_UNSET/\$(basename \$f).log\"; done"
+bw "unread variable under /dev" 0 "grep -n foo src/Old.php > \"/dev/\$UNSET_VAR_X\""
+bw "unread variable with a php tail" 2 "grep -n foo src/Old.php > \"\$UNSET_VAR_X/Gen.php\""
+# content already in the repository, or copied out of every project, brings no new debt
+mkdir -p "$TMP/mono/packages/a/src" "$TMP/mono/packages/b/src" "$TMP/scratch/backup"
+git -C "$TMP/mono" init -q -b main
+echo '{}' > "$TMP/mono/composer.json"
+echo '{}' > "$TMP/mono/packages/a/composer.json"
+echo '{}' > "$TMP/mono/packages/b/composer.json"
+printf '<?php\n// %s: legacy\n' "$TD" > "$TMP/mono/packages/a/src/Legacy.php"
+bm() { expect_exit "bash copy: $1" "$2" "$(bash_json "$3" "$TMP/mono" "$TMP/t-skill-solid.jsonl")" "$B"; }
+bm "a backup out of every project" 0 "cp packages/a/src/Legacy.php $TMP/scratch/backup/Legacy.php"
+bm "a tree backed up out of every project" 0 "cp -r packages/a $TMP/scratch/backup/"
+bm "a move between packages of one repository" 0 "mv packages/a/src/Legacy.php packages/b/src/Legacy.php"
+bm "a copy between packages of one repository" 0 "cp packages/a/src/Legacy.php packages/b/src/Copy.php"
+bm "a file from outside the repository carrying a marker" 2 "cp $TMP/inbox/Debt.php packages/b/src/Debt.php"
+# a baseline written through the shell may only shrink, as through Edit/Write
+mkdir -p "$TMP/blw" "$TMP/blw-none"
+printf 'parameters:\n  ignoreErrors:\n    -\n      message: "#a#"\n      path: src/A.php\n' > "$TMP/blw/phpstan-baseline.neon"
+printf '{\n  "src/a.js": {\n    "no-console": {\n      "count": 2\n    }\n  }\n}\n' > "$TMP/blw/eslint-suppressions.json"
+bl() { expect_exit "bash baseline: $1" "$2" "$(bash_json "$3" "${4:-$TMP/blw}" "$TMP/empty.jsonl")" "$B"; }
+bl "cat >> onto an existing baseline" 2 "cat >> phpstan-baseline.neon <<'EOF'
+    -
+      message: \"#b#\"
+      path: src/B.php
+EOF"
+bl "echo >> onto an existing baseline" 2 "echo '    - {message: \"#b#\", path: src/B.php}' >> phpstan-baseline.neon"
+bl "tee -a onto an existing baseline" 2 "printf '    -\n      message: x\n' | tee -a phpstan-baseline.neon"
+bl "cat > over an existing baseline with more lines" 2 "cat > phpstan-baseline.neon <<'EOF'
+parameters:
+  ignoreErrors:
+    -
+      message: \"#a#\"
+      path: src/A.php
+    -
+      message: \"#b#\"
+      path: src/B.php
+EOF"
+bl "cat > over an existing baseline with fewer lines" 0 "cat > phpstan-baseline.neon <<'EOF'
+parameters:
+  ignoreErrors: []
+EOF"
+printf 'parameters:\n  ignoreErrors:\n    -\n      message: "#a#"\n      path: src/A.php\n    -\n      message: "#b#"\n      path: src/B.php\n' > "$TMP/inbox/grown-baseline.neon"
+printf 'parameters:\n  ignoreErrors: []\n' > "$TMP/inbox/empty-baseline.neon"
+bl "cp of a longer file over an existing baseline" 2 "cp $TMP/inbox/grown-baseline.neon phpstan-baseline.neon"
+bl "cp of a shorter file over an existing baseline" 0 "cp $TMP/inbox/empty-baseline.neon phpstan-baseline.neon"
+bl "curl over an existing baseline" 2 "curl -so phpstan-baseline.neon https://example.com/b.neon"
+# deleting one line of an entry (its path, its count) widens it, and sed's result cannot be checked
+bl "sed deleting baseline lines" 2 "sed -i '' '/src\\/A.php/d' phpstan-baseline.neon"
+bl "sed deleting the path line of an entry" 2 "sed -i '' '/path: src\\/A.php/d' phpstan-baseline.neon"
+bl "sed deleting a file key of eslint suppressions" 2 "sed -i '' '/src\\/a.js/d' eslint-suppressions.json"
+bl "cat > over eslint suppressions raising a count" 2 "cat > eslint-suppressions.json <<'EOF'
+{\"src/a.js\": {\"no-console\": {\"count\": 3}}}
+EOF"
+bl "cat > over eslint suppressions lowering a count" 0 "cat > eslint-suppressions.json <<'EOF'
+{\"src/a.js\": {\"no-console\": {\"count\": 1}}}
+EOF"
+bl "the first baseline written by a redirect" 0 "cat > phpstan-baseline.neon <<'EOF'
+parameters:
+  ignoreErrors: []
+EOF" "$TMP/blw-none"
+OUT=$(bash_json "echo '    - x' >> phpstan-baseline.neon" "$TMP/blw" "$TMP/empty.jsonl" | python3 "$B" 2>&1)
+case "$OUT" in *"grows the static-analysis baseline"*"only shrinks"*) ok ;;
+  *) ko "bash baseline: the denial says the baseline only shrinks"; echo "$OUT" ;; esac
+
+# ---------- bash_guard.py: what the shell-write parsers cannot read ----------
+# a parser that cannot read a word never lets the rest of the command through
+bw "a non-ASCII digit after -p, then a marker" 2 "patch -p² < /dev/null; echo '// $TD' > src/Old.php" t-skill-solid
+bw "an unparseable URL, then a marker" 2 "curl -O 'http://[x/a.php'; echo '// $TD' > src/Old.php" t-skill-solid
+bq_strip() { expect_exit "board queue: a non-ASCII --strip, then tick" 2 "$(bash_json 'patch --strip=² x.diff; board-queue tick' "$TMP")" "$B"; }
+bq_strip
+OUT=$(bash_json 'ls' "$TMP" | python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import bash_guard as guard
+def broken(*args, **kwargs):
+    raise RuntimeError("forced")
+guard.check = broken
+sys.exit(guard.main())' "$H" 2>&1; echo "rc=$?")
+case "$OUT" in *'"permissionDecision": "ask"'*"rc=0"*) ok ;; *) ko "bash: an internal error asks instead of letting the command through"; echo "$OUT" ;; esac
+# a glob is read under the same entry budget as a directory search
+mkdir -p "$TMP/wide"
+python3 -c 'import os, sys
+for i in range(300):
+    d = os.path.join(sys.argv[1], "d%03d" % i)
+    os.makedirs(d, exist_ok=True)
+    for j in range(80):
+        open(os.path.join(d, "f%02d.txt" % j), "w").close()' "$TMP/wide"
+OUT=$(python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import bash_guard as guard
+print(guard.glob_paths("**/*.zzzq", sys.argv[2], [1000]))' "$H" "$TMP/wide" 2>&1)
+case "$OUT" in None) ok ;; *) ko "bash write: a glob past the entry budget is unread"; echo "$OUT" | tail -2 ;; esac
+GLOBBED=$(bash_json "for f in $HOME/**/*.zzzq; do :; done; echo '// $TD' > src/Old.php" "$TMP/php" "$TMP/t-skill-solid.jsonl")
+OUT=$(echo "$GLOBBED" | python3 -c 'import subprocess, sys, time
+start = time.time()
+try:
+    rc = subprocess.run([sys.executable, sys.argv[1]], stdin=sys.stdin, capture_output=True, timeout=8).returncode
+except subprocess.TimeoutExpired:
+    rc = -1
+print("rc=%d seconds=%.1f" % (rc, time.time() - start))' "$B")
+case "$OUT" in "rc=2 seconds="[012].*) ok ;; *) ko "bash write: a glob over the home directory is judged in under three seconds"; echo "$OUT" ;; esac
+# a write whose target is unnamed and involves no file is still judged: its text as source, the
+# rubric where the target may be source, and a patch that cannot be read is refused
+bw "xargs sed over git ls-files inserting a marker" 2 "git ls-files | xargs sed -i 's/class/\\/\\/ $TD class/'" t-skill-solid
+bw "xargs sed over a list inserting a marker" 2 "cat list.txt | xargs sed -i 's/x/\\/\\/ $TD x/'" t-skill-solid
+bw "a loop over a list inserting a marker" 2 "for f in \$(cat list.txt); do sed -i 's/x/\\/\\/ $TD x/' \"\$f\"; done" t-skill-solid
+bw "a marker into a substituted extension" 2 "echo '// $TD' > src/A.\$(echo php)" t-skill-solid
+bw "an unnamed target in a PHP project needs the rubric" 2 "cat list.txt | xargs sed -i 's/a/b/'"
+bw "an unnamed target in a PHP project with the rubric loaded" 0 "cat list.txt | xargs sed -i 's/a/b/'" t-skill-solid
+expect_exit "bash write form: an unnamed target outside every project" 0 \
+  "$(bash_json "cat list.txt | xargs sed -i 's/a/b/'" "$TMP/inbox" "$TMP/empty.jsonl")" "$B"
+bw "a piped patch that cannot be read" 2 "git stash show -p | git apply" t-skill-solid
+expect_exit "bash baseline: a patch written earlier in the line" 2 "$(bash_json "cat > p.diff <<'EOF'
+--- a/phpstan-baseline.neon
++++ b/phpstan-baseline.neon
+@@ -1 +1,3 @@
+ parameters:
++    -
++      message: x
+EOF
+git apply p.diff" "$TMP/blw" "$TMP/empty.jsonl")" "$B"
+# content is new to a project whenever its source is not itself source of the repository
+printf '// %s: later\n/** @phpstan-ignore-next-line */\n' "$TD" > "$TMP/mono/notes.txt"
+bm "a note moved onto source" 2 "mv notes.txt packages/b/src/A.php"
+bm "a note moved onto source with git mv" 2 "git mv notes.txt packages/b/src/A.php"
+bm "a note copied onto source" 2 "cp notes.txt packages/b/src/New.php"
+bm "a file written earlier in the line copied onto source" 2 "printf '// $TD\\n' > $TMP/zz.txt; cp $TMP/zz.txt packages/b/src/Z.php"
+bm "a missing file copied onto source" 2 "cp $TMP/no-such-file.php packages/b/src/Gone.php"
+expect_exit "bash copy: a missing file copied into build output" 0 \
+  "$(bash_json "cp $TMP/no-such-file.js dist/app.js" "$TMP/js" "$TMP/empty.jsonl")" "$B"
+# a sed script that cannot be read is an edit of unknown text
+bl "sed -f with a missing script" 2 "sed -i -e '/never/d' -f $TMP/blw/missing.sed phpstan-baseline.neon"
+bl "sed -f with a script written earlier in the line" 2 "printf '\$r extra.neon\\n' > s2.sed; sed -i -e '/never/d' -f s2.sed phpstan-baseline.neon"
+# a copied tree is read whole, skipped directories included; past the cap it is unread
+mkdir -p "$TMP/tree1/var" "$TMP/tree2" "$TMP/tree3/zz"
+printf '<?php\n// %s: here\n' "$TD" > "$TMP/tree1/var/A.php"
+printf '<?php\n' > "$TMP/tree1/B.php"
+for i in 1 2 3; do printf '<?php\n' > "$TMP/tree2/C$i.php"; done
+python3 -c 'import os, sys
+for i in range(300):
+    open(os.path.join(sys.argv[1], "F%03d.php" % i), "w").write("<?php\n")' "$TMP/tree3"
+printf '<?php\n// %s: last\n' "$TD" > "$TMP/tree3/zz/Marked.php"
+bw "a tree with a marker under var copied into source" 2 "cp -r $TMP/tree1 src/" t-skill-solid
+bw "a tree past the cap copied into source" 2 "cp -r $TMP/tree3 src/" t-skill-solid
+bw "a small clean tree copied into source" 0 "cp -r $TMP/tree2 src/" t-skill-solid
+# restoring a baseline from git writes content the guard cannot read
+bl "git checkout of a baseline" 2 "git checkout HEAD~1 -- phpstan-baseline.neon"
+bl "git restore of a baseline" 2 "git restore --source=HEAD~1 phpstan-baseline.neon"
+bl "git checkout of a branch" 0 "git checkout main"
+bl "git restore of another file" 0 "git restore README.md"
+
+# ---------- bash_guard.py: temporary files, hunks, downloads and sed's suffix ----------
+# a temporary file moved or copied onto source is a write of the source with content not read here
+bw "a temporary file moved onto source" 2 "t=\$(mktemp); sed 's|x|// $TD y|' src/Old.php > \"\$t\" && mv \"\$t\" src/Old.php" t-skill-solid
+bw "a temporary file written and moved onto new source" 2 "t=\$(mktemp); printf '<?php\\n' > \"\$t\"; mv \"\$t\" src/Service/Foo.php" t-skill-solid
+bw "source copied into a temporary file" 0 "t=\$(mktemp); cp src/Old.php \"\$t\"" t-skill-solid
+bw "an unread source copied out of every project" 0 "find src -name '*.php' -exec cp {} $TMP/scratch/backup/ \;" t-skill-solid
+# a hunk is read by its counts: a removed line `-- …` or an added `++ …` is no file header
+printf -- '--- a/src/Old.php\n+++ b/src/Old.php\n@@ -1,2 +1,2 @@\n <?php\n--- $i;\n+// %s later\n' "$TD" > "$TMP/patches/dec.patch"
+printf -- '--- a/src/Old.php\n+++ b/src/Old.php\n@@ -1 +1,3 @@\n <?php\n+++ $i;\n+// %s later\n' "$TD" > "$TMP/patches/inc.patch"
+bw "git apply with a removed line that reads as a header" 2 "git apply $TMP/patches/dec.patch" t-skill-solid
+bw "patch with a removed line that reads as a header" 2 "patch -p1 < $TMP/patches/dec.patch" t-skill-solid
+bw "git apply with an added line that reads as a header" 2 "git apply $TMP/patches/inc.patch" t-skill-solid
+# wget writes -O where it is named, and puts only a name taken from the URL under -P
+bw "wget -O beside -P" 2 "wget -q -P /tmp -O src/Service/X.php https://example.com/x"
+bl "wget -O over a baseline beside -P" 2 "wget -q -P $TMP/blw-none -O phpstan-baseline.neon https://example.com/x"
+bw "wget -P with a name from the URL out of the project" 0 "wget -q -P $TMP/scratch https://example.com/X.php"
+# BSD sed takes the word after a bare -i as the backup suffix; a word that is no script is read both ways
+bw "sed -i with a BSD suffix that is no script" 2 "sed -i bak 's|x|// $TD y|' src/Old.php" t-skill-solid
+bw "GNU sed -i with its script after it" 0 "sed -i 's/a/b/' src/Old.php" t-skill-solid
+
+# ---------- bash_guard.py: everyday commands stay allowed ----------
+# a repository with a PHP project, a large source directory, a baseline, vendor and var; no rubric loaded
+EV="$TMP/every"
+mkdir -p "$EV/src/Gen" "$EV/docs" "$EV/var" "$EV/vendor/acme/src" "$EV/plugins/board-queue"
+git -C "$EV" init -q -b main
+echo '{}' > "$EV/composer.json"
+printf '<?php\n' > "$EV/src/Old.php"
+python3 -c 'import os, sys
+for i in range(70):
+    open(os.path.join(sys.argv[1], "G%02d.php" % i), "w").write("<?php\n")' "$EV/src/Gen"
+printf '# notes\nfoo\n' > "$EV/docs/a.md"
+printf 'parameters:\n  ignoreErrors: []\n' > "$EV/phpstan-baseline.neon"
+printf '<?php\n// %s: vendored\n' "$TD" > "$EV/vendor/acme/src/Foo.php"
+printf '<?php\n// %s: scratch\n' "$TD" > "$EV/var/s.php"
+ev() { expect_exit "everyday: $1" 0 "$(bash_json "$1" "$EV" "$TMP/empty.jsonl")" "$B"; }
+ev 'git status > /tmp/st.txt'
+ev 'git diff > /tmp/review.diff'
+ev 'git log --oneline > var/log.txt'
+ev 'git diff > "/tmp/review.$$"'
+ev 'date > /tmp/run-$(date +%s)'
+ev 'git diff > "${OUT_UNSET_X:-/tmp/x}"'
+ev 'git log > "$(git rev-parse --show-toplevel)/var/log/gitlog"'
+ev 'composer test 2> "$ERR_UNSET_X"'
+ev 'make test 2>&1 | tee "$LOGFILE_UNSET_X"'
+ev 'cp README "$DEST_UNSET_X"'
+ev 'for f in $(git diff --name-only); do git show "HEAD:$f" > "/tmp/bk/$(basename "$f")"; done'
+ev 'rg -n foo src > /tmp/hits.txt'
+ev 'grep -rn foo src > var/hits.txt'
+ev 'composer test | tee var/test.log'
+ev 'grep -rl foo src | xargs grep -n bar'
+ev 'grep -rl foo src | xargs wc -l'
+ev "find src -name '*.php' -print"
+ev "find src -name '*.php' | xargs php -l"
+ev "find src -name '*.php' -exec php -l {} \\;"
+ev 'cp src/Old.php /tmp/'
+ev 'cp -r src /tmp/x'
+ev 'cp -r src /tmp/src-backup'
+ev "rsync -a src/ $TMP/scratch/src/"
+ev 'cp -r src var/backup'
+ev 'composer test'
+ev 'npm run build'
+ev "sed -n '1,5p' src/Old.php"
+ev "sed 's/a/b/' src/Old.php > /tmp/o.php"
+ev 'for f in src/*.php; do php -l "$f"; done'
+ev 'for f in $(git ls-files); do wc -l "$f"; done'
+ev 'git ls-files | xargs wc -l'
+ev "echo '{}' > \"\$OUT_UNSET_X/result.json\""
+ev 'git checkout main'
+ev 'git checkout -- src/Old.php'
+ev 'git restore src/Old.php'
+ev 'git checkout -b feat/x'
+ev 'rsync -a src/ build-host:/srv/src/'
+ev 'scp src/Old.php build-host:/tmp/'
+ev 'tar cf - src | ssh build-host tar xf -'
+ev 'd=$(mktemp -d); cp src/Old.php "$d/"'
+ev "sed -i 'a\\footer' docs/a.md"
+ev "sed -i 'i\\header' docs/a.md"
+ev "sed -i '3s/a/b/' docs/a.md"
+ev 'git restore --staged phpstan-baseline.neon'
+ev 'git restore -S phpstan-baseline.neon'
+ev "grep -rl foo docs | xargs sed -i '' 's/foo/* $TD later/'"
+ev "find docs -name '*.md' -exec sed -i '' 's/foo/## $TD/' {} +"
+ev "echo '## $TD' | tee -a \"\$NOTES_UNSET_X\""
+ev 'patch -p1 < /dev/null'
+ev 'git apply < /dev/null'
+ev 'cat docs/a.md > >(tee /tmp/copy.md)'
+ev "echo x > \"\$(printf 'name')\""
+ev 'git diff > "$(mktemp)"'
+# a rename or copy of a large tree of the repository's own source, with the rubric loaded
+ew() { expect_exit "everyday with the rubric: $1" 0 "$(bash_json "$1" "$EV" "$TMP/t-skill-solid.jsonl")" "$B"; }
+ew 'git mv src/Gen src/Generated'
+ew 'mv src/Gen src/Generated'
+# ... and what still is refused there
+er() { expect_exit "refused: $1" 2 "$(bash_json "$1" "$EV" "$TMP/t-skill-solid.jsonl")" "$B"; }
+er 'cp vendor/acme/src/Foo.php src/Foo.php'
+er 'cp var/s.php src/S2.php'
+er "git ls-files '*.php' | xargs sed -i '' 's|class|// $TD class|' docs/a.md"
+er 'git checkout phpstan-baseline.neon'
+er 'git checkout HEAD~1 .'
+er 'git restore .'
+er "git restore '*.neon'"
+er "echo '// $TD later' | tee src/Old.{php,txt}"
+expect_exit "refused without the rubric: an in-place edit of an unnamed file" 2 \
+  "$(bash_json "sed -i 's/a/b/' \"\$1\"" "$EV" "$TMP/empty.jsonl")" "$B"
+er "echo '// $TD' > src/A.\$(echo php)"
+# `**` lists each directory once, so a wide tree fits the budget its entries need
+OUT=$(python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import bash_guard as guard
+print(guard.glob_paths("**/*.zzzq", sys.argv[2], [30000]))' "$H" "$TMP/wide" 2>&1)
+case "$OUT" in "[]") ok ;; *) ko "bash write: a ** glob lists each directory once"; echo "$OUT" | tail -2 ;; esac
+
+# ---------- bash_guard.py: a pass of the board queue ----------
+# the schedule drains the queue; a session never runs a pass, whatever it sets first
+bq() { expect_exit "board queue: $1" "$2" "$(bash_json "$3" "$TMP")" "$B"; }
+bq "tick refused" 2 'board-queue tick'
+bq "tick --json refused" 2 'board-queue tick --json'
+bq "the schedule's variable as a prefix refused" 2 'BOARD_QUEUE_SCHEDULED=1 board-queue tick'
+bq "the variable exported first refused" 2 'export BOARD_QUEUE_SCHEDULED=1; board-queue tick'
+bq "the variable exported after && refused" 2 'export BOARD_QUEUE_SCHEDULED=1 && board-queue tick'
+bq "env with the variable refused" 2 'env BOARD_QUEUE_SCHEDULED=1 board-queue tick'
+bq "env -i with the variable refused" 2 'env -i HOME=/x BOARD_QUEUE_SCHEDULED=1 board-queue tick'
+bq "bash -c refused" 2 'bash -c "BOARD_QUEUE_SCHEDULED=1 board-queue tick"'
+bq "a loop refused" 2 'for i in 1 2 3; do BOARD_QUEUE_SCHEDULED=1 board-queue tick; done'
+bq "while loop refused" 2 'while true; do board-queue tick; sleep 1; done'
+bq "timeout refused" 2 'timeout 60 board-queue tick'
+bq "an absolute path refused" 2 '/home/dev/.local/bin/board-queue tick'
+bq "a home-relative path refused" 2 '~/.local/bin/board-queue tick'
+bq "the CLI variable refused" 2 '"$BOARD_QUEUE_CLI" tick'
+bq "node on the entry point refused" 2 'node /srv/kit/plugins/board-queue/bin/board-queue.ts tick'
+bq "node with options refused" 2 'BOARD_QUEUE_SCHEDULED=1 node --experimental-strip-types bin/board-queue.ts tick --json'
+bq "sh on the wrapper refused" 2 'sh /srv/kit/plugins/board-queue/bin/board-queue tick'
+bq "the launcher refused" 2 '/home/dev/.local/state/board-queue/board-queue-tick.sh'
+bq "the launcher through sh refused" 2 'sh ~/.local/state/board-queue/board-queue-tick.sh'
+bq "npm run cli tick refused" 2 'npm --prefix plugins/board-queue run cli -- tick'
+bq "xargs feeding tick refused" 2 'echo tick | xargs board-queue'
+bq "a substitution refused" 2 'echo "$(board-queue tick)"'
+bq "npm exec refused" 2 'npm exec board-queue -- tick'
+bq "pnpm exec refused" 2 'pnpm exec board-queue tick'
+bq "yarn exec refused" 2 'yarn exec board-queue tick'
+bq "a variable holding the name refused" 2 'BQ=board-queue; $BQ tick'
+bq "a substitution as the program refused" 2 '"$(command -v board-queue)" tick'
+bq "an unread variable as the program handed tick refused" 2 '"$UNSET_BQ_PATH" tick'
+bq "a syntax check of the launcher allowed" 0 'bash -n plugins/board-queue/schedule/board-queue-tick.sh'
+bq "node --check of the entry point allowed" 0 'node --check bin/board-queue.ts tick'
+bq "npm exec of another tool allowed" 0 'npm exec eslint -- src'
+bq "a variable holding tick refused" 2 't=tick; board-queue $t'
+bq "an unread subcommand refused" 2 'board-queue "$UNSET_BQ_COMMAND"'
+bq "xargs -I handing tick refused" 2 'echo tick | xargs -I{} board-queue {}'
+bq "npm run -s cli tick refused" 2 'cd plugins/board-queue && npm run -s cli tick'
+bq "npm run-script --silent cli tick refused" 2 'cd plugins/board-queue && npm run-script --silent cli tick'
+bq "npm run --prefix= cli tick refused" 2 'npm run --prefix=plugins/board-queue cli -- tick'
+bq "node --run cli tick refused" 2 'cd plugins/board-queue && node --run cli -- tick'
+bq "a variable holding status allowed" 0 'sub=status; board-queue $sub'
+bq "yarn --cwd= cli tick refused" 2 'yarn --cwd=plugins/board-queue cli tick'
+bq "pnpm --dir= cli tick refused" 2 'pnpm --dir=plugins/board-queue cli tick'
+bq "npm exec with a spaced --prefix refused" 2 'npm exec --prefix plugins/board-queue -- board-queue tick'
+bq "npm exec -- node on the entry point refused" 2 'BOARD_QUEUE_SCHEDULED=1 npm exec -- node plugins/board-queue/bin/board-queue.ts tick'
+bq "the CLI variable with a default refused" 2 'BOARD_QUEUE_SCHEDULED=1 "${BOARD_QUEUE_CLI:-board-queue}" tick'
+bq "yarn workspace run cli tick refused" 2 'yarn workspace board-queue run cli tick'
+bq "yarn workspace of a scoped name refused" 2 'yarn workspace @x/board-queue run cli tick'
+bq "npm run cli with --prefix after it refused" 2 'npm run cli --prefix plugins/board-queue -- tick'
+bq "npx -p refused" 2 'npx -p board-queue board-queue tick'
+bq "npx --package refused" 2 'npx --package board-queue board-queue tick'
+bq "npm exec --package refused" 2 'npm exec --package board-queue -- board-queue tick'
+bq "yarn dlx -p refused" 2 'yarn dlx -p board-queue board-queue tick'
+bq "npx -c refused" 2 "npx -c 'board-queue tick'"
+bq "npm exec -c refused" 2 "npm exec -c 'board-queue tick'"
+bq "npm exec --call refused" 2 "npm exec --call 'board-queue tick'"
+bq "bunx refused" 2 'bunx board-queue tick'
+bq "npx of another tool allowed" 0 'npx -p typescript tsc --noEmit'
+bq "status allowed" 0 'board-queue status'
+bq "list allowed" 0 'board-queue list --state queued --json'
+bq "enqueue allowed" 0 'board-queue enqueue --repo o/r --issue 1 --status Ready'
+bq "a mention in echo allowed" 0 'echo "board-queue tick is the schedule'"'"'s"'
+bq "grep for tick allowed" 0 'grep -n tick plugins/board-queue/README.md'
+bq "node on another script allowed" 0 'node bin/other.ts tick'
+OUT=$(bash_json 'BOARD_QUEUE_SCHEDULED=1 board-queue tick' "$TMP" | python3 "$B" 2>&1)
+case "$OUT" in *"board_status"*) ok ;; *) ko "board queue: the refusal points at the status"; echo "$OUT" ;; esac
+
 # ---------- github_rest_only policy: policies.resolve ----------
 # policy_resolve <name> [VAR=value ...] -> "<value> <source>" for the named policy under that environment
 policy_resolve() {
