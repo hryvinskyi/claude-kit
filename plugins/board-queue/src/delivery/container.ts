@@ -170,8 +170,9 @@ export function buildContainer(options: BuildContainerOptions): Container {
   });
   // One account's allowance, whichever board's call reported it last.
   const ledger = new BudgetLedger();
+  const timeoutMs = config.worker.requestTimeoutSec * 1000;
   const httpFor = (placement: BoardPlacement): GitHubHttp =>
-    new GitHubHttp({ tokens: overrides.tokens ?? credentials.for(placement.board), logger, ledger });
+    new GitHubHttp({ tokens: overrides.tokens ?? credentials.for(placement.board), logger, ledger, timeoutMs });
   const networkLanes: LaneFactory = (placement) => {
     const http = httpFor(placement);
     return {
@@ -223,6 +224,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
         tokens: overrides.tokens ?? credentials.appFor(placement.board) ?? credentials.for(placement.board),
         logger,
         ledger,
+        timeoutMs,
       })),
     forgeIdentity: overrides.forgeIdentity ?? {
       usesAppIdentity: (repo) => credentials.appFor(placementOfRepository(directory, repo).board) !== null,
@@ -269,6 +271,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
       policy,
       clock,
       logger,
+      passCeilingSec: config.worker.passCeilingSec,
       ...(config.audit.enabled ? {
         audit: async (lease) => {
           await audit.execute(lease);

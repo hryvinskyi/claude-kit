@@ -1,12 +1,15 @@
-import { execFileSync } from 'node:child_process';
 import { Buffer } from 'node:buffer';
 import { createSign } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import type { KeyObject } from 'node:crypto';
 import { z } from 'zod';
 import type { Clock, Logger, TokenProvider } from '../application/ports.ts';
 import type { BoardOwnerType } from '../domain/board-directory.ts';
-import { BoardQueueError, RefusedByRule, TransientFailure } from '../domain/errors.ts';
+import { BoardQueueError, CredentialRejected, RefusedByRule, TransientFailure } from '../domain/errors.ts';
+import { APP_KEY_PATH_VAR as KEY_PATH_VAR, readAppPrivateKey } from './app-private-key.ts';
+import { commandWithDeadline, howTheRunFailed } from './command-runner.ts';
+import type { CommandRunner } from './command-runner.ts';
 import { decodeWire, type FetchLike } from './github-http.ts';
+import { UnsafeSecretFile } from './owner-only-file.ts';
 import { redactSecrets } from './redaction.ts';
 
 const DEFAULT_BASE_URL = 'https://api.github.com';
@@ -29,7 +32,6 @@ const APP_CALL_TIMEOUT_MS = 10_000;
  * looks like a key is refused rather than used, and no message here ever repeats
  * what either variable holds.
  */
-const KEY_PATH_VAR = 'GITHUB_APP_PRIVATE_KEY_PATH';
 const KEY_VAR = 'GITHUB_APP_PRIVATE_KEY';
 const PEM_OPENING = '-----BEGIN';
 
@@ -39,27 +41,22 @@ const INSTALLATION_PATH: Record<BoardOwnerType, (owner: string) => string> = {
   user: (owner) => `/users/${owner}/installation`,
 };
 
-const ExitStatus = z.object({ status: z.number() });
 const InstallationPayload = z.object({ id: z.number().int() });
 const AccessTokenPayload = z.object({ token: z.string().min(1) });
 const AppPayload = z.object({ slug: z.string().trim().min(1) });
-
-/** Running a command, narrow enough for a test to stand in for. */
-export type CommandRunner = (command: string, args: readonly string[]) => string;
-
-const runCommand: CommandRunner = (command, args) =>
-  execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 /**
  * The credential of whoever is logged in to the command line tool.
  *
  * The output of a failed run is never quoted: it is the one place a credential
  * could be printed, and the exit code says everything a person needs to act on.
+ * The run has a deadline: a tool that waits on a prompt nobody answers is killed
+ * and counted as a source that could not answer, never left holding the pass.
  */
 export class GhCliTokenProvider implements TokenProvider {
   private readonly run: CommandRunner;
 
-  constructor(run: CommandRunner = runCommand) {
+  constructor(run: CommandRunner = commandWithDeadline({ errors: 'pipe' })) {
     this.run = run;
   }
 
@@ -68,7 +65,7 @@ export class GhCliTokenProvider implements TokenProvider {
     try {
       output = this.run('gh', ['auth', 'token']);
     } catch (cause) {
-      throw new TransientFailure(`\`gh auth token\` failed ${exitPhrase(cause)}`);
+      throw new TransientFailure(`\`gh auth token\` failed ${howTheRunFailed(cause)}`);
     }
     const token = output.trim();
     if (token === '') {
@@ -199,12 +196,27 @@ export class AppTokenProvider implements TokenProvider {
     return `${decodeWire(AppPayload, payload, step).slug}[bot]`;
   }
 
+  /**
+   * An assertion signed with the App's key, read afresh for every one.
+   *
+   * A key file that is there but not safe — another account's, or readable by
+   * its group or by everybody — is a refused credential rather than a source
+   * that could not answer: nothing mends it but a person, and a chain that went
+   * on to the next source would bill every call elsewhere while the refusal
+   * stayed in a log line. A file that is missing or holds no key is a source
+   * that could not answer, as it always was.
+   */
   private signAssertion(): string {
-    let pem: string;
+    let key: KeyObject;
     try {
-      pem = readFileSync(this.privateKeyPath, 'utf8');
-    } catch {
-      throw new TransientFailure(`the file named by ${KEY_PATH_VAR} could not be read`);
+      key = readAppPrivateKey(this.privateKeyPath).key;
+    } catch (refusal) {
+      if (refusal instanceof UnsafeSecretFile) {
+        throw new CredentialRejected('signing as the GitHub App', refusal.describe());
+      }
+      throw new TransientFailure(
+        refusal instanceof BoardQueueError ? refusal.describe() : `the file named by ${KEY_PATH_VAR} could not be read`,
+      );
     }
     const seconds = Math.floor(this.clock.now().getTime() / 1000);
     const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
@@ -218,7 +230,7 @@ export class AppTokenProvider implements TokenProvider {
       const signer = createSign('RSA-SHA256');
       signer.update(signingInput);
       signer.end();
-      return `${signingInput}.${signer.sign(pem).toString('base64url')}`;
+      return `${signingInput}.${signer.sign(key).toString('base64url')}`;
     } catch {
       throw new TransientFailure(`the key in the file named by ${KEY_PATH_VAR} could not sign an assertion`);
     }
@@ -398,6 +410,11 @@ export class CachingTokenProvider implements TokenProvider {
  * The configured sources in order of preference; the first that answers wins.
  * When none does, the failure names every way that was tried, because "no
  * credential" is the one failure a person always has to fix by hand.
+ *
+ * A source that refuses its own credential outright — `CredentialRejected` —
+ * ends the chain there: the deployment named that credential, and quietly
+ * going on to the next would bill the work to another allowance while the
+ * refusal waits for a fix nobody was told about.
  */
 export class FallbackTokenProvider implements TokenProvider {
   private readonly providers: readonly TokenProvider[];
@@ -419,6 +436,9 @@ export class FallbackTokenProvider implements TokenProvider {
         }
         return token;
       } catch (cause) {
+        if (cause instanceof CredentialRejected) {
+          throw cause;
+        }
         refusals.push(sentenceOf(cause));
       }
     }
@@ -482,11 +502,6 @@ function keyPathIn(env: Record<string, string | undefined>): string | null {
 
 function base64url(text: string): string {
   return Buffer.from(text, 'utf8').toString('base64url');
-}
-
-function exitPhrase(cause: unknown): string {
-  const parsed = ExitStatus.safeParse(cause);
-  return parsed.success ? `with exit code ${String(parsed.data.status)}` : 'and could not be run';
 }
 
 function sentenceOf(cause: unknown): string {

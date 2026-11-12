@@ -24,7 +24,9 @@
     "maxAttempts": 5,
     "catalogTtlSec": 3600,
     "auditEveryHours": 6,
-    "auditMinRemaining": 1000
+    "auditMinRemaining": 1000,
+    "requestTimeoutSec": 30,
+    "passCeilingSec": 600
   },
   "audit": { "enabled": true },
   "dibs": {

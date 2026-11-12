@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import { Action } from '../domain/action.ts';
 import type { ActionState } from '../domain/action.ts';
 import type { BoardDirectory } from '../domain/board-directory.ts';
-import { RefusedByRule } from '../domain/errors.ts';
+import { BoardQueueError, RefusedByRule } from '../domain/errors.ts';
 import type { IssueRef } from '../domain/issue-ref.ts';
 import type { ActionKind } from '../domain/kinds/action-kind.ts';
 import type { KindRegistry } from '../domain/kinds/registry.ts';
@@ -166,14 +166,31 @@ export class EnqueueAction {
    * The outcome with the starter's assignment filed beside it, when the request
    * starts the work on an issue. The assignment waits exactly as the request does,
    * so a held move never assigns anybody before it is released. A login that
-   * cannot be read, or an App's, is said in a warning rather than guessed.
+   * cannot be read, or an App's, is said in a warning rather than guessed; so is
+   * a login whose source refused to answer, because the move is already filed and
+   * an error would say it was not.
    */
   async #withStarterAssigned(request: EnqueueRequest, outcome: EnqueueOutcome): Promise<EnqueueOutcome> {
     const start = this.#startOf(request);
     if (start === null || this.#identity === null) {
       return outcome;
     }
-    const login = await this.#identity.login();
+    let login: string | null;
+    try {
+      login = await this.#identity.login();
+    } catch (refusal) {
+      if (!(refusal instanceof BoardQueueError)) {
+        throw refusal;
+      }
+      return {
+        ...outcome,
+        warnings: [
+          ...outcome.warnings,
+          `this starts the work on ${start.toString()}, but the GitHub login this machine runs as could not be read `
+          + `(${refusal.describe()}), so nobody is assigned`,
+        ],
+      };
+    }
     if (login === null || BOT_LOGIN.test(login)) {
       const who = login === null ? 'no GitHub login can be read on this machine' : `${login} is an App`;
       return {

@@ -51,6 +51,7 @@ describe('a file that holds a secret', () => {
     ];
 
     assert.match(said[0] ?? '', /mode 640; take every permission away from its group and from everybody else/);
+    assert.match(said[0] ?? '', /\(chmod 600\)/);
     assert.match(said[1] ?? '', /mode 604/);
     assert.match(said[2] ?? '', /is not a file/);
     assert.match(said[3] ?? '', /is not there, or this account cannot read it/);
@@ -67,6 +68,6 @@ describe('a file that holds a secret', () => {
     const link = join(directory, 'linked');
     symlinkSync('/etc/hosts', link);
 
-    assert.match(refusal(link), /belongs to another account/);
+    assert.match(refusal(link), /belongs to another account; it must be this account's own: chown it to this account/);
   });
 });

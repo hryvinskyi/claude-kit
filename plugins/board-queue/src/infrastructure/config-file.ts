@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { z } from 'zod';
-import { ConfigSchema } from '../domain/config.ts';
+import { ConfigSchema, unknownWorkerSettings } from '../domain/config.ts';
 import type { Config } from '../domain/config.ts';
 import { RefusedByRule } from '../domain/errors.ts';
 
@@ -78,7 +78,7 @@ export function loadConfig(env: Env = process.env, notice: Notice = toStandardEr
     );
   }
 
-  const config = parsed(found.text, found.file);
+  const config = parsed(found.text, found.file, notice);
   if (found.file !== file) {
     notice(adopted(found.file, file, found.text));
   }
@@ -96,7 +96,12 @@ function firstReadable(files: readonly string[]): { file: string; text: string }
   return null;
 }
 
-function parsed(text: string, file: string): Config {
+/**
+ * The configuration in a file, refused when it is not usable. Worker settings
+ * this release does not know are ignored and named in one notice, because they
+ * are what a configuration written for a later release carries after a rollback.
+ */
+function parsed(text: string, file: string, notice: Notice): Config {
   let raw: unknown;
   try {
     raw = JSON.parse(text) as unknown;
@@ -106,6 +111,11 @@ function parsed(text: string, file: string): Config {
   const validated = ConfigSchema.safeParse(raw);
   if (!validated.success) {
     throw new RefusedByRule(`the configuration at ${file} is not usable — ${issuesOf(validated.error)}`);
+  }
+  const unknown = unknownWorkerSettings(raw);
+  if (unknown.length > 0) {
+    notice(`the configuration at ${file} names worker settings this release does not know (${unknown.join(', ')}); `
+      + 'they are ignored');
   }
   return validated.data;
 }

@@ -1,13 +1,11 @@
-import { createPrivateKey } from 'node:crypto';
 import type { Config } from '../domain/config.ts';
 import { RefusedByRule } from '../domain/errors.ts';
 import { syncIsOn } from '../domain/sync-config.ts';
+import { APP_KEY_PATH_VAR as KEY_PATH_VAR, readAppPrivateKey } from './app-private-key.ts';
 import { dibsToken } from './dibs-token.ts';
-import { readOwnerOnlyFile } from './owner-only-file.ts';
 
 const APP_ID_VAR = 'GITHUB_APP_ID';
 const INSTALLATION_VAR = 'GITHUB_APP_INSTALLATION_ID';
-const KEY_PATH_VAR = 'GITHUB_APP_PRIVATE_KEY_PATH';
 const PEM_OPENING = '-----BEGIN';
 
 /** What the service runs as, in words fit for its log: the numbers and the key's mode, never the key or its path. */
@@ -48,13 +46,7 @@ export function checkServiceCredentials(env: Record<string, string | undefined>,
   if (keyPath.includes(PEM_OPENING)) {
     throw new RefusedByRule(`${KEY_PATH_VAR} holds a key rather than the path to one; name the key's file instead`);
   }
-  const key = readOwnerOnlyFile(keyPath, `the file named by ${KEY_PATH_VAR}`);
-  try {
-    createPrivateKey(key.text);
-  } catch {
-    throw new RefusedByRule(`the file named by ${KEY_PATH_VAR} does not hold a private key`);
-  }
-  const keyMode = key.mode;
+  const keyMode = readAppPrivateKey(keyPath).mode;
 
   const sync = config.dibs;
   if (sync === undefined || !syncIsOn(sync)) {

@@ -1,13 +1,21 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { BoardRouter } from '../../src/application/board-router.ts';
+import { DrainQueue } from '../../src/application/drain-queue.ts';
+import { BoardDirectory } from '../../src/domain/board-directory.ts';
+import { defaultKindRegistry } from '../../src/domain/kinds/default-kinds.ts';
 import { BudgetLedger, GitHubHttp } from '../../src/infrastructure/github-http.ts';
+import type { FetchLike } from '../../src/infrastructure/github-http.ts';
+import { GitHubRestIssues } from '../../src/infrastructure/github-rest-issues.ts';
 import {
   CredentialRejected,
   IssueNotFound,
+  NoAnswer,
   PrimaryRateLimited,
   SecondaryRateLimited,
   TransientFailure,
 } from '../../src/domain/errors.ts';
+import { FIRST, tickFixture } from '../application/tick-fixture.ts';
 import { FakeFetch, budgetHeaders, type ScriptedResponse } from '../fakes/fake-fetch.ts';
 import { RecordingLogger, StubTokenProvider } from '../fakes/wire-doubles.ts';
 
@@ -421,5 +429,114 @@ describe('GitHubHttp requests', () => {
     const { http, fetcher } = wire([{ headers: budgetHeaders(100, RESET_SECONDS, 'core'), body: [] }]);
     await http.rest('GET', '/repos/example-org/first-repo/issues/1/sub_issues');
     assert.equal(fetcher.calls[0]?.headers['if-none-match'], undefined);
+  });
+});
+
+/**
+ * A server that takes the request and never answers it. Like the platform's own
+ * fetch it gives up when the request's signal is aborted, and only then: a
+ * request sent without a deadline waits for good.
+ */
+const neverAnswers: FetchLike = (_url, init) => new Promise<Response>((_resolve, reject) => {
+  const signal = init.signal;
+  if (signal === null || signal === undefined) {
+    return;
+  }
+  signal.addEventListener('abort', () => {
+    reject(signal.reason);
+  }, { once: true });
+});
+
+/** A server that answers the headers and then never finishes the body, until the request is aborted. */
+const neverFinishesTheBody: FetchLike = (_url, init) => {
+  const signal = init.signal;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"data":'));
+      signal?.addEventListener('abort', () => {
+        controller.error(signal.reason);
+      }, { once: true });
+    },
+  });
+  return Promise.resolve(new Response(body, { status: 200, headers: budgetHeaders(4000, RESET_SECONDS) }));
+};
+
+function deadlined(fetchImpl: FetchLike, timeoutMs?: number): GitHubHttp {
+  return new GitHubHttp({
+    tokens: new StubTokenProvider([FIRST_TOKEN]),
+    logger: new RecordingLogger(),
+    fetchImpl,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+  });
+}
+
+describe('GitHubHttp deadlines', () => {
+  it('gives every request a deadline of its own, whether or not one was named', async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const recording: FetchLike = async (_url, init) => {
+      signals.push(init.signal);
+      return Response.json({ data: { ok: true } }, { headers: budgetHeaders(4000, RESET_SECONDS) });
+    };
+
+    await deadlined(recording).graphql(PROBE, {});
+    await deadlined(recording, 5_000).rest('GET', '/repos/example-org/first-repo/issues/1');
+
+    assert.equal(signals.length, 2);
+    for (const signal of signals) {
+      assert.ok(signal instanceof AbortSignal);
+      assert.equal(signal.aborted, false);
+    }
+  });
+
+  it('gives up on a server that never answers, as a call nobody answered', { timeout: 5_000 }, async () => {
+    const started = Date.now();
+
+    await assert.rejects(() => deadlined(neverAnswers, 50).graphql(PROBE, {}, 'the allowance probe'), (error: unknown) => {
+      assert.ok(error instanceof NoAnswer, String(error));
+      assert.equal(error.category, 'transient-failure');
+      assert.match(error.message, /the allowance probe could not be reached: no answer within the deadline/);
+      return true;
+    });
+    assert.ok(Date.now() - started < 2_000);
+  });
+
+  it('gives up on an answer whose body never ends, as a call nobody answered', { timeout: 5_000 }, async () => {
+    await assert.rejects(
+      () => deadlined(neverFinishesTheBody, 50).rest('GET', '/repos/example-org/first-repo/issues/1'),
+      (error: unknown) => {
+        assert.ok(error instanceof NoAnswer, String(error));
+        assert.match(error.message, /answered a body that could not be read: no answer within the deadline/);
+        return true;
+      },
+    );
+  });
+
+  it('leaves the action a silent server held queued for another go, done by nobody, and the lock free', { timeout: 5_000 }, async () => {
+    const tick = tickFixture();
+    const http = deadlined(neverAnswers, 50);
+    const drain = new DrainQueue({
+      repository: tick.repository,
+      boards: new BoardRouter(BoardDirectory.of(tick.config.boards), () => ({
+        board: tick.board,
+        issues: new GitHubRestIssues(http),
+      })),
+      kinds: defaultKindRegistry(tick.config),
+      policy: tick.policy,
+      clock: tick.clock,
+      sleeper: tick.sleeper,
+      logger: tick.logger,
+      config: tick.config,
+    });
+    await tick.file({ id: 'c-1', kind: 'issue.comment', payload: { repo: FIRST, issue: 12, body: 'the fix is live' } });
+
+    const report = await drain.run();
+
+    const action = await tick.stored('c-1');
+    assert.equal(report.done, 0);
+    assert.equal(report.requeued, 1);
+    assert.equal(action.state, 'queued');
+    assert.equal(action.attempts, 1);
+    assert.match(action.lastError ?? '', /no answer within the deadline/);
+    assert.equal(await tick.repository.withTickLock(() => Promise.resolve('taken')), 'taken');
   });
 });

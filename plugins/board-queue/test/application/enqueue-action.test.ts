@@ -4,7 +4,7 @@ import { EnqueueAction } from '../../src/application/enqueue-action.ts';
 import type { BoardDirectory } from '../../src/domain/board-directory.ts';
 import type { FieldCatalog } from '../../src/domain/catalog.ts';
 import type { Config } from '../../src/domain/config.ts';
-import { RefusedByRule, UnknownKind } from '../../src/domain/errors.ts';
+import { CredentialRejected, RefusedByRule, UnknownKind } from '../../src/domain/errors.ts';
 import { defaultKindRegistry } from '../../src/domain/kinds/default-kinds.ts';
 import { StartOfWork } from '../../src/domain/start-of-work.ts';
 import {
@@ -844,6 +844,30 @@ describe('assigning whoever starts the work', () => {
     assert.deepEqual(outcome.warnings, [
       `this starts the work on ${FIRST}#12, but no GitHub login can be read on this machine, so nobody is assigned`,
     ]);
+    assert.deepEqual((await repository.list({})).map((action) => action.kind), ['board.set-fields']);
+  });
+
+  it('says nobody is assigned when the login\'s source refuses its credential, and files the move anyway', async () => {
+    const repository = new InMemoryActionRepository();
+    const enqueue = new EnqueueAction({
+      repository,
+      kinds: defaultKindRegistry(testConfig),
+      directory: testDirectory,
+      clock: new FakeClock('2026-01-01T09:00:00.000Z'),
+      startOfWork: new StartOfWork(['In Progress']),
+      identity: {
+        login: () => Promise.reject(new CredentialRejected(
+          'signing as the GitHub App',
+          'the file named by GITHUB_APP_PRIVATE_KEY_PATH is mode 644; take every permission away (chmod 600)',
+        )),
+      },
+    });
+
+    const outcome = await enqueue.execute({ kind: 'board.set-fields', payload: setFields({ status: 'In Progress' }), origin: 'a' });
+
+    assert.equal(outcome.assignment, undefined);
+    assert.match(outcome.warnings[0] ?? '', /this starts the work on .*#12, but the GitHub login this machine runs as could not be read/);
+    assert.match(outcome.warnings[0] ?? '', /chmod 600/);
     assert.deepEqual((await repository.list({})).map((action) => action.kind), ['board.set-fields']);
   });
 

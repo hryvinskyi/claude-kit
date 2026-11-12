@@ -45,6 +45,41 @@ describe('the file that says what this queue may touch', () => {
     });
   });
 
+  it('reads a worker setting a later release added as one it ignores, and says so once per load', () => {
+    const later = { ...GOOD, worker: { paceMs: 2000, settingOfALaterRelease: 5, anotherOne: true } };
+    withFile(JSON.stringify(later), (file) => {
+      const said: string[] = [];
+
+      const config = loadConfig({ BOARD_QUEUE_CONFIG: file }, (line) => {
+        said.push(line);
+      });
+
+      assert.equal(config.worker.paceMs, 2000);
+      assert.equal(Object.hasOwn(config.worker, 'settingOfALaterRelease'), false);
+      assert.equal(said.length, 1);
+      assert.match(said[0] ?? '', /worker\.settingOfALaterRelease, worker\.anotherOne/);
+      assert.match(said[0] ?? '', /this release does not know/);
+    });
+  });
+
+  it('says nothing about the worker settings it knows', () => {
+    withFile(JSON.stringify({ ...GOOD, worker: { paceMs: 2000, passCeilingSec: 300 } }), (file) => {
+      const said: string[] = [];
+
+      loadConfig({ BOARD_QUEUE_CONFIG: file }, (line) => {
+        said.push(line);
+      });
+
+      assert.deepEqual(said, []);
+    });
+  });
+
+  it('still refuses a key it does not know outside the worker settings', () => {
+    withFile(JSON.stringify({ ...GOOD, settingOfALaterRelease: 5 }), (file) => {
+      assert.throws(() => loadConfig({ BOARD_QUEUE_CONFIG: file }), RefusedByRule);
+    });
+  });
+
   it('looks in the configuration directory when the environment names no file', () => {
     assert.equal(configPath({ HOME: '/home/someone' }), '/home/someone/.config/board-queue/config.json');
     assert.equal(configPath({ HOME: '/home/someone', XDG_CONFIG_HOME: '/etc/xdg-of-someone' }),

@@ -254,6 +254,23 @@ with its attempt given back, and the tick ends there with no job after it, its r
 holding the lock does all of it. `board-queue audit` run by hand takes the same lock, and refuses while a
 scheduled pass holds it.
 
+Nothing a pass waits on can hold the lock for good. Every request to GitHub has a deadline that covers its
+answer as well as its request — `worker.requestTimeoutSec`, 30 by default — and one that passes it is a call
+nobody answered: the action goes back on the queue with a backoff, as after any network error, and nothing is
+marked done. The App's own calls have a deadline of ten seconds, and `gh auth token` and the login lookup with
+`gh` are killed if they have not answered in fifteen. The pass as a whole has a ceiling, `worker.passCeilingSec`
+(600 by default): once it is reached the drain claims no action after its first and no job that has not begun starts —
+each says so in the report — and the pass ends as it would have anyway, which frees the lock for the next one.
+The second half of the ceiling belongs to the queue: the job that ends finished claims, which runs before the
+drain, starts only while half of it is still to come (the mirror runs first and is not held to the half), and the
+drain always runs and claims its first action whatever the time, so filed work moves on every pass however long
+the jobs before it took.
+
+A setting under `worker` that the running release does not know is ignored, with one line on the error stream
+naming it, so a configuration written for a later release still runs after a rollback. Releases before this one
+refuse any unknown `worker` key: rolling back to one of them means removing `worker.requestTimeoutSec` and
+`worker.passCeilingSec` from the configuration first. A key it does not know anywhere else is still refused.
+
 ## The rate-limit policy
 
 Every answer carries what is left of the allowance, and that is the only source trusted — the dedicated
@@ -712,7 +729,12 @@ one cached token. `GITHUB_APP_INSTALLATION_ID` names a single installation and s
 configured board belongs to one account; with boards under several accounts each one looks its own
 installation up.
 
-`GITHUB_APP_PRIVATE_KEY_PATH` is the **path** to the App's PEM file, itself `chmod 600`. The key text
+`GITHUB_APP_PRIVATE_KEY_PATH` is the **path** to the App's PEM file, itself `chmod 600`. Every process that
+reads the key — a scheduled pass, the MCP server, the service — refuses a file another account owns or one its
+group or everybody may read, with the command that fixes it (`chown`, `chmod 600`). The refusal is a refused
+credential, never a reason to fall back to `gh`: the queue waits, `status` shows the wait and its reason, the
+pass's report names the refused credential, and the service declines its pass, which `health` reports, until the
+file is fixed. The key text
 never belongs in an environment variable, where every child process inherits it and the first message that
 mentions it copies it into a log. The older `GITHUB_APP_PRIVATE_KEY` is still read as a path, but a value
 carrying a key rather than a path is refused by the variable's name, and no message here ever repeats what

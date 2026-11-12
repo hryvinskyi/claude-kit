@@ -9,6 +9,11 @@ import { SyncConfigSchema } from './sync-config.ts';
  * the deployment names them here, each board with the repositories whose issues
  * are written to it, and a repository no board names is refused before a request
  * reaches the API.
+ *
+ * The worker's numbers are the one place an unknown key is not refused: a
+ * setting a later release added is dropped, and `unknownWorkerSettings` names it
+ * so the loader can say so. A configuration written for a later release then
+ * still runs the worker after a rollback, at that setting's old behaviour.
  */
 export const WorkerConfigSchema = z
   .object({
@@ -35,8 +40,19 @@ export const WorkerConfigSchema = z
     auditEveryHours: z.number().int().positive().default(6),
     /** The audit only runs with at least this much allowance left. */
     auditMinRemaining: z.number().int().nonnegative().default(1000),
+    /**
+     * How long one request to GitHub may take, its answer read included, before it
+     * is given up on and counted as a call nobody answered.
+     */
+    requestTimeoutSec: z.number().int().positive().default(30),
+    /**
+     * How long one pass may go on taking work. Past it the pass starts nothing
+     * more — no further action, no further job — finishes what it holds and ends,
+     * so the tick lock is free for the next scheduled pass.
+     */
+    passCeilingSec: z.number().int().positive().default(600),
   })
-  .strict();
+  .strip();
 
 /**
  * The report-only pass over every board, run by the schedule every
@@ -94,6 +110,16 @@ export const ConfigSchema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['boards'], message: describeDuplicate(duplicate) });
     }
   });
+
+/** The worker settings a raw configuration names that this release does not know, spelled `worker.<key>`. */
+export function unknownWorkerSettings(raw: unknown): string[] {
+  const document = z.object({ worker: z.record(z.string(), z.unknown()) }).safeParse(raw);
+  if (!document.success) {
+    return [];
+  }
+  const known = new Set(Object.keys(WorkerConfigSchema.shape));
+  return Object.keys(document.data.worker).filter((key) => !known.has(key)).map((key) => `worker.${key}`);
+}
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type BoardConfig = z.infer<typeof BoardConfigSchema>;

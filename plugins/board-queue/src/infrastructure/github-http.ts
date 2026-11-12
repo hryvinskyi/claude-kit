@@ -19,6 +19,13 @@ const DEFAULT_USER_AGENT = 'board-queue';
 const REST_API_VERSION = '2022-11-28';
 /** The answer to a conditional request whose tag still holds. */
 const NOT_MODIFIED = 304;
+/**
+ * How long one exchange — the request and the whole of its answer — may take
+ * before it is given up on. The API answers a heavy graph query in seconds and
+ * gives up on its own after ten, so half a minute leaves room without letting a
+ * connection that went quiet hold the pass.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /** The one call this package makes to the network, narrow enough to stand in for. */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -35,6 +42,8 @@ export type GitHubHttpDeps = {
   fetchImpl?: FetchLike;
   apiBaseUrl?: string;
   userAgent?: string;
+  /** How long one exchange may take, its answer read included; `DEFAULT_REQUEST_TIMEOUT_MS` unless named. */
+  timeoutMs?: number;
 };
 
 export type RestResult = {
@@ -292,6 +301,7 @@ export class GitHubHttp {
   private readonly baseUrl: string;
   private readonly userAgent: string;
   private readonly ledger: BudgetLedger;
+  private readonly timeoutMs: number;
 
   constructor(deps: GitHubHttpDeps) {
     this.tokens = deps.tokens;
@@ -300,6 +310,7 @@ export class GitHubHttp {
     this.fetchImpl = deps.fetchImpl ?? ((url, init) => globalThis.fetch(url, init));
     this.baseUrl = (deps.apiBaseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.userAgent = deps.userAgent ?? DEFAULT_USER_AGENT;
+    this.timeoutMs = deps.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   /** What the last answer on this allowance said, without spending anything. */
@@ -455,6 +466,10 @@ export class GitHubHttp {
    * the action's. A second rejection is reported as a credential failure of its
    * own, so the queue waits for a working login rather than blaming whatever was
    * being written for something it had no part in.
+   *
+   * Every exchange has a deadline that covers its answer as well as its request:
+   * one that passes it is `NoAnswer`, retried like any other call nobody answered,
+   * so a connection that goes quiet can never hold the pass, and the lock with it.
    */
   private async send(spec: CallSpec): Promise<Outcome> {
     let refreshed = false;
@@ -469,7 +484,7 @@ export class GitHubHttp {
       if (spec.body !== undefined) {
         headers['content-type'] = 'application/json';
       }
-      const init: RequestInit = { method: spec.method, headers };
+      const init: RequestInit = { method: spec.method, headers, signal: AbortSignal.timeout(this.timeoutMs) };
       if (spec.body !== undefined) {
         init.body = spec.body;
       }
@@ -477,7 +492,7 @@ export class GitHubHttp {
       try {
         response = await this.fetchImpl(spec.url, init);
       } catch (cause) {
-        throw new NoAnswer(`${spec.subject} could not be reached: ${describeCause(cause)}`);
+        throw new NoAnswer(`${spec.subject} could not be reached: ${this.describeCause(cause)}`);
       }
       const headerOf = headerReader(response);
       const budget = RateBudget.fromHeaders(headerOf);
@@ -488,7 +503,7 @@ export class GitHubHttp {
       try {
         text = await response.text();
       } catch (cause) {
-        throw new NoAnswer(`${spec.subject} answered a body that could not be read: ${describeCause(cause)}`);
+        throw new NoAnswer(`${spec.subject} answered a body that could not be read: ${this.describeCause(cause)}`);
       }
       if (response.status === 401) {
         this.logger.warn('credential rejected', { subject: spec.subject, retrying: !refreshed });
@@ -507,6 +522,17 @@ export class GitHubHttp {
         header: headerOf,
       };
     }
+  }
+
+  /** A cause is shown as a sentence, never as an object that might quote a header. */
+  private describeCause(cause: unknown): string {
+    if (cause instanceof Error && cause.name === 'TimeoutError') {
+      return `no answer within the deadline of ${String(Math.round(this.timeoutMs / 1000))} s`;
+    }
+    if (cause instanceof Error) {
+      return redactSecrets(cause.message);
+    }
+    return typeof cause === 'string' ? redactSecrets(cause) : 'the reason was not stated';
   }
 }
 
@@ -580,12 +606,4 @@ const OPERATION_NAME = /^\s*(?:query|mutation)\s+([A-Za-z_][A-Za-z0-9_]*)/;
 
 function operationNameOf(query: string): string | null {
   return OPERATION_NAME.exec(query)?.[1] ?? null;
-}
-
-/** A cause is shown as a sentence, never as an object that might quote a header. */
-function describeCause(cause: unknown): string {
-  if (cause instanceof Error) {
-    return redactSecrets(cause.message);
-  }
-  return typeof cause === 'string' ? redactSecrets(cause) : 'the reason was not stated';
 }

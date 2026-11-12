@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { createVerify, generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Buffer } from 'node:buffer';
 import { after, before, describe, it } from 'node:test';
 import type { TokenProvider } from '../../src/application/ports.ts';
-import { RefusedByRule, TransientFailure } from '../../src/domain/errors.ts';
+import { CredentialRejected, RefusedByRule, TransientFailure } from '../../src/domain/errors.ts';
+import { commandWithDeadline } from '../../src/infrastructure/command-runner.ts';
+import { GhCliIdentity } from '../../src/infrastructure/gh-cli-identity.ts';
 import {
   AccountCredentials,
   AppTokenProvider,
@@ -33,6 +35,29 @@ class CountingProvider implements TokenProvider {
   invalidate(): void {
     this.invalidations += 1;
   }
+}
+
+/** A private key written to a file of the given mode, the way a person might leave one. */
+function keyFile(directory: string, name: string, mode: number): string {
+  const path = join(directory, name);
+  const pair = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  writeFileSync(path, pair.privateKey, { mode: 0o600 });
+  chmodSync(path, mode);
+  return path;
+}
+
+/**
+ * A `gh` that never answers, first on the path the runner hands its command: it
+ * replaces itself with a sleep far longer than any test waits.
+ */
+function hangingGh(directory: string): NodeJS.ProcessEnv {
+  const program = join(directory, 'gh');
+  writeFileSync(program, '#!/bin/sh\nexec sleep 60\n', { mode: 0o700 });
+  return { ...process.env, PATH: `${directory}:${process.env['PATH'] ?? ''}` };
 }
 
 class RefusingProvider implements TokenProvider {
@@ -75,6 +100,36 @@ describe('GhCliTokenProvider', () => {
   it('refuses an empty answer', async () => {
     const provider = new GhCliTokenProvider(() => '\n');
     await assert.rejects(() => provider.token(), TransientFailure);
+  });
+
+  it('kills a tool that never answers at its deadline and counts it as a source that could not answer', { timeout: 10_000 }, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'board-queue-gh-'));
+    t.after(() => {
+      rmSync(directory, { recursive: true, force: true });
+    });
+    const provider = new GhCliTokenProvider(
+      commandWithDeadline({ errors: 'pipe', timeoutMs: 200, env: hangingGh(directory) }),
+    );
+    const started = Date.now();
+
+    await assert.rejects(() => provider.token(), (error: unknown) => {
+      assert.ok(error instanceof TransientFailure);
+      assert.match(error.message, /`gh auth token` failed because it did not answer within its deadline and was killed/);
+      return true;
+    });
+    assert.ok(Date.now() - started < 5_000, 'the run ended at its deadline, not when the tool chose to');
+  });
+
+  it('answers no login when the tool that would name it never answers', { timeout: 10_000 }, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'board-queue-gh-'));
+    t.after(() => {
+      rmSync(directory, { recursive: true, force: true });
+    });
+    const identity = new GhCliIdentity(commandWithDeadline({ errors: 'ignore', timeoutMs: 200, env: hangingGh(directory) }));
+    const started = Date.now();
+
+    assert.equal(await identity.login(), null);
+    assert.ok(Date.now() - started < 5_000);
   });
 });
 
@@ -312,11 +367,37 @@ describe('AppTokenProvider', () => {
     });
     await assert.rejects(() => provider.token(), (error: unknown) => {
       assert.ok(error instanceof TransientFailure);
-      assert.match(error.message, /the file named by GITHUB_APP_PRIVATE_KEY_PATH could not be read/);
+      assert.match(error.message, /the file named by GITHUB_APP_PRIVATE_KEY_PATH is not there, or this account cannot read it/);
       assert.equal(error.message.includes(secretish), false, 'the configured value is never repeated');
       return true;
     });
     assert.equal(fetcher.calls.length, 0);
+  });
+
+  it('refuses to sign with a key its group or everybody may read, saying how to fix it, and asks nothing', async () => {
+    for (const mode of [0o644, 0o640, 0o604]) {
+      const open = keyFile(directory, `open-${mode.toString(8)}.pem`, mode);
+      const fetcher = new FakeFetch([]);
+      const provider = new AppTokenProvider({
+        appId: '123456',
+        privateKeyPath: open,
+        owner: 'example-org',
+        ownerType: 'organization',
+        fetchImpl: fetcher.fetch,
+        clock: new FakeClock(),
+      });
+
+      for (const attempt of [() => provider.token(), () => provider.appLogin()]) {
+        await assert.rejects(attempt, (error: unknown) => {
+          assert.ok(error instanceof CredentialRejected, String(error));
+          assert.match(error.describe(), new RegExp(`GITHUB_APP_PRIVATE_KEY_PATH is mode ${mode.toString(8)}`));
+          assert.match(error.describe(), /chmod 600/);
+          assert.equal(error.describe().includes(open), false, 'the path is never repeated');
+          return true;
+        });
+      }
+      assert.equal(fetcher.calls.length, 0, 'nothing was signed, so nothing was sent');
+    }
   });
 
   it('names the step when a call is refused', async () => {
@@ -473,6 +554,28 @@ describe('AccountCredentials', () => {
     assert.equal(without.appFor(ORGANISATION), null);
   });
 
+  it('does not fall back to a person\'s credential when the App\'s key is readable by others', async () => {
+    const open = keyFile(directory, 'shared.pem', 0o644);
+    const fallback = new CountingProvider();
+    const fetcher = new FakeFetch([]);
+    const credentials = new AccountCredentials({
+      env: { GITHUB_APP_ID: '123456', GITHUB_APP_PRIVATE_KEY_PATH: open },
+      boards: [ORGANISATION],
+      logger: new RecordingLogger(),
+      clock: new FakeClock(),
+      fallback: () => fallback,
+      fetchImpl: fetcher.fetch,
+    });
+
+    await assert.rejects(() => credentials.for(ORGANISATION).token(), (error: unknown) => {
+      assert.ok(error instanceof CredentialRejected);
+      assert.match(error.describe(), /chmod 600/);
+      return true;
+    });
+    assert.equal(fallback.mints, 0, 'the work is not quietly billed to another allowance');
+    assert.equal(fetcher.calls.length, 0);
+  });
+
   it('falls back per account when the deployment names no App, minting nothing until asked', async () => {
     const made: CountingProvider[] = [];
     const credentials = new AccountCredentials({
@@ -580,6 +683,17 @@ describe('FallbackTokenProvider', () => {
     await new FallbackTokenProvider([new CountingProvider(), new CountingProvider()], logger).token();
 
     assert.deepEqual(logger.lines, []);
+  });
+
+  it('stops at a source that refuses its own credential, asking none after it', async () => {
+    const second = new CountingProvider();
+    const refusing: TokenProvider = {
+      token: () => Promise.reject(new CredentialRejected('signing as the GitHub App', 'the key is mode 644')),
+      invalidate: () => undefined,
+    };
+
+    await assert.rejects(() => new FallbackTokenProvider([refusing, second]).token(), CredentialRejected);
+    assert.equal(second.mints, 0);
   });
 
   it('passes a rejection on to every source it wraps', () => {

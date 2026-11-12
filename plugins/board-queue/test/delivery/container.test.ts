@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { generateKeyPairSync } from 'node:crypto';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -8,6 +9,7 @@ import { buildContainer } from '../../src/delivery/container.ts';
 import type { TokenProvider } from '../../src/application/ports.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import { FakeBoardGateway } from '../fakes/fake-board-gateway.ts';
+import { FakeFetch } from '../fakes/fake-fetch.ts';
 import { FakeIssueGateway } from '../fakes/fake-issue-gateway.ts';
 import { FakeClock, FakeSleeper } from '../fakes/in-memory-time.ts';
 import { lanesByBoard } from '../fakes/lanes.ts';
@@ -209,6 +211,46 @@ describe('what the composition root hands out', () => {
 
       assert.deepEqual(Object.keys(report.repos), testRepos);
       assert.ok(existsSync(join(directory, 'audit.json')));
+    } finally {
+      container.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a worker whose App key anybody may read', () => {
+  it('signs nothing with it, and its pass and the queue\'s status say the credential was refused and how to fix it', async () => {
+    const directory = temporaryDirectory();
+    const keyPath = join(directory, 'app.private-key.pem');
+    writeFileSync(keyPath, generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    }).privateKey, { mode: 0o600 });
+    chmodSync(keyPath, 0o644);
+    const appFetch = new FakeFetch([]);
+    const container = buildContainer({
+      config: testConfig,
+      stateDir: directory,
+      env: { GITHUB_APP_ID: '123456', GITHUB_APP_PRIVATE_KEY_PATH: keyPath },
+      overrides: { appFetch: appFetch.fetch, clock: new FakeClock(), sleeper: new FakeSleeper() },
+    });
+    try {
+      await container.enqueue.execute({
+        kind: 'issue.comment',
+        payload: { repo: FIRST, issue: 12, body: 'the fix is on staging' },
+        origin: 'a session',
+      });
+
+      const report = await container.tick.run();
+      const status = await container.status.execute();
+
+      assert.equal(report.refusedCredential?.by, 'github');
+      assert.match(report.refusedCredential?.reason ?? '', /GITHUB_APP_PRIVATE_KEY_PATH is mode 644/);
+      assert.match(report.refusedCredential?.reason ?? '', /chmod 600/);
+      assert.match(status.pause?.reason ?? '', /chmod 600/);
+      assert.equal(status.counts.queued, 1, 'the work waits for the key to be fixed');
+      assert.equal(appFetch.calls.length, 0, 'nothing was signed, so nothing was sent');
     } finally {
       container.close();
       rmSync(directory, { recursive: true, force: true });

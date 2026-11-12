@@ -7,6 +7,7 @@ import type { ForgeReport } from './forge-pass.ts';
 import type { ImportReport } from './import-ready-work.ts';
 import { LOCK_LOST, TickLockLost } from './leased-gateways.ts';
 import { isMirrored, withdrawMirrored } from './mirror-claims.ts';
+import { PassCeiling } from './pass-ceiling.ts';
 import type { MirrorPass, MirrorReport } from './mirror-claims.ts';
 import { writeMirrorPassOver } from './sync-meta.ts';
 import type { OwnerRefusal, SyncOwner } from './sync-owner.ts';
@@ -93,6 +94,11 @@ export type RunTickDeps = {
   sync?: SyncJobs;
   /** What the coordination server's transports heard about the token, when this deployment talks to one. */
   tokenRefusals?: TokenRefusalRecord;
+  /**
+   * How long one pass may go on taking work; past it the pass starts no further
+   * action and no further job, and ends. Unbounded when not named.
+   */
+  passCeilingSec?: number;
 };
 
 /**
@@ -120,6 +126,7 @@ export class RunTick {
   readonly #audit: ((lease: TickLease) => Promise<void>) | null;
   readonly #sync: SyncJobs | null;
   readonly #tokenRefusals: TokenRefusalRecord | null;
+  readonly #passCeilingMs: number;
 
   constructor(deps: RunTickDeps) {
     this.#drain = deps.drain;
@@ -130,6 +137,7 @@ export class RunTick {
     this.#audit = deps.audit ?? null;
     this.#sync = deps.sync ?? null;
     this.#tokenRefusals = deps.tokenRefusals ?? null;
+    this.#passCeilingMs = deps.passCeilingSec === undefined ? Number.POSITIVE_INFINITY : deps.passCeilingSec * 1000;
   }
 
   /**
@@ -151,14 +159,22 @@ export class RunTick {
    * Whatever the pass did, its report says when a credential it depends on was
    * refused: a pass that met one, or that is waiting one out, has not done its
    * job, however quietly every part of it ended.
+   *
+   * The pass has a ceiling, counted from here. The job that ends finished claims,
+   * which runs before the drain, starts only in its first half, so the queue
+   * always has the second; the mirror runs first and is not held to it. Once the
+   * ceiling is reached nothing more is started — the queue claims no action after its first,
+   * and a job not yet begun is skipped, saying why — and the pass ends with what
+   * it did, each job having released the lock as it finished. The drain itself
+   * always runs, so filed work moves on every pass.
    */
   async run(): Promise<WorkerReport> {
-    const report = await this.#pass();
+    const report = await this.#pass(new PassCeiling(this.#clock.now(), this.#passCeilingMs));
     const refused = await this.#refusedCredential();
     return refused === null ? report : { ...report, refusedCredential: refused };
   }
 
-  async #pass(): Promise<WorkerReport> {
+  async #pass(ceiling: PassCeiling): Promise<WorkerReport> {
     const sync = this.#sync;
     const mirrorWaitsForOwner = sync?.mirror !== undefined && (sync.mirrorScope ?? 'all') === 'all';
     const ownerJobs = sync !== null && (mirrorWaitsForOwner || sync.importer !== undefined || sync.forge !== undefined);
@@ -183,7 +199,9 @@ export class RunTick {
     } else if (sync?.mirror !== undefined && allowed?.ok === false && allowed.refusal === 'not-the-owner') {
       await this.#retireMirrored(allowed.reason);
     }
-    if (sync?.finish !== undefined) {
+    if (sync?.finish !== undefined && ceiling.halfGone(this.#clock.now())) {
+      syncReport.finish = { skipped: ceiling.halfGoneReason() };
+    } else if (sync?.finish !== undefined) {
       const finish = await this.#locked('ending finished claims', sync.finish);
       syncReport.finish = finish.report;
       if (finish.lockLost) {
@@ -194,17 +212,20 @@ export class RunTick {
     const passedOver = sync?.mirror === undefined ? null : await this.#mirroredWaiting(cleared, syncReport);
     const drained = await this.#drain.run(
       passedOver === null ? undefined : (action) => isMirrored(action) && !cleared.has(action.id),
+      ceiling,
     );
     const report: TickReport = passedOver === null ? drained : { ...drained, passedOver };
     if (report.lockLost === true) {
       return sync === null ? report : { ...report, sync: syncReport };
     }
-    if (await this.#maybeAudit(report)) {
+    if (await this.#maybeAudit(report, ceiling)) {
       return sync === null ? { ...report, lockLost: true } : { ...report, lockLost: true, sync: syncReport };
     }
 
     if (mayKeepInStep && sync.importer !== undefined) {
-      if (await this.#queueIsFree(report)) {
+      if (ceiling.reached(this.#clock.now())) {
+        syncReport.import = { skipped: ceiling.reason() };
+      } else if (await this.#queueIsFree(report)) {
         const imported = await this.#locked('the import', sync.importer);
         syncReport.import = imported.report;
         if (imported.lockLost) {
@@ -215,7 +236,9 @@ export class RunTick {
       }
     }
     if (mayKeepInStep && sync.forge !== undefined) {
-      if (await this.#queueIsFree(report)) {
+      if (ceiling.reached(this.#clock.now())) {
+        syncReport.forge = { skipped: ceiling.reason() };
+      } else if (await this.#queueIsFree(report)) {
         const forged = await this.#locked('the forge pass', sync.forge);
         syncReport.forge = forged.report;
         if (forged.lockLost) {
@@ -326,10 +349,13 @@ export class RunTick {
     return pause === null || !pause.isActive(this.#clock.now());
   }
 
-  /** Writes the report when it is due; answers whether it found the lock taken by another pass. */
-  async #maybeAudit(report: TickReport): Promise<boolean> {
+  /**
+   * Writes the report when it is due and the pass is still inside its ceiling;
+   * answers whether it found the lock taken by another pass.
+   */
+  async #maybeAudit(report: TickReport, ceiling: PassCeiling): Promise<boolean> {
     const audit = this.#audit;
-    if (audit === null || !(await this.#worthReading(report))) {
+    if (audit === null || ceiling.reached(this.#clock.now()) || !(await this.#worthReading(report))) {
       return false;
     }
     const before = await readLastAuditAttemptAt(this.#repository);

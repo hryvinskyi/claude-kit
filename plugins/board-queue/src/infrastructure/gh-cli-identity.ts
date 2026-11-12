@@ -1,23 +1,19 @@
-import { execFileSync } from 'node:child_process';
 import type { LocalIdentity } from '../application/sync-ports.ts';
-
-/** Running a command and answering what it printed, narrow enough for a test to stand in for. */
-export type CommandOutput = (command: string, args: readonly string[]) => string;
-
-const runCommand: CommandOutput = (command, args) =>
-  execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+import { commandWithDeadline } from './command-runner.ts';
+import type { CommandRunner } from './command-runner.ts';
 
 /**
  * The login the GitHub command line tool is signed in as on this machine, read
  * from its own configuration: nothing goes over the network, and nothing a
- * credential would be printed by is run. A tool that is missing, or signed in to
- * nobody, answers no login.
+ * credential would be printed by is run. A tool that is missing, signed in to
+ * nobody, or still not answering at its deadline (it is killed then) answers no
+ * login.
  */
 export class GhCliIdentity implements LocalIdentity {
-  readonly #run: CommandOutput;
+  readonly #run: CommandRunner;
   readonly #host: string;
 
-  constructor(run: CommandOutput = runCommand, host = 'github.com') {
+  constructor(run: CommandRunner = commandWithDeadline({ errors: 'ignore' }), host = 'github.com') {
     this.#run = run;
     this.#host = host;
   }

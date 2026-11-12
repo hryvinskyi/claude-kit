@@ -14,6 +14,7 @@ import type { BudgetPolicy } from './budget-policy.ts';
 import { catalogWarnings, unansweredOptions, wantedOptions } from './catalog-warnings.ts';
 import { leasedLane, LOCK_LOST, TickLockLost } from './leased-gateways.ts';
 import { LimiterWait } from './limiter-wait.ts';
+import type { PassCeiling } from './pass-ceiling.ts';
 import { planReplay, replayNote, rowReadingsOf } from './option-wait.ts';
 import type { ReplayPlan } from './option-wait.ts';
 import { writeLastBudget, writeLastTickAt, writeSecondaryHits } from './queue-meta.ts';
@@ -253,16 +254,26 @@ export class DrainQueue {
     this.#wait = new LimiterWait({ repository: deps.repository, policy: deps.policy, logger: deps.logger });
   }
 
-  /** One pass; an action `passOver` names stays queued this time, holding its place. */
-  async run(passOver?: (action: Action) => boolean): Promise<TickReport> {
-    const report = await this.#repository.withTickLock((lease) => this.#tick(lease, passOver));
+  /**
+   * One pass; an action `passOver` names stays queued this time, holding its place.
+   * Once the pass's `ceiling` is reached no further action is claimed, and the
+   * pass ends as it does when the queue runs dry. The first action is claimed
+   * whatever the ceiling says, so filed work moves on every pass however long the
+   * jobs before the drain took.
+   */
+  async run(passOver?: (action: Action) => boolean, ceiling?: PassCeiling): Promise<TickReport> {
+    const report = await this.#repository.withTickLock((lease) => this.#tick(lease, passOver, ceiling ?? null));
     if (report === null) {
       return notRun('another tick holds the lock');
     }
     return report;
   }
 
-  async #tick(lease: TickLease, passOver: ((action: Action) => boolean) | undefined): Promise<TickReport> {
+  async #tick(
+    lease: TickLease,
+    passOver: ((action: Action) => boolean) | undefined,
+    ceiling: PassCeiling | null,
+  ): Promise<TickReport> {
     const recovered = await this.#putBackWhatAnEarlierRunLeftInHand();
 
     const waiting = await this.#waitingOut();
@@ -289,6 +300,10 @@ export class DrainQueue {
       const mayStart = this.#policy.mayStart(budget, tally.executed);
       if (!mayStart.ok) {
         stoppedBecause = mayStart.reason;
+        break;
+      }
+      if (tally.executed > 0 && ceiling?.reached(this.#clock.now()) === true) {
+        stoppedBecause = ceiling.reason();
         break;
       }
       if (!(await lease.stillHeld())) {

@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { OwnMoves } from '../../src/application/mirror-audience.ts';
 import { TickLockLost } from '../../src/application/leased-gateways.ts';
 import { MirrorClaims } from '../../src/application/mirror-claims.ts';
-import { readLastAuditAttemptAt, writeLastAudit, writeLastAuditAttemptAt } from '../../src/application/queue-meta.ts';
+import { readLastAuditAttemptAt, readLastTickAt, writeLastAudit, writeLastAuditAttemptAt } from '../../src/application/queue-meta.ts';
 import { QueueStatus } from '../../src/application/queue-status.ts';
 import { RunTick } from '../../src/application/run-tick.ts';
 import { statusLines } from '../../src/delivery/human-text.ts';
@@ -660,3 +660,165 @@ describe('a tick that keeps the board in step', () => {
     assert.equal(mirrored.filedFor, 'alice');
   });
 });
+
+describe('a pass with a ceiling', () => {
+  const ISSUES = [12, 13, 14, 15, 16];
+
+  /** Five actions on five issues, each a minute apart because the queue paces itself by a minute. */
+  async function fivePaced(): Promise<TickFixture> {
+    const fixture = tickFixture({
+      worker: { paceMs: 60_000 },
+      items: ISSUES.map((issue) => seedItem(IssueRef.of(FIRST, issue), `item-${String(issue)}`, {})),
+      issues: ISSUES.map((issue) => ({ ref: IssueRef.of(FIRST, issue) })),
+    });
+    for (const issue of ISSUES) {
+      await fixture.file({ id: `a-${String(issue)}`, payload: setFields(issue, { severity: 'S2' }) });
+    }
+    await writeLastAudit(fixture.repository, {
+      at: new Date(fixture.clock.now().getTime() - 7 * 60 * 60 * 1000),
+      notOnBoard: 0,
+      emptyFields: 0,
+      closedNotDone: 0,
+    });
+    return fixture;
+  }
+
+  it('claims no action past its ceiling, skips the jobs not yet begun, and leaves the lock free', async () => {
+    const fixture = await fivePaced();
+    const ran: string[] = [];
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      passCeilingSec: 120,
+      audit: () => {
+        ran.push('audit');
+        return Promise.resolve();
+      },
+      sync: {
+        owner: new SyncOwner({ identity: identity('alice'), sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        importer: () => {
+          ran.push('import');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+        forge: () => {
+          ran.push('forge');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+      },
+    });
+
+    const report = await tick.run();
+
+    // A set-fields action paces itself a minute between its writes, and the queue a
+    // minute between two actions: the first ends a minute in, the second starts
+    // inside the two minutes and ends three in, and the third is never claimed.
+    assert.equal(report.executed, 2);
+    assert.equal(report.done, 2);
+    assert.match(report.stoppedBecause ?? '', /the pass reached its ceiling of 120 s, so it took no more work/);
+    assert.deepEqual(ran, [], 'no job starts once the pass has had its time');
+    assert.deepEqual(report.sync?.import, { skipped: report.stoppedBecause });
+    assert.deepEqual(report.sync?.forge, { skipped: report.stoppedBecause });
+    for (const id of ['a-14', 'a-15', 'a-16']) {
+      assert.equal((await fixture.stored(id)).state, 'queued');
+    }
+    assert.equal(await fixture.repository.withTickLock(() => Promise.resolve('taken')), 'taken');
+  });
+
+  it('still drains one action when a job before the drain used the whole of the pass', async () => {
+    const fixture = await fivePaced();
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      passCeilingSec: 120,
+      sync: {
+        owner: new SyncOwner({ identity: identity('alice'), sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        finish: () => {
+          fixture.clock.advance(5 * 60_000);
+          return Promise.resolve({
+            at: fixture.clock.now().toISOString(),
+            held: 0,
+            completed: [],
+            error: null,
+            holder: null,
+            declined: null,
+            handedOn: [],
+            gone: 0,
+          });
+        },
+      },
+    });
+
+    const report = await tick.run();
+
+    // Filed work moves on every pass, however long what came before it took.
+    assert.equal(report.skipped, undefined);
+    assert.equal(report.executed, 1);
+    assert.equal((await fixture.stored('a-12')).state, 'done');
+    assert.equal((await fixture.stored('a-13')).state, 'queued');
+    assert.match(report.stoppedBecause ?? '', /ceiling of 120 s/);
+    assert.equal((await readLastTickAt(fixture.repository))?.toISOString(), fixture.clock.now().toISOString());
+  });
+
+  it('skips the jobs before the drain once half the pass is gone, keeping the rest for the queue', async () => {
+    const fixture = await fivePaced();
+    const ran: string[] = [];
+    const slowLogin: LocalIdentity = {
+      login: () => {
+        fixture.clock.advance(70_000);
+        return Promise.resolve('alice');
+      },
+    };
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      passCeilingSec: 120,
+      sync: {
+        owner: new SyncOwner({ identity: slowLogin, sync: SYNC, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        finish: () => {
+          ran.push('finish');
+          return Promise.reject(new Error('the job before the drain ran in the queue\'s half of the pass'));
+        },
+        importer: () => {
+          ran.push('import');
+          return Promise.resolve({ skipped: 'nothing to do' });
+        },
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.deepEqual(ran, []);
+    assert.match(
+      report.sync?.finish !== undefined && 'skipped' in report.sync.finish ? report.sync.finish.skipped : '',
+      /half of the pass's ceiling of 120 s is gone; the rest is the queue's/,
+    );
+    assert.equal(report.executed, 1, 'the drain had the rest of the pass');
+    assert.equal((await fixture.stored('a-12')).state, 'done');
+  });
+
+  it('runs every action when no ceiling is named', async () => {
+    const fixture = await fivePaced();
+    const report = await runWithoutCeiling(fixture);
+
+    assert.equal(report.done, ISSUES.length);
+  });
+});
+
+function runWithoutCeiling(fixture: TickFixture): ReturnType<RunTick['run']> {
+  return new RunTick({
+    drain: fixture.drain,
+    repository: fixture.repository,
+    policy: fixture.policy,
+    clock: fixture.clock,
+    logger: fixture.logger,
+  }).run();
+}

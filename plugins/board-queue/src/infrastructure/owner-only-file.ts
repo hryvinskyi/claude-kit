@@ -7,6 +7,13 @@ const GROUP_AND_WORLD = 0o077;
 export type OwnerOnlyText = { text: string; mode: string };
 
 /**
+ * A secret's file that is there but not safe to use: another account owns it,
+ * or its group or everybody else may read it. Kept apart from a file that is
+ * simply missing, because nothing but a person changing the file mends it.
+ */
+export class UnsafeSecretFile extends RefusedByRule {}
+
+/**
  * The text of a file that holds a secret, read only when the file is this
  * process's own and nobody else's.
  *
@@ -14,6 +21,7 @@ export type OwnerOnlyText = { text: string; mode: string };
  * is read is exactly what was checked — a file swapped in between a look and a
  * read is never read. `named` says how the file is spoken of in a refusal (the
  * variable that names it); no refusal repeats its path or anything it holds.
+ * A refusal of a file that is there says how to make it safe.
  */
 export function readOwnerOnlyFile(path: string, named: string): OwnerOnlyText {
   let descriptor: number;
@@ -29,13 +37,16 @@ export function readOwnerOnlyFile(path: string, named: string): OwnerOnlyText {
     }
     const uid = process.getuid?.();
     if (uid !== undefined && stat.uid !== uid) {
-      throw new RefusedByRule(`${named} belongs to another account; it must be this account's own`);
+      throw new UnsafeSecretFile(
+        `${named} belongs to another account; it must be this account's own: chown it to this account `
+        + '(or copy it into a file this account creates), then chmod 600 it',
+      );
     }
     const mode = stat.mode & 0o777;
     if ((mode & GROUP_AND_WORLD) !== 0) {
-      throw new RefusedByRule(
+      throw new UnsafeSecretFile(
         `${named} is mode ${mode.toString(8)}; take every permission away from its group and from everybody else, `
-        + 'so that its owner alone may read it (chmod go-rwx)',
+        + 'so that its owner alone may read it (chmod 600)',
       );
     }
     return { text: readFileSync(descriptor, 'utf8'), mode: `0${mode.toString(8)}` };
