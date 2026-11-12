@@ -11,6 +11,8 @@ Pinned, each against the way a shared vault goes wrong:
   back, and says so; a conflict branch merged or deleted on the remote leaves the brief;
 - a push refused twice lands on the third attempt, after jittered waits that are never slept here;
 - with the remote unreachable the notes stay committed on this machine and the brief says so;
+- a commit git refuses (a hook, a signature, no identity) is on the brief with its reason and the
+  command that finishes it, until nothing is left to commit;
 - the session start fast-forwards only a clean clone without commits of its own, and says why not;
 - the session start and the session end never work on one clone at once;
 - the inbox counts only the reader's entries;
@@ -226,6 +228,76 @@ class IntegrationTests(SharedVault):
         alice = self.member("alice")
         with unittest.mock.patch.object(sc, "net", side_effect=AssertionError("no network wanted")):
             self.assertEqual(sc.integrate_vault(alice), "current")
+
+
+class CommitFailureTests(SharedVault):
+    """A commit git refuses reaches the brief with its reason and the command that finishes it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.alice = self.member("alice")
+        self.note(self.alice, "Modules/a.md", "alice's note\n")
+
+    def refused_line(self) -> str:
+        self.assertFalse(sc.commit_vault(self.alice, SESSION))
+        sc.integrate_vault(self.alice, sleep=no_wait([]))
+        lines = [line for line in sc.sync_lines(self.alice) if "could not commit the vault" in line]
+        self.assertEqual(len(lines), 1, sc.sync_lines(self.alice))
+        self.assertIn('or commit it by hand: git -C "kb" commit -m "vault notes"', lines[0])
+        return lines[0]
+
+    def hook(self, name: str, script: str) -> None:
+        hook = self.alice.path / ".git" / "hooks" / name
+        hook.write_text(script)
+        hook.chmod(0o755)
+
+    def test_a_pre_commit_hook_that_refuses_is_named_on_the_brief_until_a_commit_lands(self) -> None:
+        self.hook("pre-commit", "#!/bin/sh\necho 'notes must be reviewed first' >&2\nexit 1\n")
+
+        self.assertIn("git refused the commit: notes must be reviewed first", self.refused_line())
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            sc.brief(self.alice)
+        self.assertIn("could not commit the vault", printed.getvalue())
+
+        (self.alice.path / ".git" / "hooks" / "pre-commit").unlink()
+        self.assertTrue(sc.commit_vault(self.alice, SESSION))
+        self.assertEqual(sc.sync_lines(self.alice), [])
+
+    def test_a_hook_that_refuses_without_a_word_is_still_named(self) -> None:
+        self.hook("pre-commit", "#!/bin/sh\nexit 1\n")
+
+        self.assertIn("without a message", self.refused_line())
+
+    def test_a_signature_that_cannot_be_made_is_named(self) -> None:
+        signer = self.tmp / "signer"
+        signer.write_text("#!/bin/sh\nexit 1\n")
+        signer.chmod(0o755)
+        git(self.alice.path, "config", "commit.gpgsign", "true")
+        git(self.alice.path, "config", "gpg.program", str(signer))
+
+        self.assertIn("signing the commit failed", self.refused_line())
+
+    def test_a_clone_without_an_identity_is_named(self) -> None:
+        git(self.alice.path, "config", "--unset", "user.name")
+        git(self.alice.path, "config", "--unset", "user.email")
+        git(self.alice.path, "config", "user.useConfigOnly", "true")
+        with unittest.mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": "", "GIT_AUTHOR_EMAIL": "", "EMAIL": "",
+                                                   "GIT_COMMITTER_NAME": "", "GIT_COMMITTER_EMAIL": ""}):
+            self.assertIn("git has no identity in the vault", self.refused_line())
+
+    def test_the_line_goes_once_the_notes_are_committed_by_hand(self) -> None:
+        self.hook("pre-commit", "#!/bin/sh\nexit 1\n")
+        self.refused_line()
+
+        git(self.alice.path, "commit", "-q", "--no-verify", "-m", "vault notes")
+
+        self.assertEqual(sc.sync_lines(self.alice), [])
+
+    def test_a_message_that_looks_like_a_credential_is_not_repeated(self) -> None:
+        self.assertEqual(sc.why_not_committed("token=ghp_" + "a1B2c3D4" * 5 + "\n"),
+                         "git refused the commit; its message is in session-capture.log")
+        self.assertIn("did not finish in time", sc.why_not_committed("TimeoutExpired(['git', 'commit'], 120)"))
 
 
 class ConflictTests(SharedVault):

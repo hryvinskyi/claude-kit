@@ -1,9 +1,10 @@
 """The `stamps` driver: the vault check's review stamps merged entry by entry.
 
-A stamps file maps each note to the files it cites, and each of those to its stamp: the commit of
-the project at which someone reviewed that note against that file. Every (note, file) entry is
-merged on its own, and an entry present on either side is never dropped — the vault check stamps a
-missing entry afresh at the project's HEAD, which would record a review nobody made:
+A stamps file maps each note to the files it cites, and each of those to its stamp: the blob of the
+file someone reviewed that note against, and the commit of the project's default branch it was
+taken at. Every (note, file) entry is merged on its own, and an entry present on either side is
+never dropped — the vault check stamps a missing entry afresh at the default branch's tip, which
+would record a review nobody made:
 
 - equal on both sides, it is kept; changed, added or deleted on one side only, that side wins;
 - deleted on one side and changed on the other, the changed one is kept;

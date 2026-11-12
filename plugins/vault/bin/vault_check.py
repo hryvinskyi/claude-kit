@@ -40,6 +40,23 @@ Strike a name through when the sentence is about its retirement (~~`OldName`~~),
 fully qualified (`\DateTimeImmutable`), write a convention with its wildcard (`packages/*/src/`). That
 is the whole escape hatch: no exclusion list, no baseline.
 
+A cited class or path is looked for in the work tree, then at the tip of the project's default branch
+(`origin/HEAD`, else `main` or `master`, remote then local; HEAD when there is none of them). What
+only the default branch holds is SOFT when the commit this branch shares with it (their merge base)
+held it too — this branch removed it, and the session that did sees it — and no finding when the
+merge base did not: the default branch added it after this branch left. Only what neither the work
+tree nor the default branch holds is HARD.
+
+Review stamps are anchored on the default branch's tree, read through git and never checked out, so
+the branch a session is on never moves, resets or downgrades a stamp. A stamp records the blob the
+reviewer saw — the work tree's copy, so a note reviewed on a branch records the branch's code — and
+the default branch's tip. It is current while the default branch holds that blob, and its commit
+moves up the first time it does; it turns the note SOFT once the default branch held the reviewed
+blob and moved off it, when its commit is unknown to this clone and the blobs differ, or when the
+default branch changed the file since its commit to anything but the reviewed blob; a review of
+code the default branch has not reached, of a file it has not touched since, waits. A history that
+cannot be read is one HARD finding naming how many cited files went unchecked.
+
 Review stamps live in `.anchors.json` beside the notes when the vault is its own repository (or is
 ignored by the project), otherwise under `~/.claude/state/vaults/<project>/`, with the brief's cache.
 Nothing is written into a project's tracked tree.
@@ -50,6 +67,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -65,6 +83,8 @@ TTL = int(os.environ.get("VAULT_CHECK_TTL", "1800"))
 # A background check shares the machine with the work it describes: a quarter of the cores, at least two.
 GREP_THREADS = max(2, (os.cpu_count() or 4) // 4)
 LOCK_POLL = 1.0
+# Paths per walk of the default branch's history, so a command line never grows past what a system takes.
+HISTORY_BATCH = 100
 
 GEN_END = re.compile(r"<!--\s*[\w.-]+:generated:end\s*-->")
 LIVING_FOLDERS = ("Modules", "Bridges", "Plugins", "Kernel", "Packages", "Services", "Runbooks")
@@ -335,6 +355,14 @@ def names_the_repository(path: str, bases: list[str], root_entries: set[str],
 # --- the repository -----------------------------------------------------------
 
 
+def php_index_of(paths) -> dict[str, list[str]]:
+    """Class name → the PHP files of that name among `paths`."""
+    index: dict[str, list[str]] = {}
+    for rel in sorted({p for p in paths if p.endswith(".php")}):
+        index.setdefault(rel.rsplit("/", 1)[-1][:-4], []).append(rel)
+    return index
+
+
 class CodeSearchUnfinished(RuntimeError):
     """The search of the code for cited names did not cover the tree, so its silence proves nothing."""
 
@@ -358,31 +386,31 @@ class Repo:
     def php_index(self) -> dict[str, list[str]]:
         """Class name → the repository's PHP files of that name, tracked or not yet."""
         _, out = self.git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.php")
-        index: dict[str, list[str]] = {}
-        for rel in sorted(set(filter(None, out.split("\0")))):
-            index.setdefault(rel.rsplit("/", 1)[-1][:-4], []).append(rel)
-        return index
+        return php_index_of(filter(None, out.split("\0")))
 
-    def words_in_code(self, names: set[str]) -> set[str]:
+    def words_in_code(self, names: set[str], tree: str = "") -> set[str]:
         """The casefolded names occurring as a whole word, in any case, in the non-Markdown files.
 
-        The names are searched as written first, and only those not found are searched again in any
-        case: git grep's cost under -i grows with the number of patterns (69 s against 8 s for 56
-        names over a 143k-file tree), and a cited name is nearly always written as the code writes it.
+        The work tree is searched, or the tree of commit `tree` when one is named. The names are
+        searched as written first, and only those not found are searched again in any case: git
+        grep's cost under -i grows with the number of patterns (69 s against 8 s for 56 names over a
+        143k-file tree), and a cited name is nearly always written as the code writes it.
         """
-        found = self.grep_words(names, any_case=False)
-        return found | self.grep_words({n for n in names if n.casefold() not in found}, any_case=True)
+        found = self.grep_words(names, False, tree)
+        return found | self.grep_words({n for n in names if n.casefold() not in found}, True, tree)
 
-    def grep_words(self, names: set[str], any_case: bool) -> set[str]:
+    def grep_words(self, names: set[str], any_case: bool, tree: str = "") -> set[str]:
+        """The casefolded names found in the work tree, or in the tree of commit `tree` when one is named."""
         if not names:
             return set()
         fd, patterns = tempfile.mkstemp(suffix=".txt")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(sorted(names)) + "\n")
-            code, out = self.git("-c", f"grep.threads={GREP_THREADS}", "grep", "--untracked", "-I", "-h", "-o",
+            code, out = self.git("-c", f"grep.threads={GREP_THREADS}", "grep",
+                                 *(["--untracked"] if not tree else []), "-I", "-h", "-o",
                                  *(["-i"] if any_case else []), "-w", "-F", "-f", patterns,
-                                 "--", ".", ":(exclude)*.md", ":(exclude)*.mdx")
+                                 *([tree] if tree else []), "--", ".", ":(exclude)*.md", ":(exclude)*.mdx")
         finally:
             os.unlink(patterns)
         # git grep answers 1 for "no match"; anything else, a timeout included, means the search never
@@ -406,24 +434,111 @@ class Repo:
         code, out = self.git("check-ignore", "--no-index", "--", *candidates)
         return code == 0 and bool(out.strip())
 
-    def head_blobs(self) -> dict[str, str]:
-        _, out = self.git("ls-tree", "-r", "-z", "HEAD")
+    def commit_of(self, ref: str) -> str:
+        """The commit a ref names, or "" when it names none here."""
+        code, out = self.git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        return out.strip() if code == 0 else ""
+
+    def reference(self) -> str:
+        """The commit review stamps are taken against: the tip of the project's default branch.
+
+        The remote's default branch (`origin/HEAD`), else a remote branch, then a local one, named by
+        `init.defaultBranch`, `main` or `master`; HEAD only when the project has none of them. It is
+        read from git's refs, never from the work tree, so the branch a session is on moves no stamp.
+        """
+        code, out = self.git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+        candidates = [out.strip()] if code == 0 and out.strip() else []
+        code, out = self.git("config", "--get", "init.defaultBranch")
+        names = [name for name in dict.fromkeys([out.strip() if code == 0 else "", "main", "master"]) if name]
+        candidates += [f"refs/remotes/origin/{name}" for name in names]
+        candidates += [f"refs/heads/{name}" for name in names]
+        for ref in [*candidates, "HEAD"]:
+            commit = self.commit_of(ref)
+            if commit:
+                return commit
+        return ""
+
+    def tree(self, commit: str) -> tuple[dict[str, str], set[str]]:
+        """(file path → blob, every path) of a commit's tree; the paths include its directories."""
+        if not commit:
+            return {}, set()
+        _, out = self.git("ls-tree", "-r", "-t", "-z", "--full-tree", commit)
         blobs: dict[str, str] = {}
+        paths: set[str] = set()
         for entry in filter(None, out.split("\0")):
             meta, _, path = entry.partition("\t")
             parts = meta.split()
-            if len(parts) == 3 and parts[1] == "blob":
+            if len(parts) != 3:
+                continue
+            paths.add(path)
+            if parts[1] == "blob":
                 blobs[path] = parts[2]
-        return blobs
+        return blobs, paths
 
-    def head(self) -> str:
-        code, out = self.git("rev-parse", "HEAD")
+    def history_blobs(self, paths: set[str], reference: str) -> tuple[dict[str, set[str]], dict[str, int]]:
+        """Every blob each path has held in the reference's history, read in a few walks of it.
+
+        @return (path → its blobs, path → git's exit code for each path whose history was not read).
+        """
+        held: dict[str, set[str]] = {path: set() for path in paths}
+        unread: dict[str, int] = {}
+        ordered = sorted(paths)
+        for start in range(0, len(ordered), HISTORY_BATCH):
+            batch = ordered[start:start + HISTORY_BATCH]
+            code, out = self.git("--literal-pathspecs", "log", "-z", "--format=", "--raw", "--no-abbrev",
+                                 "--no-renames", reference, "--", *batch)
+            if code != 0:
+                unread.update((path, code) for path in batch)
+                continue
+            # A raw entry is `:<mode> <mode> <old blob> <new blob> <status>` and then its path, each
+            # ended by a NUL; whatever stands between commits is skipped.
+            fields = iter(out.split("\0"))
+            for meta in fields:
+                parts = meta.strip().split()
+                if not meta.strip().startswith(":") or len(parts) != 5:
+                    continue
+                path = next(fields, "")
+                if path in held:
+                    held[path].update(blob for blob in parts[2:4] if blob.strip("0"))
+        return held, unread
+
+    def blobs_at(self, pairs: set[tuple[str, str]]) -> dict[tuple[str, str], str]:
+        """(commit, path) → the blob that commit holds at that path, for those this clone can answer."""
+        if not pairs:
+            return {}
+        ordered = sorted(pairs)
+        try:
+            proc = subprocess.run(["git", "-C", str(self.root), "cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                                  input="".join(f"{commit}:{path}\n" for commit, path in ordered),
+                                  capture_output=True, text=True, timeout=180, env=vaultlib.git_env())
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        answers = proc.stdout.splitlines() if proc.returncode == 0 else []
+        found: dict[tuple[str, str], str] = {}
+        for pair, answer in zip(ordered, answers):
+            parts = answer.split()
+            if len(parts) == 2 and parts[1] == "blob":
+                found[pair] = parts[0]
+        return found
+
+    def worktree_blob(self, path: str) -> Optional[str]:
+        """The blob the work tree's copy of a file would be committed as; None when there is no copy."""
+        if not (self.root / path).is_file():
+            return None
+        code, out = self.git("--literal-pathspecs", "hash-object", "--", path)
+        return out.strip() if code == 0 and out.strip() else None
+
+    def merge_base(self, reference: str) -> str:
+        """The newest commit HEAD and the reference share, or "" when they share none."""
+        if not reference:
+            return ""
+        code, out = self.git("merge-base", "HEAD", reference)
         return out.strip() if code == 0 else ""
 
-    def commits_since(self, commit: str, path: str) -> Optional[int]:
-        if not commit:
+    def commits_since(self, commit: str, path: str, reference: str) -> Optional[int]:
+        if not commit or not reference:
             return None
-        code, out = self.git("rev-list", "--count", f"{commit}..HEAD", "--", path)
+        code, out = self.git("rev-list", "--count", f"{commit}..{reference}", "--", path)
         return int(out.strip()) if code == 0 and out.strip().isdigit() else None
 
 
@@ -452,13 +567,90 @@ def anchors_for(cited: Citations, bases: list[str], index: dict[str, list[str]],
     return {path: context_hash(paras) for path, paras in grouped.items() if path in blobs}
 
 
-def reconcile(current: dict[str, dict[str, str]], stamps: dict, blobs: dict[str, str], head: str,
-              restamp: set[str]) -> tuple[dict, list[tuple[str, str, str]]]:
+class StampHistory:
+    """What carrying the stamps forward asks of the project's history.
+
+    This base knows nothing beyond the stamps themselves: the reviewer saw the reference's blob,
+    every blob was reached, every commit is known and no commit's content can be read.
+    """
+
+    def seen(self, path: str, reference_blob: str) -> str:
+        """The blob a reviewer of `path` is looking at now."""
+        return reference_blob
+
+    def reached(self, path: str, blob: str) -> bool:
+        """Whether the default branch's history of `path` ever held `blob`."""
+        return True
+
+    def known(self, commit: str) -> bool:
+        """Whether this clone has the commit."""
+        return True
+
+    def blob_at(self, commit: str, path: str) -> Optional[str]:
+        """The blob `commit` holds at `path`, or None when this clone cannot say."""
+        return None
+
+    def changed_since(self, commit: str, path: str) -> bool:
+        """Whether the default branch changed `path` in a commit `commit` does not hold."""
+        return False
+
+
+class GitStampHistory(StampHistory):
+    """The project's history as git answers it, read in batches before the stamps are carried."""
+
+    def __init__(self, repo: Repo, reference: str, stamps: dict, blobs: dict[str, str]) -> None:
+        self.repo = repo
+        entries = [(path, entry) for notes in stamps.values() if isinstance(notes, dict)
+                   for path, entry in notes.items() if isinstance(entry, dict) and path in blobs]
+        moved = {path for path, entry in entries if entry.get("blob") != blobs[path]}
+        self.reference = reference
+        self.history, self.unread = repo.history_blobs(moved, reference) if moved and reference else ({}, {})
+        self.contents = repo.blobs_at({(str(entry.get("commit", "")), path) for path, entry in entries
+                                       if entry.get("blob") == blobs[path] and entry.get("commit")
+                                       and entry.get("commit") != reference})
+        self.commits: dict[str, bool] = {}
+        self.copies: dict[str, Optional[str]] = {}
+
+    def seen(self, path: str, reference_blob: str) -> str:
+        if path not in self.copies:
+            self.copies[path] = self.repo.worktree_blob(path)
+        return self.copies[path] or reference_blob
+
+    def reached(self, path: str, blob: str) -> bool:
+        return blob in self.history.get(path, set())
+
+    def known(self, commit: str) -> bool:
+        if commit not in self.commits:
+            self.commits[commit] = bool(commit) and bool(self.repo.commit_of(commit))
+        return self.commits[commit]
+
+    def blob_at(self, commit: str, path: str) -> Optional[str]:
+        return self.contents.get((commit, path))
+
+    def changed_since(self, commit: str, path: str) -> bool:
+        return bool(self.repo.commits_since(commit, path, self.reference))
+
+
+def reconcile(current: dict[str, dict[str, str]], stamps: dict, blobs: dict[str, str], reference: str,
+              restamp: set[str], history: Optional[StampHistory] = None
+              ) -> tuple[dict, list[tuple[str, str, str]]]:
     """Carry the stamps forward and name every anchor whose file moved under unchanged prose.
 
-    An anchor is (re-)stamped at HEAD when it is new, when the paragraphs citing it changed, or when
-    its note is being stamped; otherwise it keeps its stamp and is stale if the file's blob moved.
+    `blobs` is the reference commit's tree. An anchor is (re-)stamped when it is new, when the
+    paragraphs citing it changed, or when its note is being stamped: with the blob the reviewer saw
+    (the work tree's copy, so a review on a branch records the branch's code) and the reference as
+    its commit. Otherwise it keeps its stamp, and against the reference's blob it is:
+
+    - current when the blobs are the same; its commit moves up to the reference the first time the
+      reference holds the reviewed blob, so a later change is counted from there;
+    - stale when the default branch once held the reviewed blob and has moved off it; when the
+      stamp's commit is unknown to this clone, so there is nothing to tell it by but the blobs; or
+      when the default branch changed the file since the stamp's commit to something other than the
+      reviewed blob — a branch changed again before it merged, or one that never will;
+    - waiting otherwise: the review is of code the default branch has not reached and the default
+      branch has not touched the file since — a branch not merged yet — and the stamp is left as it is.
     """
+    history = history or StampHistory()
     carried: dict = {}
     stale: list[tuple[str, str, str]] = []
     for note in sorted(current):
@@ -468,11 +660,16 @@ def reconcile(current: dict[str, dict[str, str]], stamps: dict, blobs: dict[str,
             context = current[note][path]
             before = previous.get(path)
             if not isinstance(before, dict) or before.get("context") != context or note in restamp:
-                entries[path] = {"blob": blobs[path], "commit": head, "context": context}
+                entries[path] = {"blob": history.seen(path, blobs[path]), "commit": reference, "context": context}
                 continue
             entries[path] = before
-            if before.get("blob") != blobs[path]:
-                stale.append((note, path, str(before.get("commit", ""))))
+            blob, commit = before.get("blob"), str(before.get("commit", ""))
+            if blob == blobs[path]:
+                if commit != reference and history.blob_at(commit, path) != blob:
+                    entries[path] = {**before, "commit": reference}
+            elif (history.reached(path, str(blob)) or not history.known(commit)
+                  or history.changed_since(commit, path)):
+                stale.append((note, path, commit))
         if entries:
             carried[note] = entries
     return carried, stale
@@ -486,6 +683,7 @@ class Finding:
     level: str  # HARD | SOFT
     note: str
     message: str
+    removed: bool = False  # a SOFT one: cites what this branch removed and the default branch still has
 
 
 @dataclass
@@ -503,6 +701,16 @@ class Report:
     @property
     def soft_notes(self) -> list[str]:
         return sorted({f.note for f in self.findings if f.level == "SOFT"})
+
+    @property
+    def stale_notes(self) -> list[str]:
+        """The notes citing code that changed under them, which a review and `--stamp` settle."""
+        return sorted({f.note for f in self.findings if f.level == "SOFT" and not f.removed})
+
+    @property
+    def removed_notes(self) -> list[str]:
+        """The notes citing what this branch removed, which only a change of the prose settles."""
+        return sorted({f.note for f in self.findings if f.removed})
 
 
 def vault_files(vault: Path) -> list[Path]:
@@ -592,11 +800,35 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
     if not repo.is_git():
         return report
 
+    # What a note cites is looked for in the work tree, then in the default branch's tree. What only
+    # the default branch holds was either removed by this branch — SOFT, so the session that removed
+    # it sees it — or added to the default branch after this branch left it, which is no finding:
+    # the commit both share (their merge base) tells the two apart. Only what neither holds is HARD.
+    reference = repo.reference()
+    ref_blobs, ref_paths = repo.tree(reference)
+    ref_index = php_index_of(ref_blobs)
+    shared: dict[str, tuple[str, dict[str, list[str]], set[str]]] = {}
+
+    def at_base() -> tuple[str, dict[str, list[str]], set[str]]:
+        """(the merge base of HEAD and the reference, its PHP index, its paths), read once when needed."""
+        if "base" not in shared:
+            base = repo.merge_base(reference)
+            base_blobs, base_paths = (ref_blobs, ref_paths) if base == reference else repo.tree(base)
+            shared["base"] = (base, php_index_of(base_blobs), base_paths)
+        return shared["base"]
     vendor_dirs = repo.vendor_dirs()
     note_bases, report.config_problems = load_note_bases(vault.path)
-    root_entries = {p.name for p in vault.root.iterdir()}
+    root_entries = {p.name for p in vault.root.iterdir()} | {p.split("/", 1)[0] for p in ref_paths}
     bases = {rel: package_bases(rel, vendor_dirs, note_bases) for rel in living}
-    exists = lambda rel: (vault.root / rel).exists()  # noqa: E731
+
+    def here(rel: str) -> bool:
+        return (vault.root / rel).exists()
+
+    def anywhere(rel: str) -> bool:
+        return here(rel) or rel.rstrip("/") in ref_paths
+
+    def in_base(rel: str) -> bool:
+        return rel.rstrip("/") in at_base()[2]
 
     index = repo.php_index()
     cited: set[str] = set()
@@ -605,8 +837,26 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
     report.names = len(cited)
     known = {name.casefold() for name in index}
     missing = {n for n in cited if n.casefold() not in known}
+    removed: set[str] = set()
     try:
         found = repo.words_in_code(missing)
+        missing = {n for n in missing if n.casefold() not in found}
+        if missing:
+            vendored = repo.vendor_stems()
+            missing = {n for n in missing if n.casefold() not in vendored}
+        indexed = {name.casefold() for name in ref_index}
+        on_reference = {n for n in missing if n.casefold() in indexed}
+        if reference and missing - on_reference:
+            found = repo.words_in_code(missing - on_reference, reference)
+            on_reference |= {n for n in missing if n.casefold() in found}
+        missing -= on_reference
+        if on_reference:
+            base, base_index, _ = at_base()
+            indexed = {name.casefold() for name in base_index}
+            removed = {n for n in on_reference if n.casefold() in indexed}
+            if base and on_reference - removed:
+                found = repo.words_in_code(on_reference - removed, base)
+                removed |= {n for n in on_reference if n.casefold() in found}
     except CodeSearchUnfinished as unfinished:
         # One honest finding instead of one false one per name: the names stay unchecked, not gone.
         reason = "did not finish in time" if unfinished.code == vaultlib.TIMED_OUT else f"failed ({unfinished.code})"
@@ -614,38 +864,51 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
             "HARD", vault.rel, f"the search of the code for {len(missing)} cited name(s) {reason}, so none of them "
                                "was checked — keep large untracked trees out of it (.git/info/exclude) and run again"))
         missing = set()
-        found = set()
-    missing = {n for n in missing if n.casefold() not in found}
-    if missing:
-        vendored = repo.vendor_stems()
-        missing = {n for n in missing if n.casefold() not in vendored}
+        removed = set()
 
     for rel in sorted(living):
         for name in sorted(set(living[rel].names) & missing):
             report.findings.append(Finding(
                 "HARD", rel, f"`{name}` appears nowhere in the code — correct the prose, "
                              f"or strike it through as history: ~~`{name}`~~"))
+        for name in sorted(set(living[rel].names) & removed):
+            report.findings.append(Finding(
+                "SOFT", rel, f"`{name}` is gone from this branch while the default branch still has it — correct "
+                             f"the prose if this branch removes it, or strike it through: ~~`{name}`~~", removed=True))
         for cited_path in sorted(living[rel].paths):
-            if not names_the_repository(cited_path, bases[rel], root_entries, exists):
+            if not names_the_repository(cited_path, bases[rel], root_entries, anywhere):
                 continue
-            if resolve_path(cited_path, bases[rel], exists) is not None:
+            if resolve_path(cited_path, bases[rel], here) is not None:
+                continue
+            if resolve_path(cited_path, bases[rel], anywhere) is not None:
+                if resolve_path(cited_path, bases[rel], in_base) is not None:
+                    report.findings.append(Finding(
+                        "SOFT", rel, f"`{cited_path}` is gone from this branch while the default branch still has "
+                                     f"it — correct the prose if this branch removes it", removed=True))
                 continue
             # Asked only where the path could live — a base under an ignored vendor/ must not excuse it.
             first = cited_path.split("/", 1)[0]
             homes = [base for base in ["", *bases[rel]]
-                     if (first in root_entries if base == "" else exists(base + first))]
+                     if (first in root_entries if base == "" else anywhere(base + first))]
             if repo.ignored([base + cited_path for base in homes]):
                 continue
             report.findings.append(Finding(
                 "HARD", rel, f"`{cited_path}` does not exist — correct the prose, "
                              f"or strike it through as history"))
 
-    blobs = repo.head_blobs()
-    current = {rel: anchors_for(c, bases[rel], index, blobs) for rel, c in living.items()}
+    current = {rel: anchors_for(c, bases[rel], ref_index, ref_blobs) for rel, c in living.items()}
     report.anchors = sum(len(a) for a in current.values())
     target = stamps_file(vault)
     stamps = load_stamps(target)
-    carried, stale = reconcile(current, stamps, blobs, repo.head(), restamp or set())
+    history = GitStampHistory(repo, reference, stamps, ref_blobs)
+    carried, stale = reconcile(current, stamps, ref_blobs, reference, restamp or set(), history)
+    if history.unread:
+        # One honest finding instead of a silence: these stamps were not checked, not found current.
+        codes = ", ".join(str(code) for code in sorted(set(history.unread.values())))
+        report.findings.append(Finding(
+            "HARD", vault.rel, f"the default branch's history of {len(history.unread)} cited file(s) could not be "
+                               f"read (git log ended with {codes}), so the stamps on them were not checked — "
+                               "run again"))
 
     by_note: dict[str, list[tuple[str, str]]] = {}
     for note, path, commit in stale:
@@ -653,7 +916,7 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
     for note in sorted(by_note):
         shown = []
         for path, commit in by_note[note][:5]:
-            count = repo.commits_since(commit, path)
+            count = repo.commits_since(commit, path, reference)
             shown.append(f"`{path}`" + (f" ({count} commit{'s' if count != 1 else ''})" if count else ""))
         more = f" and {len(by_note[note]) - 5} more" if len(by_note[note]) > 5 else ""
         report.findings.append(Finding(
@@ -685,9 +948,12 @@ def brief_lines(report: Report) -> list[str]:
         lines.append(f"[VAULT] {len(report.hard)} hard finding(s) in {notes} note(s) — prose citing code "
                      f"that no longer exists, a broken link or a malformed decision · "
                      f"vault-check")
-    if report.soft_notes:
-        lines.append(f"[VAULT] {len(report.soft_notes)} note(s) cite code that changed since they "
+    if report.stale_notes:
+        lines.append(f"[VAULT] {len(report.stale_notes)} note(s) cite code that changed since they "
                      f"described it — review, then --stamp · vault-check")
+    if report.removed_notes:
+        lines.append(f"[VAULT] {len(report.removed_notes)} note(s) cite code this branch removed and the default "
+                     f"branch still has — correct the prose before it merges · vault-check")
     if report.config_problems:
         lines.append(f"[VAULT] {len(report.config_problems)} note-base rule problem(s) — a rule that does not "
                      f"parse is skipped · vault-check")

@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import json
 import os
+import importlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PLUGIN / "bin"))
+vaultlib = importlib.import_module("vaultlib")
 BRIEF = PLUGIN / "hooks" / "session_brief.sh"
 NUDGE = PLUGIN / "hooks" / "journal_nudge.py"
 NODE_DIR = str(Path(shutil.which("node") or "/usr/bin/node").parent)
@@ -70,6 +74,63 @@ class HookTests(unittest.TestCase):
         brief = self.run_file([str(BRIEF)])
 
         self.assertEqual((brief.returncode, brief.stdout), (0, ""))
+
+    def record_conflict(self) -> None:
+        """What a session end that parked notes on a conflict branch leaves in the state directory."""
+        vault = vaultlib.Vault(root=self.project, path=self.project / "kb", mode="no-git")
+        state = Path(self.env["CLAUDE_VAULT_STATE"]) / vault.slug / "vault-sync.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"conflicts": [{"branch": "conflict/alice/20261017-1840", "onto": "main",
+                                                    "time": "2026-10-17 20:40", "reset": True}]}), encoding="utf-8")
+
+    def own_hooks(self, *events: str) -> None:
+        (self.project / ".claude").mkdir()
+        hooks = {event: [] for event in events}
+        (self.project / ".claude" / "settings.json").write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
+    def test_a_project_briefing_its_own_session_start_still_hears_what_the_session_end_left(self) -> None:
+        self.own_hooks("SessionStart")
+        self.record_conflict()
+
+        brief = self.run_file([str(BRIEF)])
+
+        self.assertEqual(brief.returncode, 0, brief.stderr)
+        self.assertIn("[VAULT CONFLICT] your notes from 2026-10-17 20:40 are on branch conflict/alice/20261017-1840",
+                      brief.stdout)
+        self.assertNotIn("[NOW]", brief.stdout, "the board is the project's own brief to print")
+        self.assertNotIn("no copy off this machine", brief.stdout)
+
+    def test_a_project_that_ends_its_own_sessions_hears_nothing_from_the_session_end(self) -> None:
+        self.own_hooks("SessionStart", "SessionEnd")
+        self.record_conflict()
+
+        brief = self.run_file([str(BRIEF)])
+
+        self.assertEqual((brief.returncode, brief.stdout), (0, ""))
+
+    def test_a_vault_without_a_board_is_still_fast_forwarded_and_told_what_the_session_end_left(self) -> None:
+        remote, seed = self.tmp / "remote.git", self.tmp / "seed"
+        who = ["-c", "user.name=T", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        subprocess.run(["git", "clone", "-q", str(remote), str(seed)], check=True, capture_output=True)
+        (seed / "Decisions").mkdir()
+        (seed / "Decisions" / "README.md").write_text("decisions\n", encoding="utf-8")
+        git(seed, "add", "-A")
+        git(seed, *who, "commit", "-q", "-m", "seed")
+        git(seed, "push", "-q", "origin", "main")
+        shutil.rmtree(self.project / "kb")
+        (self.project / "CLAUDE.md").write_text("Knowledge-base directory: `kb/`\n", encoding="utf-8")
+        subprocess.run(["git", "clone", "-q", str(remote), str(self.project / "kb")], check=True, capture_output=True)
+        (seed / "Decisions" / "0002 a teammate's record.md").write_text("pushed by a teammate\n", encoding="utf-8")
+        git(seed, "add", "-A")
+        git(seed, *who, "commit", "-q", "-m", "teammate")
+        git(seed, "push", "-q", "origin", "main")
+
+        brief = self.run_file([str(BRIEF)])
+
+        self.assertEqual(brief.returncode, 0, brief.stderr)
+        self.assertIn("[VAULT] brought up to date — 1 commit from the remote", brief.stdout)
+        self.assertTrue((self.project / "kb" / "Decisions" / "0002 a teammate's record.md").is_file())
 
     def test_the_brief_asks_the_board_queue_command_about_this_repository(self) -> None:
         git(self.project, "init", "-q")

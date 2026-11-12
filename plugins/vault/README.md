@@ -7,14 +7,19 @@ kept as Markdown beside the code, and the tools that keep it honest.
 
 | Part | When it runs | What it does |
 |---|---|---|
-| `hooks/session_brief.sh` | `SessionStart` (startup, clear) | Brings a vault that is its own repository up to date (fetch and fast-forward only), then prints a short brief: the board's `## Now` and `## Next`, the latest journal entry and decision, the vault check's findings, the inbox, conflict and backup lines, and the board queue's lines for this repository when a `board-queue` command is installed |
+| `hooks/session_brief.sh` | `SessionStart` (startup, clear) | Brings a vault that is its own repository up to date (fetch and fast-forward only), then prints a short brief: the board's `## Now` and `## Next`, the latest journal entry and decision, the vault check's findings, the inbox, conflict, failed-commit and backup lines, and the board queue's lines for this repository when a `board-queue` command is installed |
 | `bin/session_capture.py` | `SessionEnd` | Hands off to a detached worker that files a session which committed work without a journal entry into the vault's inbox, refreshes the vault check, commits a vault that is a git repository of its own — less any file that looks like a credential, which stays in the work tree and is named on the brief — rebases it onto its remote and pushes it, and refreshes the search index |
 | `hooks/journal_nudge.py` | `Stop` | Once per session, after real work in a vault project with no journal entry for today, asks the model to offer `/vault:journal` |
 | `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync` | on request | Write a decision record, a journal entry, work the TODO board, refresh the notes from the code |
 | `vault:wiki-updater` | spawned by `/vault:wiki-sync` | Runs the project's sync tooling and writes the prose a script cannot. A project that defines its own `wiki-updater` agent gets that one instead |
 
 A project whose own `.claude/settings.json` declares a `SessionStart` or `SessionEnd` hook is left to
-its own tooling for that event: the brief and the capture exit without doing anything there.
+its own tooling for that event: the brief and the capture exit without doing anything there. One
+thing crosses that line: where this plugin's session end runs, what it did reaches the next session
+start. A project that briefs its own session start, or a vault with no `To DO.md`, still gets the
+vault's fast-forward and the session end's outcome lines — a conflict branch, a failed commit, files
+held back, the inbox (`vault-capture --outcome`) — and nothing else of the brief. A project that also
+ends its own sessions gets none of it.
 
 ## Finding the vault
 
@@ -36,8 +41,8 @@ The plugin's `bin/` is on the Bash tool's search path while the plugin is enable
 | Command | Runs |
 |---|---|
 | `find-vault [root]` | the resolver |
-| `vault-check [--check \| --quiet \| --brief \| --stamp NOTE…]` | `bin/vault_check.py`: holds the notes to the code — a cited class or path that exists nowhere, or a broken link, is a hard finding; a cited file that changed since its paragraph was stamped is a soft one |
-| `vault-capture [--brief]` | `bin/session_capture.py` |
+| `vault-check [--check \| --quiet \| --brief \| --stamp NOTE…]` | `bin/vault_check.py`: holds the notes to the code — a cited class or path that exists nowhere, or a broken link, is a hard finding; a cited file that changed on the project's default branch since its paragraph was stamped, or one this branch removed, is a soft one |
+| `vault-capture [--brief \| --outcome]` | `bin/session_capture.py` |
 | `vault-search ensure \| refresh` | `bin/vault_search.py`: a `qmd` search index of the vault in `<project>/.qmd/` |
 | `vault-merge <driver> %O %A %B %P` | `bin/vault_merge/`: the git merge drivers below |
 | `vault-merge selfcheck FILE…` | reads each file as the `keyed` driver does and fails unless it writes back byte for byte; prints counts only |
@@ -64,6 +69,28 @@ The rule file applies to every vault of the user. For one vault only, set the mu
 `vault-check.noteBase` there: `git -C <vault> config --add vault-check.noteBase '<regex> <template>'`.
 Both sources apply. A rule that does not parse is named once per run, on the `vault-check` output
 and the session brief, and skipped; the check itself runs on.
+
+## Which code `vault-check` reads
+
+A cited class or path is looked for in the work tree, then at the tip of the project's default
+branch: `origin/HEAD`, else `main` or `master` (from the remote, then local; `init.defaultBranch` is
+tried first), else HEAD. What only the default branch holds is a soft finding when the commit this
+branch shares with it (their merge base) held it too — this branch removed it, and the session that
+did is told to correct the prose before it merges — and no finding when the merge base did not: the
+default branch added it after this branch left. Only what neither holds is a hard finding.
+
+Review stamps are anchored on the default branch's tree, read through git without checking anything
+out, so the branch a session is on never moves, resets or downgrades a stamp, and two people on
+different branches never turn a note soft for each other. A stamp records the blob the reviewer saw
+(the work tree's copy, so a note rewritten or stamped on a branch records the branch's code) and the
+default branch's tip. It stays current while the default branch holds that blob, and its commit moves
+up the first time the default branch does, so a branch reviewed before it merged is current after.
+A note turns soft once the default branch held the reviewed blob and moved off it, or when the
+stamp's commit is not in this clone and the blobs differ, or when the default branch changed the file
+since the stamp's commit to anything but the reviewed blob (a branch changed again before it merged,
+or abandoned). A review of code the default branch has not reached, of a file it has not touched
+since, waits. A history `git log` cannot read is one hard finding saying how many cited files went
+unchecked, never a silence.
 
 ## Merge drivers
 
@@ -177,6 +204,10 @@ A vault that is a repository of its own can be cloned by a team. Then:
   — the edits stay in git's stash, and the brief says `[VAULT] held edits of <path>
   did not go back after the rebase … git -C "<vault>" stash pop stash@{n}` until that stash is gone.
   A held new file does not stop the session start's fast-forward.
+- **A commit git refuses** — signing that needs an agent or a locked key, a pre-commit hook, no
+  `user.name`/`user.email` — leaves the notes staged, and the brief says `[VAULT] the session end of
+  <time> could not commit the vault: <reason>; … git -C "<vault>" commit -m "vault notes"` while
+  anything is left uncommitted. The next session end tries again.
 - **A clone git is not done with** — a merge, rebase, cherry-pick or revert waiting for a person,
   unmerged files, a detached head — is neither committed nor pushed, and the brief says
   `[VAULT] not committed or pushed: …` with the way out until a session end finds it put right.

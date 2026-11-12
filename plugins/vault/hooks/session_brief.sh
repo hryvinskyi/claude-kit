@@ -6,17 +6,16 @@
 # context: keep it tiny.
 #
 # Defers to the project: if the repo defines its own SessionStart hook (a
-# brief of its own), this script exits silently.
+# brief of its own), or the vault keeps no board, no brief is printed here.
+# What this plugin's session end did to the vault still reaches the session
+# start then — the clone's fast-forward and the outcome lines (a conflict
+# branch, a failed commit, held files, the inbox) — unless the project ends
+# sessions with a hook of its own, in which case the session end never ran.
 
 set -u
 
 # The plugin's own directory, from this script's place inside it.
 PLUGIN_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-
-# Project ships its own SessionStart brief -> don't duplicate it.
-if [ -f .claude/settings.json ] && grep -q '"SessionStart"' .claude/settings.json 2>/dev/null; then
-    exit 0
-fi
 
 # Vault resolution lives in ONE place: bin/find-vault.sh (declared
 # `Knowledge-base directory:` line, else a unique To DO.md + Decisions/ dir at
@@ -24,7 +23,16 @@ fi
 VAULT=$("$PLUGIN_ROOT/bin/find-vault.sh" 2>/dev/null) || exit 0
 [ -z "$VAULT" ] && exit 0
 BOARD="$VAULT/To DO.md"
-[ -f "$BOARD" ] || exit 0
+
+# Project ships its own SessionStart brief, or there is no board -> no brief of
+# ours, only what the session end left.
+if { [ -f .claude/settings.json ] && grep -q '"SessionStart"' .claude/settings.json 2>/dev/null; } \
+    || [ ! -f "$BOARD" ]; then
+    if command -v python3 >/dev/null 2>&1 && [ -z "${CLAUDE_NO_VAULT_TOOLS:-}" ]; then
+        python3 "$PLUGIN_ROOT/bin/session_capture.py" --outcome 2>/dev/null
+    fi
+    exit 0
+fi
 
 echo "=== Knowledge-vault brief ($VAULT/) ==="
 

@@ -8,8 +8,12 @@ vault is not flooded with findings; that links resolve as Obsidian resolves them
 throwaway project whose vault the project does not version, that a vanished class is hard while a
 class that exists as a word in code or under vendor/ is not, that an ignored path is never a finding,
 that the stamps live outside the project, and that a changed file flags the note until it is stamped;
-and that a note-base rule, from the vault's git config or the user's rule file, adds a package layout
-while a rule that does not parse is reported and skipped.
+that a note-base rule, from the vault's git config or the user's rule file, adds a package layout
+while a rule that does not parse is reported and skipped; and that stamps are taken against the
+default branch, so a branch without a cited file resets no stamp and is told softly what it removed,
+two branches never turn a note soft for each other, a note reviewed on a branch is current once it
+merges, a stamp at a commit the clone lacks is still judged by its blob, and only the default branch
+moving (as the remote has it) turns a note soft.
 
 Run from the plugin directory: python3 -m unittest discover -s tests
 """
@@ -163,6 +167,45 @@ class ReconcileTests(unittest.TestCase):
                                       {"Modules/crm.md"})
         self.assertEqual((stale, carried["Modules/crm.md"]["a.php"]["blob"]), ([], "b2"))
 
+    class Unreached(vc.StampHistory):
+        """A history whose default branch never held the reviewed blob, knowing only `known`."""
+
+        def __init__(self, known: set) -> None:
+            self.commits = known
+
+        def reached(self, path: str, blob: str) -> bool:
+            return False
+
+        def known(self, commit: str) -> bool:
+            return commit in self.commits
+
+    def test_a_review_of_code_the_default_branch_has_not_reached_waits(self) -> None:
+        stamps = {"Modules/crm.md": {"a.php": {"blob": "b3", "commit": "c1", "context": "ctx"}}}
+        carried, stale = vc.reconcile({"Modules/crm.md": {"a.php": "ctx"}}, stamps, {"a.php": "b2"}, "c2", set(),
+                                      self.Unreached({"c1"}))
+        self.assertEqual((stale, carried), ([], stamps))
+
+    def test_a_stamp_at_a_commit_this_clone_lacks_is_judged_by_its_blob(self) -> None:
+        stamps = {"Modules/crm.md": {"a.php": {"blob": "b3", "commit": "gone", "context": "ctx"}}}
+        carried, stale = vc.reconcile({"Modules/crm.md": {"a.php": "ctx"}}, stamps, {"a.php": "b2"}, "c2", set(),
+                                      self.Unreached(set()))
+        self.assertEqual((stale, carried), ([("Modules/crm.md", "a.php", "gone")], stamps))
+
+    def test_a_stamp_whose_blob_the_reference_holds_moves_up_to_the_reference(self) -> None:
+        stamps = {"Modules/crm.md": {"a.php": {"blob": "b2", "commit": "gone", "context": "ctx"}}}
+        carried, stale = vc.reconcile({"Modules/crm.md": {"a.php": "ctx"}}, stamps, {"a.php": "b2"}, "c2", set(),
+                                      self.Unreached(set()))
+        self.assertEqual((stale, carried["Modules/crm.md"]["a.php"]),
+                         ([], {"blob": "b2", "commit": "c2", "context": "ctx"}))
+
+    def test_a_restamp_records_the_blob_the_reviewer_saw(self) -> None:
+        class OnABranch(vc.StampHistory):
+            def seen(self, path: str, reference_blob: str) -> str:
+                return "branch-blob"
+
+        carried, _ = vc.reconcile({"Modules/crm.md": {"a.php": "ctx"}}, {}, {"a.php": "b2"}, "c2", set(), OnABranch())
+        self.assertEqual(carried["Modules/crm.md"]["a.php"], {"blob": "branch-blob", "commit": "c2", "context": "ctx"})
+
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout
@@ -274,6 +317,183 @@ class MeasureTests(unittest.TestCase):
 
         self.assertEqual(self.messages(vc.measure(self.vault, write=True, restamp={"Modules/crm.md"}), "SOFT"), [])
         self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+
+    def stamps_text(self) -> str:
+        return (self.state / self.vault.slug / ".anchors.json").read_text(encoding="utf-8")
+
+    def change_the_reader(self, value: int) -> None:
+        self.write("packages/crm/src/Service/ContactReader.php",
+                   f"<?php\nfinal class ContactReader {{ const EnumOnlyCase = {value}; }}\n")
+        git(self.root, "commit", "-q", "-am", f"the reader answers {value}")
+
+    def test_a_branch_without_a_cited_file_tells_its_session_and_resets_no_stamp(self) -> None:
+        vc.measure(self.vault, write=True)
+        stamped = self.stamps_text()
+        git(self.root, "checkout", "-q", "-b", "slim")
+        git(self.root, "rm", "-q", "packages/crm/src/Service/ContactReader.php",
+            "packages/crm/src/Resources/config/assistant.yaml")
+        git(self.root, "commit", "-q", "-m", "a branch without the reader")
+
+        report = vc.measure(self.vault, write=True)
+
+        hard = self.messages(report, "HARD")
+        self.assertEqual(len(hard), 3, hard)
+        for kept in ("ContactReader", "EnumOnlyCase", "assistant.yaml"):
+            self.assertFalse(any(kept in m for m in hard), hard)
+        soft = self.messages(report, "SOFT")
+        self.assertEqual(len(soft), 3, soft)
+        for removed in ("`ContactReader`", "`EnumOnlyCase`", "`src/Resources/config/assistant.yaml`"):
+            self.assertTrue(any(removed in m and "gone from this branch" in m for m in soft), soft)
+        self.assertEqual(report.stale_notes, [])
+        self.assertTrue(any("cite code this branch removed" in line for line in vc.brief_lines(report)))
+        self.assertEqual(self.stamps_text(), stamped)
+        git(self.root, "checkout", "-q", "main")
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+
+    def test_stamps_taken_on_two_branches_do_not_turn_the_note_soft_for_each_other(self) -> None:
+        vc.measure(self.vault, write=True)
+        git(self.root, "checkout", "-q", "-b", "alice")
+        self.change_the_reader(2)
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+        vc.measure(self.vault, write=True, restamp={"Modules/crm.md"})
+        git(self.root, "checkout", "-q", "-b", "bob", "main")
+        self.change_the_reader(3)
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+        vc.measure(self.vault, write=True, restamp={"Modules/crm.md"})
+        git(self.root, "checkout", "-q", "alice")
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+
+        git(self.root, "checkout", "-q", "main")
+        git(self.root, "merge", "-q", "--ff-only", "bob")
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+        self.change_the_reader(4)
+        soft = self.messages(vc.measure(self.vault, write=True), "SOFT")
+        self.assertEqual(len(soft), 1, soft)
+        self.assertIn("`packages/crm/src/Service/ContactReader.php` (1 commit)", soft[0])
+
+    def test_a_note_rewritten_on_a_branch_is_current_once_the_branch_merges(self) -> None:
+        vc.measure(self.vault, write=True)
+        git(self.root, "checkout", "-q", "-b", "feature")
+        self.change_the_reader(2)
+        self.write(".claude/kb/Modules/crm.md", self.NOTE.replace("reads contacts", "reads contacts by id"))
+        vc.measure(self.vault, write=True)
+        git(self.root, "checkout", "-q", "main")
+        git(self.root, "merge", "-q", "--ff-only", "feature")
+
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+
+    def test_a_note_stamped_on_a_branch_is_current_once_the_branch_merges(self) -> None:
+        vc.measure(self.vault, write=True)
+        git(self.root, "checkout", "-q", "-b", "feature")
+        self.change_the_reader(2)
+        vc.measure(self.vault, write=True, restamp={"Modules/crm.md"})
+        git(self.root, "checkout", "-q", "main")
+        git(self.root, "merge", "-q", "--ff-only", "feature")
+
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+
+    def test_stamps_follow_the_remotes_default_branch_and_not_unpushed_commits(self) -> None:
+        remote = Path(tempfile.mkdtemp()).resolve() / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        git(self.root, "remote", "add", "origin", str(remote))
+        git(self.root, "push", "-q", "origin", "main")
+        git(self.root, "remote", "set-head", "origin", "main")
+        vc.measure(self.vault, write=True)
+        self.change_the_reader(2)
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+
+        git(self.root, "push", "-q", "origin", "main")
+
+        self.assertEqual(len(self.messages(vc.measure(self.vault, write=True), "SOFT")), 1)
+
+    def test_what_the_default_branch_added_after_this_branch_left_is_no_finding(self) -> None:
+        git(self.root, "branch", "older")
+        self.write("packages/crm/src/Service/NewerThing.php", "<?php\nfinal class NewerThing {}\n")
+        self.write("packages/crm/assets/newer.js", "export const newerHelper = () => 'NewerWordOnly';\n")
+        git(self.root, "add", "packages")
+        git(self.root, "commit", "-q", "-m", "the default branch moves on")
+        self.write(".claude/kb/Runbooks/Newer.md", "## Steps\n\n`NewerThing` lives in "
+                   "`packages/crm/src/Service/NewerThing.php`; `NewerWordOnly` is in the assets.\n")
+        git(self.root, "checkout", "-q", "older")
+
+        report = vc.measure(self.vault, write=False)
+
+        self.assertEqual([f.message for f in report.findings if "Newer" in f.message], [])
+        self.assertEqual(len(report.hard), 3, self.messages(report, "HARD"))
+
+    def test_a_branch_review_turns_soft_once_the_default_branch_changes_the_file_otherwise(self) -> None:
+        vc.measure(self.vault, write=True)
+        git(self.root, "checkout", "-q", "-b", "feature")
+        self.change_the_reader(2)
+        vc.measure(self.vault, write=True, restamp={"Modules/crm.md"})
+        git(self.root, "checkout", "-q", "main")
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+
+        self.change_the_reader(3)
+
+        soft = self.messages(vc.measure(self.vault, write=True), "SOFT")
+        self.assertEqual(len(soft), 1, soft)
+        self.assertIn("ContactReader.php", soft[0])
+
+    def test_a_stamp_taken_at_a_branch_commit_turns_soft_once_the_default_branch_changes_the_file(self) -> None:
+        vc.measure(self.vault, write=True)
+        git(self.root, "checkout", "-q", "-b", "feature")
+        self.change_the_reader(2)
+        branch = git(self.root, "rev-parse", "HEAD").strip()
+        blob = git(self.root, "rev-parse", "HEAD:packages/crm/src/Service/ContactReader.php").strip()
+        git(self.root, "checkout", "-q", "main")
+        stamps = json.loads(self.stamps_text())
+        stamps["notes"]["Modules/crm.md"]["packages/crm/src/Service/ContactReader.php"].update(blob=blob, commit=branch)
+        (self.state / self.vault.slug / ".anchors.json").write_text(vc.render_stamps(stamps["notes"]))
+
+        self.change_the_reader(3)
+
+        self.assertEqual(len(self.messages(vc.measure(self.vault, write=True), "SOFT")), 1)
+
+    def test_a_history_that_cannot_be_read_is_one_finding_and_not_a_silence(self) -> None:
+        vc.measure(self.vault, write=True)
+        self.change_the_reader(2)
+        real = vaultlib.git_out
+
+        def log_fails(root: Path, *args: str, timeout: int = 180) -> tuple[int, str]:
+            return (128, "") if "log" in args else real(root, *args, timeout=timeout)
+
+        with unittest.mock.patch.object(vaultlib, "git_out", log_fails):
+            hard = self.messages(vc.measure(self.vault, write=False), "HARD")
+
+        unread = [m for m in hard if "could not be read" in m]
+        self.assertEqual(len(unread), 1, hard)
+        self.assertIn("history of 1 cited file(s)", unread[0])
+
+    def rewrite_stamps(self, **fields: str) -> dict:
+        stamps = json.loads(self.stamps_text())
+        for entry in stamps["notes"]["Modules/crm.md"].values():
+            entry.update(fields)
+        (self.state / self.vault.slug / ".anchors.json").write_text(vc.render_stamps(stamps["notes"]))
+        return stamps
+
+    def test_a_stamp_at_a_commit_this_clone_lacks_still_turns_soft_when_the_code_differs(self) -> None:
+        vc.measure(self.vault, write=True)
+        stamps = self.rewrite_stamps(blob="0" * 40, commit="f" * 40)
+
+        soft = self.messages(vc.measure(self.vault, write=True), "SOFT")
+
+        self.assertEqual(len(soft), 1, soft)
+        self.assertEqual(json.loads(self.stamps_text()), stamps)
+
+    def test_a_stamp_at_a_commit_this_clone_lacks_moves_up_while_the_code_is_the_same(self) -> None:
+        vc.measure(self.vault, write=True)
+        self.rewrite_stamps(commit="f" * 40)
+
+        self.assertEqual(self.messages(vc.measure(self.vault, write=True), "SOFT"), [])
+
+        main = git(self.root, "rev-parse", "main").strip()
+        commits = {entry["commit"] for entry in json.loads(self.stamps_text())["notes"]["Modules/crm.md"].values()}
+        self.assertEqual(commits, {main})
+        self.change_the_reader(2)
+        soft = self.messages(vc.measure(self.vault, write=True), "SOFT")
+        self.assertEqual(len(soft), 1, soft)
+        self.assertIn("(1 commit)", soft[0])
 
     def test_the_command_line_stamps_by_stem_and_the_brief_reads_the_cache(self) -> None:
         out, err = io.StringIO(), io.StringIO()
