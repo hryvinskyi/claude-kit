@@ -135,13 +135,16 @@ export function collapseClaims(events: readonly ClaimEvent[], statuses: ClaimSta
   return [...moves.values()].sort((one, other) => one.lastEventId - other.lastEventId);
 }
 
+/** What of a move says whether it still stands: its item, the kind of its last event, and who held the claim then. */
+export type StandingMove = Pick<IssueMove, 'item' | 'lastKind' | 'holder'>;
+
 /** An item's live claim on the server now: who holds it and whether its work waits on a review; null for none. */
 export type LiveState = { readonly holder: string; readonly inReview: boolean } | null;
 
-const heldBy = (inReview: boolean) => (move: IssueMove, live: LiveState): boolean =>
+const heldBy = (inReview: boolean) => (move: StandingMove, live: LiveState): boolean =>
   live !== null && move.holder !== null && live.holder === move.holder && live.inReview === inReview;
 
-const free = (_move: IssueMove, live: LiveState): boolean => live === null;
+const free = (_move: StandingMove, live: LiveState): boolean => live === null;
 
 /**
  * What the server must still show for a move to be filed: a claim, a takeover or
@@ -150,7 +153,7 @@ const free = (_move: IssueMove, live: LiveState): boolean => live === null;
  * holds it. Anything else is a later state somebody else's move, or a later move
  * of the same member, files.
  */
-const STANDS: { readonly [K in ClaimEventKind]: (move: IssueMove, live: LiveState) => boolean } = {
+const STANDS: { readonly [K in ClaimEventKind]: (move: StandingMove, live: LiveState) => boolean } = {
   claimed: heldBy(false),
   taken_over: heldBy(false),
   review_ended: heldBy(false),
@@ -160,7 +163,7 @@ const STANDS: { readonly [K in ClaimEventKind]: (move: IssueMove, live: LiveStat
 };
 
 /** Whether the state a move leaves an item in is still the item's state on the server. */
-export function stillStands(move: IssueMove, live: LiveState): boolean {
+export function stillStands(move: StandingMove, live: LiveState): boolean {
   return STANDS[move.lastKind](move, live);
 }
 

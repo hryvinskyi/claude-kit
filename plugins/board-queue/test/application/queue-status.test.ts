@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { LAST_BUDGET, writeLastAudit, writeLastBudget, writeLastTickAt } from '../../src/application/queue-meta.ts';
 import { QueueStatus } from '../../src/application/queue-status.ts';
+import { statusLines } from '../../src/delivery/human-text.ts';
+import { defaultKindRegistry } from '../../src/domain/kinds/default-kinds.ts';
+import { testConfig } from '../fixtures/config.ts';
 import { QueuePause } from '../../src/domain/queue-pause.ts';
 import { RateBudget } from '../../src/domain/rate-budget.ts';
 import { fixture } from './queue-fixture.ts';
@@ -56,6 +59,32 @@ describe('what the queue is doing', () => {
     assert.equal(status.delayed[0]?.runnableAt, '2026-01-13T09:00:00.000Z');
     assert.equal(status.delayed[0]?.inDays, 3);
     assert.equal(status.counts.queued, 3, 'it is still queued work; the wait is what the count cannot say');
+  });
+
+  it('says which work waits for deferred work in front of it, behind what, and until when', async () => {
+    const { repository, clock, file } = fixture();
+    const day = 24 * 60 * 60 * 1000;
+    const base = clock.now().getTime();
+    await file({ id: 'comment', kind: 'issue.comment', state: 'queued', notBefore: new Date(base + 2 * day),
+      createdAt: new Date(base - 3000) });
+    await file({ id: 'fields', state: 'queued', createdAt: new Date(base - 2000) });
+    await file({ id: 'close', kind: 'issue.close', state: 'queued', createdAt: new Date(base - 1000) });
+    await file({ id: 'elsewhere', kind: 'issue.close', state: 'queued', issue: 41 });
+
+    const status = await new QueueStatus(repository, clock, null, defaultKindRegistry(testConfig).issueOrder()).execute();
+
+    assert.deepEqual(status.waitingOnDeferred, [{
+      id: 'close',
+      kind: 'issue.close',
+      ref: 'example-org/first-repo#12',
+      behind: [{ id: 'comment', kind: 'issue.comment', runnableAt: '2026-01-12T09:00:00.000Z' }],
+      until: '2026-01-12T09:00:00.000Z',
+      inDays: 2,
+    }]);
+    assert.ok(statusLines(status).includes(
+      'waiting close issue.close example-org/first-repo#12 behind deferred comment issue.comment '
+      + '(runs 2026-01-12T09:00:00.000Z) — runs after 2026-01-12T09:00:00.000Z (in 2.0d)',
+    ));
   });
 
   it('says nothing about a wait that has already run out', async () => {

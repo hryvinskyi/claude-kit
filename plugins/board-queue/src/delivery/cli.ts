@@ -25,7 +25,7 @@ import { momentOf, positiveIntegerOf } from './input-text.ts';
 import { SCHEDULED_RUN_VARIABLE } from './scheduled-run.ts';
 import { runService, serviceHealth, stopOnSignals } from './service-runtime.ts';
 import { runsAsTheService } from './local-identity.ts';
-import { DECLINES, declineOf } from '../application/service-duty.ts';
+import { DECLINES, declineOf, declineReasonOf } from '../application/service-duty.ts';
 import type { Decline } from '../application/service-duty.ts';
 import { checkServiceCredentials } from '../infrastructure/service-credentials.ts';
 import { installSchedule, loadCommands } from './launchd-install.ts';
@@ -287,9 +287,10 @@ const tick: Command = {
     const report = await context.container().tick.run();
     printed(context, report, () => tickLines(report));
     // On a person's machine a worker that may not keep the boards in step has
-    // simply answered; in the service that is the whole job not being done.
+    // simply answered; in the service that is the whole job not being done, and
+    // so is a pass whose credential GitHub or the coordination server refused.
     const decline = servicePass ? declineOf(report) : null;
-    return decline === null ? 0 : declined(context, decline, report.sync?.refused ?? null);
+    return decline === null ? 0 : declined(context, decline, declineReasonOf(report));
   },
 };
 

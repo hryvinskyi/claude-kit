@@ -15,6 +15,7 @@ const QUIET: QueueStatusView = {
   failed: [],
   held: [],
   delayed: [],
+  waitingOnDeferred: [],
   stopped: [],
   sync: null,
 };

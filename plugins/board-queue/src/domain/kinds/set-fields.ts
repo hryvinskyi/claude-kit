@@ -93,6 +93,19 @@ export class SetFieldsKind implements ActionKind {
 
   readonly narrowsOnRelease = true;
 
+  readonly awaitsDeferredWork = false;
+
+  /** Each board field it names. */
+  writeTargets(payload: unknown): readonly string[] | null {
+    const parsed = this.payloadSchema.safeParse(payload);
+    if (!parsed.success) {
+      return null;
+    }
+    return Object.entries(parsed.data.fields)
+      .filter(([, value]) => value !== undefined)
+      .map(([key]) => `field:${key}`);
+  }
+
   /**
    * Only the values named. Which ones those are, and on what condition each is
    * written, is the release's to decide; this narrows the payload to them, read

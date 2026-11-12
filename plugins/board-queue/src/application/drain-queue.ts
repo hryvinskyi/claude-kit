@@ -23,6 +23,8 @@ import type { ActionRepository, Clock, Logger, Sleeper, TickLease } from './port
 export type TickReport = {
   /** Present when the tick did not run at all, and why. */
   skipped?: string;
+  /** Present when queued work was left for a later pass on purpose, and why. */
+  passedOver?: string;
   /** Why the loop stopped, when it stopped for something other than an empty queue. */
   stoppedBecause?: string;
   /**
@@ -251,15 +253,16 @@ export class DrainQueue {
     this.#wait = new LimiterWait({ repository: deps.repository, policy: deps.policy, logger: deps.logger });
   }
 
-  async run(): Promise<TickReport> {
-    const report = await this.#repository.withTickLock((lease) => this.#tick(lease));
+  /** One pass; an action `passOver` names stays queued this time, holding its place. */
+  async run(passOver?: (action: Action) => boolean): Promise<TickReport> {
+    const report = await this.#repository.withTickLock((lease) => this.#tick(lease, passOver));
     if (report === null) {
       return notRun('another tick holds the lock');
     }
     return report;
   }
 
-  async #tick(lease: TickLease): Promise<TickReport> {
+  async #tick(lease: TickLease, passOver: ((action: Action) => boolean) | undefined): Promise<TickReport> {
     const recovered = await this.#putBackWhatAnEarlierRunLeftInHand();
 
     const waiting = await this.#waitingOut();
@@ -291,7 +294,7 @@ export class DrainQueue {
       if (!(await lease.stillHeld())) {
         return this.#stoppedForTheLock(tally);
       }
-      const action = await this.#repository.claimNextRunnable(this.#clock.now());
+      const action = await this.#repository.claimNextRunnable(this.#clock.now(), passOver);
       if (action === null) {
         break;
       }

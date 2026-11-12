@@ -11,7 +11,7 @@ import type { ActionProps, ActionState } from '../../src/domain/action.ts';
 import type { BoardKey } from '../../src/domain/board-directory.ts';
 import type { CachedCatalog, FieldCatalog } from '../../src/domain/catalog.ts';
 import { StaleAction } from '../../src/domain/errors.ts';
-import { STILL_TO_RUN_STATES, holdsItsIssue } from '../../src/domain/issue-order.ts';
+import { IssueOrder, STILL_TO_RUN_STATES } from '../../src/domain/issue-order.ts';
 import type { IssueRef } from '../../src/domain/issue-ref.ts';
 import type { QueuePause } from '../../src/domain/queue-pause.ts';
 
@@ -35,6 +35,12 @@ export class InMemoryActionRepository implements ActionRepository {
   readonly #catalogs = new Map<BoardKey, CachedCatalog>();
   #seq = 0;
   #lockHolders = 0;
+  readonly #order: IssueOrder;
+
+  /** `order`: the order of an issue's actions; without one, a deferred action holds back everything after it. */
+  constructor(order: IssueOrder = new IssueOrder([])) {
+    this.#order = order;
+  }
 
   /**
    * Makes the next fold answer "no row changed", the way a store does when a
@@ -214,13 +220,14 @@ export class InMemoryActionRepository implements ActionRepository {
     return Promise.resolve(true);
   }
 
-  claimNextRunnable(now: Date): Promise<Action | null> {
+  claimNextRunnable(now: Date, passOver: (action: Action) => boolean = () => false): Promise<Action | null> {
     const ordered = this.#ordered();
     const next = ordered.find((candidate) => candidate.props.state === 'queued'
       && isPast(candidate.props.notBefore, now)
+      && !passOver(rebuild(candidate))
       && !ordered.some((earlier) => earlier.props.id !== candidate.props.id
         && refKey(earlier.props) === refKey(candidate.props)
-        && holdsItsIssue(earlier.props.state)
+        && this.#order.holdsBack(earlier.props, candidate.props, now)
         && isEarlier(earlier, candidate)));
     if (next === undefined) {
       return Promise.resolve(null);

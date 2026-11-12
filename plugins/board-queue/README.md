@@ -209,7 +209,16 @@ and nothing new is filed. A request with a key never merges with another.
   longer accepts stays blocked with that reason, for a person.
 - `notBefore` pushes an action into the future, up to thirty days; beyond that it is refused, because work
   nothing will touch for a year is work nobody sees again. `status` and the session brief list what is
-  waiting and when it comes round, so a delay is never silent.
+  waiting and when it comes round, so a delay is never silent. Until its date comes, a deferred action holds
+  back only what must not land before it: an `issue.close` or a `board.verify` filed after it on its issue,
+  and any later write of something it writes too — the same board field, the same assignee — which would
+  otherwise run first and be overwritten by the older value when the date comes (a later request cannot
+  fold into a deferred one). `status` (and `board_status`, under `waitingOnDeferred`) names each action
+  held this way, the deferred one in front and when it comes due; cancel the deferred action to let it go.
+  Everything else filed after it — a write of another field or another assignee, a comment — runs in its
+  own turn, since the filer put the action off, not the issue; anything filed behind a held action keeps
+  its place behind it. Once its date has come it holds its issue like any queued action. A backoff after a
+  failure is not a deferral: an action waiting one out holds its issue as before.
 - **Held** is for work that waits on something outside the queue — a move that is only true once a deploy
   is live. A held request never merges into a waiting one, because the merged values would run at the next
   tick with nothing saying so. `release` is what runs it.
@@ -354,6 +363,21 @@ claims (`GET /v1/claims`, once per run, only when a move needs it): a claim, a t
 filed only while the same member still holds the item and works on it, the start of a review only while they hold
 it in review, and a release only while nobody holds the item. A move the server has moved on from is passed over
 and counted in `status` (`… passed over because the server has moved on`): whoever made the later move files it.
+The same check runs again before a filed move's actions run: every run, ahead of the drain in the same tick, asks
+it of each move whose actions are still waiting and withdraws the waiting actions of one the server has moved on
+from — they end `skipped` with that reason, counted the same way — so a move that waited in a paused queue never
+lands over a later move another worker filed and ran meanwhile. Actions that failed or are blocked are left for
+the person who decides on them. A mirrored action runs in a pass only when that pass's mirror run cleared it:
+it filed it, or found its move still standing. Every other one is left queued rather than run unchecked — the
+mirror did not run (its login could not be read, say), the server could not be asked, the run stopped before
+the check, or the worker holds no record of what the move must find (one filed by an older release, or after
+the record was lost; where a single worker files every move, an `all` mirror, nothing can overtake it and it
+runs). The pass's report says `left queued: … mirrored moves wait …` with the reason; `status` names how many
+of them this worker's last pass left, why, and each action filed after one on its issue that waits behind it
+(a session's close, say). They run in the first pass that clears them; cancel them to drop them instead. A
+worker that is told it is not the owner of an `all` mirror withdraws the mirrored actions it still has queued
+— they end `skipped`, saying it is no longer the mirror's owner — since the owner's worker files those moves
+now, and they would otherwise hold their issues for good.
 
 **Moves no person's worker files** — a move whose author the log does not name, or who is no member with a GitHub
 login (a member removed since, also from the server's command line, or one who never set an `external_login`) —
@@ -406,9 +430,13 @@ error in `status`, never read as the start of the log. The cursor and the last e
 written in the same transaction as the actions, so a crash leaves all or none; a move no later than one already
 filed for its item is not filed again however the pages fell, and the key each action carries
 (`dibs:<server>:<project>:<event>:status|assignees`, or `head<event>:<item>` after a fresh start) is the store's
-backstop against filing one state twice. Each item's reference is asked once and kept; an item whose reference
-cannot be read is passed over, counted in `status`, and the page goes on. A server that cannot be reached is
-recorded in `status` and the queue is drained regardless.
+backstop against filing one state twice. Each item's reference is asked once and kept; an item the server says
+has none is left alone for good. An item whose reference cannot be read is counted in `status`, the rest of its
+page is filed, and the cursor stays where that page starts, so the next run reads it again and asks once more;
+what was filed is not filed twice. After six runs in a row that could not read it — half an hour at one run every
+five minutes — the move about that item is passed over for good, with an error in the log, so one item the server
+keeps failing on does not hold every later move. The server refusing the token stops the run where it stands. A
+server that cannot be reached is recorded in `status` and the queue is drained regardless.
 
 **Letting claims go** (board → server) frees the areas of work the board has moved on. A claim holds its areas
 until it ends, and a merge of a pull request recorded on it is the only thing that ends it on its own: work pushed
@@ -526,7 +554,8 @@ exhausted allowance or a credential GitHub will not take ends the pass and puts 
 does. GitHub not answering — a network failure, a timeout, a 5xx — three requests of one job in a row ends that
 repository's jobs for the pass, says so in `status`, and the pass goes on with the next repository. GitHub refusing
 one request (a 403, 404 or 422) is about that one pull request, branch or hold: it is counted and the job goes on.
-The coordination server not answering ends the pass; it refusing one report is counted, and the pass goes on. The
+The coordination server not answering, or refusing the token, ends the pass; it refusing one report is counted,
+and the pass goes on. The
 lock is held for the whole pass, never released between repositories: a pass released half way would let the next
 tick start a second pass while the first still runs, two passes spending one allowance and writing one set of
 statuses. Statuses written more than thirty days ago on commits that are no open pull request's head, and pull
@@ -726,7 +755,9 @@ docker build -t board-queue:<version> plugins/board-queue
 - **A pass that declines the job fails.** On a person's machine a worker that is not the owner simply answers.
   In the service each such pass exits with a code of its own — 3 the App's login could not be read, 4 the App
   is not `mirrorOwner`, 5 the forge jobs would not run under the App's credential, 6 the App's key or the token
-  was refused — and the heartbeat records which, without anything secret.
+  was refused before anything ran, 7 GitHub refused the App's credential (in that pass, or earlier and the queue
+  is still waiting it out), 8 the coordination server refused the token (401) — and the heartbeat records
+  which, without anything secret. A pass that had nothing to do still ends cleanly.
 - **It refuses to start** without `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` naming a file of the
   service's own account, with no permission for its group or anybody else, that holds a private key, and the coordination server's
   token, or when the configuration keeps nothing in step. `GITHUB_APP_INSTALLATION_ID` may be set to skip the

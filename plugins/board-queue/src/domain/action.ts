@@ -339,6 +339,21 @@ export class Action {
     this.#touch(now);
   }
 
+  /**
+   * Work that never ran and no longer applies: what it was filed to write was
+   * overtaken before its turn came. It ends as a skip does — nothing written,
+   * nothing to retry, nobody asked to fix anything — with the reason as its result.
+   */
+  withdraw(now: Date, reason: string): void {
+    this.#require(['queued'], 'be withdrawn');
+    this.#state = 'skipped';
+    this.#result = append(this.#result, reason);
+    this.#notBefore = null;
+    this.#blockedReason = null;
+    this.#writeGuard = null;
+    this.#touch(now);
+  }
+
   /** The thing it was waiting for happened. */
   release(now: Date): void {
     this.#require(['held'], 'be released');

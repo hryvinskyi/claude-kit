@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ClaimEventKind } from '../domain/sync/claim-moves.ts';
 import type { Sighting } from '../domain/sync/finished-claims.ts';
 import { parseJson } from './json-values.ts';
 import type { ActionRepository, MetaWrite } from './ports.ts';
@@ -16,6 +17,7 @@ const IMPORT_LAST_RUN = 'import.lastRun';
 /** How many items were open at the last import that said it was complete. */
 export const IMPORT_LAST_COMPLETE_OPEN = 'import.lastCompleteOpen';
 const SYNC_REFUSED = 'sync.refused';
+const MIRROR_PASSED_OVER = 'mirror.passedOver';
 const FORGE_LAST_RUN = 'forge.lastRun';
 const FINISH_LAST_RUN = 'finish.lastRun';
 
@@ -33,7 +35,11 @@ const MirrorRunSchema = z.object({
   ignored: z.number().int().nonnegative(),
   /** Moves the queue's rules refused; each one is in the log. */
   refused: z.number().int().nonnegative(),
-  /** Moves passed over because the item's reference could not be read; each one is in the log. */
+  /**
+   * Moves whose item's reference could not be read: kept for a later run that asks
+   * again, or passed over once the item failed as many runs as are allowed; each
+   * one is in the log.
+   */
   unresolved: z.number().int().nonnegative(),
   /** Where the next run reads from. */
   cursor: z.number().int().nonnegative(),
@@ -52,7 +58,10 @@ const MirrorRunSchema = z.object({
   othersMoves: z.number().int().nonnegative().default(0),
   /** Moves no person's worker can file — their author is unnamed, removed or has no GitHub login — filed here. */
   orphanMoves: z.number().int().nonnegative().default(0),
-  /** Moves passed over because the server no longer shows the state they left. */
+  /**
+   * Moves passed over because the server no longer shows the state they left:
+   * not filed, or withdrawn from the queue before they ran.
+   */
   staleMoves: z.number().int().nonnegative().default(0),
   /** Why this run filed nothing and read nothing, when whose moves to file could not be settled. */
   declined: z.string().nullable().default(null),
@@ -195,9 +204,50 @@ export function mirrorRefKey(server: string, project: string, item: number): str
   return `mirror.ref:${server}:${project}:${String(item)}`;
 }
 
+/** How many runs in a row could not read a work item's outside reference; absent once one could. */
+export function mirrorRefAttemptsKey(server: string, project: string, item: number): string {
+  return `mirror.refAttempts:${server}:${project}:${String(item)}`;
+}
+
 /** The GitHub login a member named when the members were last read, kept after the member is gone. */
 export function mirrorLoginKey(server: string, project: string, handle: string): string {
   return `mirror.login:${server}:${project}:${handle}`;
+}
+
+const CLAIM_EVENT_KINDS = [
+  'claimed',
+  'taken_over',
+  'released',
+  'force_released',
+  'review_started',
+  'review_ended',
+] as const satisfies readonly ClaimEventKind[];
+
+const PendingMoveSchema = z.object({
+  item: z.number().int().nonnegative(),
+  lastKind: z.enum(CLAIM_EVENT_KINDS),
+  holder: z.string().nullable(),
+});
+
+/** What a filed move must still find on the server when its actions are about to run. */
+export type PendingMove = z.infer<typeof PendingMoveSchema>;
+
+const PendingMovesSchema = z.record(z.string(), PendingMoveSchema);
+
+/** The moves the mirror filed whose actions have not all ended, by the key of the filing. */
+export function mirrorPendingKey(server: string, project: string): string {
+  return `mirror.pending:${server}:${project}`;
+}
+
+/** The pending moves, or none when there is no note or it is not one this version can read. */
+export async function readMirrorPending(repository: ActionRepository, key: string): Promise<Map<string, PendingMove>> {
+  const stored = await repository.getMeta(key);
+  const parsed = PendingMovesSchema.safeParse(stored === null ? {} : parseJson(stored));
+  return new Map(parsed.success ? Object.entries(parsed.data) : []);
+}
+
+export function mirrorPendingWrite(key: string, pending: ReadonlyMap<string, PendingMove>): MetaWrite {
+  return { key, value: JSON.stringify(Object.fromEntries(pending)) };
 }
 
 /** Where the mirror stands: never started, at a cursor, or at a note that is not a cursor at all. */
@@ -225,6 +275,29 @@ export async function readCount(repository: ActionRepository, key: string): Prom
 
 export function mirrorCursorWrite(key: string, cursor: number): MetaWrite {
   return { key, value: String(cursor) };
+}
+
+const MirrorPassOverSchema = z.object({
+  at: Moment,
+  /** Why the pass could not clear them. */
+  reason: z.string(),
+  /** The mirrored actions it left queued. */
+  ids: z.array(z.string()),
+});
+
+/** The mirrored actions this worker's last pass left queued, and why; absent when it left none. */
+export type MirrorPassOver = z.infer<typeof MirrorPassOverSchema>;
+
+export async function readMirrorPassOver(repository: ActionRepository): Promise<MirrorPassOver | null> {
+  return readJson(repository, MIRROR_PASSED_OVER, MirrorPassOverSchema);
+}
+
+export async function writeMirrorPassOver(repository: ActionRepository, passOver: MirrorPassOver | null): Promise<void> {
+  if (passOver === null) {
+    await repository.deleteMeta(MIRROR_PASSED_OVER);
+    return;
+  }
+  await repository.setMeta(MIRROR_PASSED_OVER, JSON.stringify(passOver));
 }
 
 export async function readMirrorRun(repository: ActionRepository): Promise<MirrorRun | null> {

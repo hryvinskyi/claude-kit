@@ -176,3 +176,13 @@ export interface LocalIdentity {
   /** The login, or null when none can be read. */
   login(): Promise<string | null>;
 }
+
+/**
+ * Told whenever the coordination server refuses the token a call went out with.
+ * Every job that asks the server meets the refusal in its own way and records it
+ * as its own failure; this is how the pass as a whole learns that the token, not
+ * one request, is what failed.
+ */
+export interface TokenRefusalSink {
+  tokenRefused(reason: string): void;
+}

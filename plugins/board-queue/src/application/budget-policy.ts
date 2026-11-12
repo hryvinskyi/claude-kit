@@ -66,11 +66,7 @@ const PAUSE_RULES: ReadonlyMap<ErrorCategory, PauseRule> = new Map<ErrorCategory
   ],
   [
     'credential-rejected',
-    (error, ctx) => new QueuePause({
-      until: new Date(ctx.now.getTime() + CREDENTIAL_PAUSE_SEC * 1000),
-      reason: error.describe(),
-      consecutiveHits: 0,
-    }),
+    (error, ctx) => QueuePause.forRefusedCredential(ctx.now, CREDENTIAL_PAUSE_SEC, error.describe()),
   ],
 ]);
 

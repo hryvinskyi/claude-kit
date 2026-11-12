@@ -99,6 +99,20 @@ describe('whether the service is healthy', () => {
     assert.equal(healthOf(recovered, at(12)).healthy, true);
   });
 
+  it('is not after a pass whose credential GitHub or the coordination server refused, and says which', () => {
+    const github = passEnded(passStarted(fresh(), at(5)), { kind: 'finished', exitCode: 7 }, at(6), false);
+    const token = passEnded(passStarted(fresh(), at(5)), { kind: 'finished', exitCode: 8 }, at(6), false);
+
+    assert.deepEqual(healthOf(github, at(7)), {
+      healthy: false,
+      reason: 'the last pass declined the service\'s job: GitHub refused the App\'s credential',
+    });
+    assert.deepEqual(healthOf(token, at(7)), {
+      healthy: false,
+      reason: 'the last pass declined the service\'s job: the coordination server refused the service\'s token',
+    });
+  });
+
   it('counts a pass that could not be ended as abandoned', () => {
     const stuck = passEnded(fresh(), { kind: 'stuck', reason: 'it did not end once killed' }, at(1), false);
 

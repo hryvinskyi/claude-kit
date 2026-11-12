@@ -249,6 +249,19 @@ describe('Action', () => {
     }
   });
 
+  it('is withdrawn while it waits, ending skipped with the reason, and never once it has run or ended', () => {
+    const action = inState('queued');
+
+    action.withdraw(later, 'a later move is what the row shows');
+
+    assert.equal(action.state, 'skipped');
+    assert.equal(action.result, 'a later move is what the row shows');
+    assert.equal(action.isRunnable(later), false);
+    assert.throws(() => inState('running').withdraw(now, 'x'), IllegalTransition);
+    assert.throws(() => inState('done').withdraw(now, 'x'), IllegalTransition);
+    assert.throws(() => inState('blocked').withdraw(now, 'x'), IllegalTransition);
+  });
+
   it('refuses every transition its state does not allow', () => {
     assert.throws(() => inState('done').start(now), IllegalTransition);
     assert.throws(() => inState('queued').succeed(now, 'x'), IllegalTransition);

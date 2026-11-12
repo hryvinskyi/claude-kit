@@ -1,4 +1,5 @@
 import { UnknownKind } from '../errors.ts';
+import { IssueOrder } from '../issue-order.ts';
 import type { ActionKind } from './action-kind.ts';
 
 /**
@@ -38,5 +39,10 @@ export class KindRegistry {
 
   all(): ActionKind[] {
     return [...this.#byName.values()];
+  }
+
+  /** The order the actions on one issue run in, with the kinds registered here. */
+  issueOrder(): IssueOrder {
+    return new IssueOrder(this.all());
   }
 }

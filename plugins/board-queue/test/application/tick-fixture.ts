@@ -41,6 +41,7 @@ export type FiledAction = {
   origin?: string;
   createdAt?: Date;
   hold?: boolean;
+  dedupeKey?: string;
 };
 
 export type TickOptions = {
@@ -121,6 +122,7 @@ export function tickFixture(options: TickOptions = {}): TickFixture {
         origin: input.origin ?? 'a session',
         now: input.createdAt ?? clock.now(),
         hold: input.hold,
+        dedupeKey: input.dedupeKey ?? null,
       });
       await repository.insert(action);
       return action;

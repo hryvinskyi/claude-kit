@@ -10,9 +10,11 @@ import { buildContainer } from '../../src/delivery/container.ts';
 import type { ContainerOverrides } from '../../src/delivery/container.ts';
 import { ConfigSchema } from '../../src/domain/config.ts';
 import type { Config } from '../../src/domain/config.ts';
+import { CredentialRejected } from '../../src/domain/errors.ts';
 import { FakeBoardGateway, catalogField, catalogOf } from '../fakes/fake-board-gateway.ts';
 import { FakeCoordination } from '../fakes/fake-coordination.ts';
 import { FakeDependencyReader } from '../fakes/fake-dependencies.ts';
+import { FakeFetch } from '../fakes/fake-fetch.ts';
 import { FakeForge } from '../fakes/fake-forge.ts';
 import { FakeForgeCoordination } from '../fakes/fake-forge-coordination.ts';
 import { FakeIssueGateway } from '../fakes/fake-issue-gateway.ts';
@@ -56,8 +58,11 @@ function scratch(t: TestContext): string {
   return directory;
 }
 
-function overrides(login: () => Promise<string | null>, extra: ContainerOverrides = {}): ContainerOverrides {
-  const board = new FakeBoardGateway({ catalog: catalogOf(catalogField('Status', ['Todo', 'In Progress'])) });
+function overrides(
+  login: () => Promise<string | null>,
+  extra: ContainerOverrides = {},
+  board = new FakeBoardGateway({ catalog: catalogOf(catalogField('Status', ['Todo', 'In Progress'])) }),
+): ContainerOverrides {
   const clock = new FakeClock('2026-03-02T09:00:00.000Z');
   return {
     lanes: () => ({ board, issues: new FakeIssueGateway([]) }),
@@ -72,11 +77,15 @@ function overrides(login: () => Promise<string | null>, extra: ContainerOverride
 
 /** One scheduled pass through the command line's own `tick`, on a real queue file. */
 async function tickWith(t: TestContext, config: Config, stand: ContainerOverrides): Promise<Spoken> {
-  const stateDir = scratch(t);
-  const container = buildContainer({ config, stateDir, overrides: stand });
+  const container = buildContainer({ config, stateDir: scratch(t), overrides: stand });
   t.after(() => {
     container.close();
   });
+  return tickIn(container);
+}
+
+/** One scheduled pass through the command line's own `tick`, in a container that outlives it. */
+async function tickIn(container: ReturnType<typeof buildContainer>): Promise<Spoken> {
   const command = commands['tick'];
   assert.ok(command !== undefined);
   const spoken: Spoken = { code: 0, out: [], err: [] };
@@ -158,6 +167,43 @@ describe('a pass of the service that declines its job', () => {
     assert.equal(spoken.code, 6);
     assert.equal(asked, false);
     assert.match(spoken.err.join('\n'), /the App's key or the coordination server's token was refused — the file named by GITHUB_APP_PRIVATE_KEY_PATH is not there/);
+  });
+
+  it('ends with the code for a credential GitHub refused, for as long as the queue waits it out', async (t) => {
+    asTheService(t);
+    const board = new FakeBoardGateway({ catalog: catalogOf(catalogField('Status', ['Todo', 'In Progress'])) })
+      .fail('probeBudget', new CredentialRejected('the board', 'Bad credentials'));
+    const container = buildContainer({
+      config: syncConfig,
+      stateDir: scratch(t),
+      overrides: overrides(() => Promise.resolve('alice'), {}, board),
+    });
+    t.after(() => {
+      container.close();
+    });
+
+    const refused = await tickIn(container);
+    const waiting = await tickIn(container);
+
+    assert.equal(refused.code, 7);
+    assert.match(refused.err.join('\n'), /^the service declined its job: GitHub refused the App's credential — Bad credentials/);
+    assert.equal(waiting.code, 7, 'a pass that waits the refusal out has not done its job either');
+    assert.match(waiting.err.join('\n'), /GitHub refused the App's credential — Bad credentials/);
+  });
+
+  it('ends with the code for a token the coordination server refused', async (t) => {
+    asTheService(t);
+    const server = new FakeFetch(Array.from({ length: 10 }, () => ({
+      status: 401,
+      body: { error: { code: 'unauthorized' } },
+    })));
+    const { coordination: _fake, ...stand } = overrides(() => Promise.resolve('alice'), { dibsFetch: server.fetch });
+
+    const spoken = await tickWith(t, syncConfig, stand);
+
+    assert.equal(spoken.code, 8);
+    assert.match(spoken.err.join('\n'), /^the service declined its job: the coordination server refused the service's token — .*401 \(unauthorized\)/);
+    assert.ok(!spoken.err.join('\n').includes(TOKEN), 'the token is never repeated');
   });
 
   it('ends cleanly when it does its job', async (t) => {

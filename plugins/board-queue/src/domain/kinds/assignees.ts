@@ -83,6 +83,17 @@ export class AssigneesKind implements ActionKind {
 
   readonly narrowsOnRelease = false;
 
+  readonly awaitsDeferredWork = false;
+
+  /** Each login it adds or removes, however it is spelled. */
+  writeTargets(payload: unknown): readonly string[] | null {
+    const parsed = this.payloadSchema.safeParse(payload);
+    if (!parsed.success) {
+      return null;
+    }
+    return [...parsed.data.add, ...parsed.data.remove].map((login) => `assignee:${folded(login)}`);
+  }
+
   /** It writes no board field, so nothing in it can overwrite a value set since. */
   replayFor(payload: unknown): unknown {
     return validatedReplay(this.payloadSchema, payload);

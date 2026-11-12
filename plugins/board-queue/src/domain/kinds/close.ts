@@ -48,6 +48,14 @@ export class CloseKind implements ActionKind {
 
   readonly narrowsOnRelease = false;
 
+  /** Closing ends the issue, so whatever was filed in front of it lands first, deferred or not. */
+  readonly awaitsDeferredWork = true;
+
+  /** Whether the issue is open. */
+  writeTargets(): readonly string[] {
+    return ['issue:state'];
+  }
+
   /** It writes no board field, so nothing in it can overwrite a value set since. */
   replayFor(payload: unknown): unknown {
     return validatedReplay(this.payloadSchema, payload);

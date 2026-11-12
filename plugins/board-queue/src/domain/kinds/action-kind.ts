@@ -72,6 +72,23 @@ export interface ActionKind {
    * reading, and only such a kind is worth the reads that take it.
    */
   readonly narrowsOnRelease: boolean;
+  /**
+   * Whether an action of this kind waits for work its filer deferred to a later
+   * date, filed before it on its issue. A kind whose meaning depends on what was
+   * filed in front of it landing first — a close, a check of what the row reads —
+   * waits; a kind that only writes its own values runs in its turn, without
+   * waiting for the deferred work to come due.
+   */
+  readonly awaitsDeferredWork: boolean;
+  /**
+   * What this payload writes, each named the way any payload that writes the
+   * same thing names it — a board field, an assignee — so that a later write of
+   * one of them is held behind an earlier action deferred to a date, which would
+   * otherwise land its older value last. Empty for a payload that writes nothing
+   * a later action could overwrite; null for one that cannot be read, which is
+   * taken to write everything.
+   */
+  writeTargets(payload: unknown): readonly string[] | null;
 
   /**
    * What runs again once the board offers the options this payload was blocked

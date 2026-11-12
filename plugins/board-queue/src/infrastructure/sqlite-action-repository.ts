@@ -16,7 +16,7 @@ import type { BoardKey } from '../domain/board-directory.ts';
 import type { CachedCatalog, CatalogField, CatalogOption, FieldCatalog } from '../domain/catalog.ts';
 import { StaleAction } from '../domain/errors.ts';
 import { IssueRef } from '../domain/issue-ref.ts';
-import { ISSUE_HOLDING_STATES, STILL_TO_RUN_STATES } from '../domain/issue-order.ts';
+import { IssueOrder, ISSUE_HOLDING_STATES, STILL_TO_RUN_STATES } from '../domain/issue-order.ts';
 import { QueuePause } from '../domain/queue-pause.ts';
 import { randomUUID } from 'node:crypto';
 import { LocalProcessTable, UNKNOWN_START } from './process-table.ts';
@@ -60,12 +60,15 @@ const UPDATE_SQL = 'UPDATE actions SET kind = ?, payload = ?, repo = ?, issue = 
   + 'blocked_reason = ?, option_wait = ?, write_guard = ?, version = ? WHERE id = ? AND version = ?';
 
 /**
- * The next action a worker may run, in one question.
+ * The actions a worker may run next, oldest first.
  *
  * Actions on one issue run in the order they were filed — that is what orders a
  * comment before the close that follows it — so an action is passed over while an
  * older one on the same issue is in a state that holds the issue: queued, running,
- * or stopped as failed or blocked until a person retries or cancels it. Two
+ * or stopped as failed or blocked until a person retries or cancels it. An older
+ * action its filer deferred to a date still to come — queued, never run — is left
+ * out of this question: whether it holds back a later one depends on what each
+ * writes, which `IssueOrder` decides over the rows `deferredBeforeSql` reads. Two
  * actions filed in the same millisecond are ordered by the order they were
  * written, so neither can be mistaken for the other's peer and both become
  * claimable at once. Actions that name no issue are ordered against each other
@@ -74,9 +77,9 @@ const UPDATE_SQL = 'UPDATE actions SET kind = ?, payload = ?, repo = ?, issue = 
  * Built when a repository opens rather than when the module loads, because the
  * holding states are spelled through the stored-state table further down.
  */
-const claimSql = (): string => `SELECT ${COLUMNS} FROM actions AS a
+const claimCandidatesSql = (): string => `SELECT ${COLUMNS}, a.rowid AS seq FROM actions AS a
 WHERE a.state = 'queued'
-  AND (a.not_before IS NULL OR a.not_before <= ?)
+  AND (a.not_before IS NULL OR a.not_before <= :now)
   AND NOT EXISTS (
     SELECT 1 FROM actions AS earlier
     WHERE earlier.id <> a.id
@@ -85,9 +88,22 @@ WHERE a.state = 'queued'
       AND ${storedIn('earlier', ISSUE_HOLDING_STATES)}
       AND (earlier.created_at < a.created_at
         OR (earlier.created_at = a.created_at AND earlier.rowid < a.rowid))
+      AND NOT (${deferredAt('earlier')})
   )
-ORDER BY a.created_at, a.rowid
-LIMIT 1`;
+ORDER BY a.created_at, a.rowid`;
+
+/** The deferred actions filed before one action on its issue, which `IssueOrder` weighs against it. */
+const deferredBeforeSql = (): string => `SELECT ${COLUMNS} FROM actions AS earlier
+WHERE earlier.repo IS :repo
+  AND earlier.issue IS :issue
+  AND ${deferredAt('earlier')}
+  AND (earlier.created_at < :createdAt OR (earlier.created_at = :createdAt AND earlier.rowid < :seq))`;
+
+/** That the row is deferred by its filer at `:now`, as `isDeferred` reads an action. */
+const deferredAt = (alias: string): string => `${storedIn(alias, ['queued'])}
+        AND ${alias}.attempts = 0
+        AND ${alias}.not_before IS NOT NULL
+        AND ${alias}.not_before > :now`;
 
 /**
  * That no action which may still write to the issue — held ones included — was
@@ -146,6 +162,11 @@ export type SqliteActionRepositoryOptions = {
   lockStaleAfterMs?: number;
   /** How often a holder renews its lease while it holds the lock. */
   lockRenewEveryMs?: number;
+  /**
+   * The order of an issue's actions. Without one, every kind is unknown to it, so
+   * a deferred action holds back everything filed after it on its issue.
+   */
+  issueOrder?: IssueOrder;
 };
 
 /**
@@ -169,6 +190,8 @@ export class SqliteActionRepository implements ActionRepository {
   readonly #getStatement: StatementSync;
   readonly #byDedupeKeyStatement: StatementSync;
   readonly #claimStatement: StatementSync;
+  readonly #deferredBeforeStatement: StatementSync;
+  readonly #order: IssueOrder;
   readonly #coalescibleStatement: StatementSync;
   readonly #coalesceStatement: StatementSync;
   readonly #countsStatement: StatementSync;
@@ -184,6 +207,7 @@ export class SqliteActionRepository implements ActionRepository {
     this.#processes = options.processes ?? new LocalProcessTable();
     this.#lockStaleAfterMs = options.lockStaleAfterMs ?? LOCK_STALE_AFTER_MS;
     this.#lockRenewEveryMs = options.lockRenewEveryMs ?? LOCK_RENEW_EVERY_MS;
+    this.#order = options.issueOrder ?? new IssueOrder([]);
 
     this.#db = openQueueDatabase(file);
 
@@ -191,7 +215,8 @@ export class SqliteActionRepository implements ActionRepository {
     this.#updateStatement = this.#db.prepare(UPDATE_SQL);
     this.#getStatement = this.#db.prepare(`SELECT ${COLUMNS} FROM actions WHERE id = ?`);
     this.#byDedupeKeyStatement = this.#db.prepare(`SELECT ${COLUMNS} FROM actions WHERE dedupe_key = ?`);
-    this.#claimStatement = this.#db.prepare(claimSql());
+    this.#claimStatement = this.#db.prepare(claimCandidatesSql());
+    this.#deferredBeforeStatement = this.#db.prepare(deferredBeforeSql());
     this.#coalescibleStatement = this.#db.prepare(coalescibleSql());
     this.#coalesceStatement = this.#db.prepare(coalesceSql());
     this.#countsStatement = this.#db.prepare(
@@ -285,13 +310,12 @@ export class SqliteActionRepository implements ActionRepository {
     return Promise.resolve(changed > 0);
   }
 
-  async claimNextRunnable(now: Date): Promise<Action | null> {
+  async claimNextRunnable(now: Date, passOver?: (action: Action) => boolean): Promise<Action | null> {
     const action = this.#transact(() => {
-      const row = this.#claimStatement.get(now.getTime());
-      if (row === undefined) {
+      const claimed = this.#nextRunnable(now, passOver ?? (() => false));
+      if (claimed === null) {
         return null;
       }
-      const claimed = fromRow(row);
       claimed.start(now);
       if (this.#writeGuarded(claimed) === 0) {
         throw new StaleAction(claimed.id, claimed.persistedVersion);
@@ -302,6 +326,27 @@ export class SqliteActionRepository implements ActionRepository {
       action.markPersisted();
     }
     return Promise.resolve(action);
+  }
+
+  /** The oldest action no older one on its issue holds back, deferred ones included, and not passed over. */
+  #nextRunnable(now: Date, passOver: (action: Action) => boolean): Action | null {
+    for (const row of this.#claimStatement.all({ now: now.getTime() })) {
+      const candidate = fromRow(row);
+      if (passOver(candidate)) {
+        continue;
+      }
+      const deferred = this.#deferredBeforeStatement.all({
+        now: now.getTime(),
+        repo: readOptionalText(row, 'repo'),
+        issue: readOptionalInteger(row, 'issue'),
+        createdAt: readInteger(row, 'created_at'),
+        seq: readInteger(row, 'seq'),
+      }).map(fromRow);
+      if (!deferred.some((earlier) => this.#order.holdsBack(earlier, candidate, now))) {
+        return candidate;
+      }
+    }
+    return null;
   }
 
   async list(filter: ActionFilter): Promise<Action[]> {
@@ -363,7 +408,9 @@ export class SqliteActionRepository implements ActionRepository {
     if (until === null || reason === null || hits === null) {
       return Promise.resolve(null);
     }
-    return Promise.resolve(new QueuePause({ until, reason, consecutiveHits: hits }));
+    // A note that names no cause reads as a limiter's wait.
+    const cause = parsed['cause'] === 'credential' ? 'credential' : 'limit';
+    return Promise.resolve(new QueuePause({ until, reason, consecutiveHits: hits, cause }));
   }
 
   async setPause(pause: QueuePause | null): Promise<void> {
@@ -374,6 +421,7 @@ export class SqliteActionRepository implements ActionRepository {
         until: pause.until.toISOString(),
         reason: pause.reason,
         consecutiveHits: pause.consecutiveHits,
+        cause: pause.cause,
       }));
     }
     return Promise.resolve();

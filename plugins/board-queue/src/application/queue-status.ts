@@ -1,11 +1,19 @@
 import type { Action, ActionState } from '../domain/action.ts';
-import { stoppedIssues } from '../domain/issue-order.ts';
-import type { StoppedIssue } from '../domain/issue-order.ts';
+import { IssueOrder, stoppedIssues } from '../domain/issue-order.ts';
+import type { DeferredWait, StoppedIssue } from '../domain/issue-order.ts';
 import { ownerJobsOf } from '../domain/sync-config.ts';
 import type { MirrorScope, OwnerJob, SyncConfig } from '../domain/sync-config.ts';
 import { readLastAudit, readLastBudget, readLastTickAt } from './queue-meta.ts';
-import { readFinishRun, readForgeRun, readImportRun, readMirrorRun, readSyncRefusal } from './sync-meta.ts';
-import type { FinishRun, ForgeRun, ImportRun, MirrorRun, SyncRefusal } from './sync-meta.ts';
+import { isMirrored } from './mirror-claims.ts';
+import {
+  readFinishRun,
+  readForgeRun,
+  readImportRun,
+  readMirrorPassOver,
+  readMirrorRun,
+  readSyncRefusal,
+} from './sync-meta.ts';
+import type { FinishRun, ForgeRun, ImportRun, MirrorPassOver, MirrorRun, SyncRefusal } from './sync-meta.ts';
 import type { ActionCounts, ActionRepository, Clock } from './ports.ts';
 
 export type PauseView = {
@@ -94,6 +102,43 @@ export type StoppedIssueView = {
 };
 
 /**
+ * A queued action that waits for deferred work filed before it on its issue — a
+ * close behind a comment put off to a date — and when it may run. From every other
+ * angle it reads as work about to happen; this says it is not, and until when.
+ */
+export type DeferredWaitView = {
+  id: string;
+  kind: string;
+  ref: string | null;
+  /** The deferred actions in front of it, oldest first. */
+  behind: { id: string; kind: string; runnableAt: string }[];
+  /** When the last of them comes due, and this one may run after it. */
+  until: string;
+  /** How long until then, in days, to one decimal. */
+  inDays: number;
+};
+
+/**
+ * The mirrored actions this worker's last pass left queued because the mirror
+ * could not say they still stand, why, and the work held behind each on its issue
+ * — a close filed by a session waits there too, and would otherwise read as work
+ * about to happen. Null when none of them is still queued.
+ */
+export type MirroredWaitView = {
+  count: number;
+  /** When the pass that left them ran. */
+  at: string;
+  reason: string;
+  held: {
+    id: string;
+    kind: string;
+    ref: string | null;
+    /** What was filed after it on its issue and waits behind it. */
+    waiting: IssueActionView[];
+  }[];
+};
+
+/**
  * Keeping the boards in step with a coordination server, as this worker does it:
  * which directions are on, what each did last, and why this worker declined when
  * it is not the one that runs them.
@@ -105,7 +150,7 @@ export type SyncView = {
   owner: string;
   /** The jobs switched on that run only in the owner's worker. */
   ownerJobs: OwnerJob[];
-  mirror: { enabled: boolean; scope: MirrorScope; lastRun: MirrorRun | null };
+  mirror: { enabled: boolean; scope: MirrorScope; lastRun: MirrorRun | null; waiting: MirroredWaitView | null };
   /** Letting this worker's own person's claims go as the board moves their work on. */
   finish: { enabled: boolean; handOn: string[]; complete: string[]; lastRun: FinishRun | null };
   importer: { enabled: boolean; lastRun: ImportRun | null };
@@ -123,6 +168,8 @@ export type QueueStatusView = {
   failed: StuckActionView[];
   held: HeldActionView[];
   delayed: DelayedActionView[];
+  /** The actions that wait only for deferred work in front of them, the soonest due first. */
+  waitingOnDeferred: DeferredWaitView[];
   /** The issues held up behind failed or blocked actions, oldest front first. */
   stopped: StoppedIssueView[];
   /** Null when this deployment keeps nothing in step. */
@@ -143,11 +190,19 @@ export class QueueStatus {
   readonly #repository: ActionRepository;
   readonly #clock: Clock;
   readonly #sync: SyncConfig | null;
+  readonly #order: IssueOrder;
 
-  constructor(repository: ActionRepository, clock: Clock, sync: SyncConfig | null = null) {
+  /** `order`: the order of an issue's actions; without one, every kind is unknown to it and waits for deferred work. */
+  constructor(
+    repository: ActionRepository,
+    clock: Clock,
+    sync: SyncConfig | null = null,
+    order: IssueOrder = new IssueOrder([]),
+  ) {
     this.#repository = repository;
     this.#clock = clock;
     this.#sync = sync;
+    this.#order = order;
   }
 
   async execute(): Promise<QueueStatusView> {
@@ -213,29 +268,38 @@ export class QueueStatus {
           };
         })
         .sort((one, other) => one.runnableAt.localeCompare(other.runnableAt)),
+      waitingOnDeferred: this.#order.deferredWaits(open, now)
+        .map((wait) => deferredWaitView(wait, now))
+        .sort((one, other) => one.until.localeCompare(other.until)),
       stopped: stoppedIssues(open).map(stoppedIssueView),
-      sync: await this.#syncView(),
+      sync: await this.#syncView(open),
     };
   }
 
-  async #syncView(): Promise<SyncView | null> {
+  async #syncView(open: readonly Action[]): Promise<SyncView | null> {
     const sync = this.#sync;
     if (sync === null) {
       return null;
     }
-    const [mirrorRun, finishRun, importRun, forgeRun, refused] = await Promise.all([
+    const [mirrorRun, finishRun, importRun, forgeRun, refused, passOver] = await Promise.all([
       readMirrorRun(this.#repository),
       readFinishRun(this.#repository),
       readImportRun(this.#repository),
       readForgeRun(this.#repository),
       readSyncRefusal(this.#repository),
+      readMirrorPassOver(this.#repository),
     ]);
     return {
       server: sync.server,
       project: sync.project,
       owner: sync.mirrorOwner,
       ownerJobs: ownerJobsOf(sync),
-      mirror: { enabled: sync.mirror?.enabled === true, scope: sync.mirror?.scope ?? 'all', lastRun: mirrorRun },
+      mirror: {
+        enabled: sync.mirror?.enabled === true,
+        scope: sync.mirror?.scope ?? 'all',
+        lastRun: mirrorRun,
+        waiting: passOver === null ? null : mirroredWaitView(passOver, open),
+      },
       finish: {
         enabled: sync.finish?.enabled === true,
         handOn: [...(sync.finish?.handOn ?? [])],
@@ -281,4 +345,40 @@ function issueActionView(action: Action): IssueActionView {
 function ageInDays(since: Date, now: Date): number {
   const days = (now.getTime() - since.getTime()) / (24 * 60 * 60 * 1000);
   return Math.round(Math.max(0, days) * 10) / 10;
+}
+
+function deferredWaitView(wait: DeferredWait, now: Date): DeferredWaitView {
+  return {
+    id: wait.action.id,
+    kind: wait.action.kind,
+    ref: wait.action.issueRef === null ? null : wait.action.issueRef.toString(),
+    behind: wait.behind.map((action) => ({
+      id: action.id,
+      kind: action.kind,
+      runnableAt: (action.notBefore ?? now).toISOString(),
+    })),
+    until: wait.until.toISOString(),
+    inDays: ageInDays(now, wait.until),
+  };
+}
+
+/** The mirrored actions the last pass left that are still queued, and what waits behind each; null for none. */
+function mirroredWaitView(passOver: MirrorPassOver, openInFilingOrder: readonly Action[]): MirroredWaitView | null {
+  const left = new Set(passOver.ids);
+  const held: MirroredWaitView['held'] = [];
+  for (const [at, action] of openInFilingOrder.entries()) {
+    if (action.state !== 'queued' || !isMirrored(action) || !left.has(action.id)) {
+      continue;
+    }
+    const lane = action.issueRef?.key() ?? null;
+    held.push({
+      id: action.id,
+      kind: action.kind,
+      ref: action.issueRef === null ? null : action.issueRef.toString(),
+      waiting: openInFilingOrder.slice(at + 1)
+        .filter((later) => (later.issueRef?.key() ?? null) === lane && (later.state === 'queued' || later.state === 'held'))
+        .map((later) => ({ id: later.id, kind: later.kind, state: later.state })),
+    });
+  }
+  return held.length === 0 ? null : { count: held.length, at: passOver.at, reason: passOver.reason, held };
 }

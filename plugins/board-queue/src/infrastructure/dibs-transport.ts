@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Logger } from '../application/ports.ts';
-import { NoAnswer, RefusedByRule, TransientFailure } from '../domain/errors.ts';
+import type { TokenRefusalSink } from '../application/sync-ports.ts';
+import { CredentialRejected, NoAnswer, RefusedByRule, TransientFailure } from '../domain/errors.ts';
 import type { FetchLike } from './github-http.ts';
 import { readOwnerOnlyFile } from './owner-only-file.ts';
 import { redactSecrets } from './redaction.ts';
@@ -9,6 +10,8 @@ import { redactSecrets } from './redaction.ts';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const USER_AGENT = 'board-queue';
 const SERVER_FAULT = 500;
+/** The server's answer to a token it does not accept, whatever was asked. */
+const UNAUTHORIZED = 401;
 
 const ErrorEnvelope = z.object({
   error: z.object({
@@ -25,6 +28,8 @@ export type DibsHttpDeps = {
   logger: Logger;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
+  /** Told of every refusal of the token, so the pass learns the token failed and not just one request. */
+  refusals?: TokenRefusalSink;
 };
 
 /** What the server answered: its status, its body, and the code and details of a refusal. */
@@ -46,12 +51,14 @@ export class DibsTransport {
   readonly #token: () => string;
   readonly #fetch: FetchLike;
   readonly #timeoutMs: number;
+  readonly #refusals: TokenRefusalSink | null;
 
   constructor(deps: DibsHttpDeps) {
     this.#server = deps.server.replace(/\/+$/, '');
     this.#token = deps.token;
     this.#fetch = deps.fetchImpl ?? ((url, init) => globalThis.fetch(url, init));
     this.#timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#refusals = deps.refusals ?? null;
   }
 
   async call(method: string, path: string, subject: string, body?: unknown): Promise<DibsAnswer> {
@@ -86,13 +93,19 @@ export class DibsTransport {
   /**
    * The body of a successful answer; any other is a failure naming the server's
    * code for it. A fault of the server's own (a 5xx) is the server not answering;
-   * a 4xx is a refusal of this one request.
+   * a refused token is a refusal of every request this worker makes, and is said
+   * to whoever listens for it; any other 4xx is a refusal of this one request.
    */
   ok(answer: DibsAnswer, subject: string): unknown {
     if (answer.status >= 200 && answer.status < 300) {
       return answer.json;
     }
     const code = answer.code === null ? '' : ` (${answer.code})`;
+    if (answer.status === UNAUTHORIZED) {
+      const detail = `the coordination server refused the worker's token: ${String(answer.status)}${code}`;
+      this.#refusals?.tokenRefused(detail);
+      throw new CredentialRejected(subject, detail);
+    }
     if (answer.status >= SERVER_FAULT) {
       throw new NoAnswer(`${subject} met a fault of the coordination server: ${String(answer.status)}${code}`);
     }

@@ -1,4 +1,4 @@
-import { BoardQueueError, NoAnswer } from '../domain/errors.ts';
+import { BoardQueueError, CredentialRejected, NoAnswer } from '../domain/errors.ts';
 import type { ForgeConfig } from '../domain/sync-config.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { ForgeAllowance } from './forge-ports.ts';
@@ -56,8 +56,9 @@ export type ForgeCallsDeps = {
  *
  * Requests to the coordination server are not paced — it is the deployment's own
  * service. The server not answering ends the pass: what was not kept is sent
- * again by the next one, and nothing is sent past an answer that did not come. A
- * refusal of one report is the caller's to record.
+ * again by the next one, and nothing is sent past an answer that did not come.
+ * The server refusing the token ends it too, since every request after would be
+ * refused the same way. A refusal of one report is the caller's to record.
  *
  * Every request, to either, goes out only while the pass still holds the tick
  * lock, asked at the moment it would go out. A pass that waited past its lease
@@ -165,8 +166,9 @@ export class ForgeCalls {
   }
 
   /**
-   * One call to the coordination server. Not answering ends the pass; a refusal is
-   * thrown for the caller to record, except for a read the pass cannot do without.
+   * One call to the coordination server. Not answering, or refusing the token,
+   * ends the pass; a refusal is thrown for the caller to record, except for a read
+   * the pass cannot do without.
    */
   async coordination<T>(what: string, call: () => Promise<T>, essential = false): Promise<T> {
     this.#refuseOnceStopped();
@@ -174,7 +176,7 @@ export class ForgeCalls {
     try {
       return await call();
     } catch (error) {
-      if (essential || error instanceof NoAnswer) {
+      if (essential || error instanceof NoAnswer || error instanceof CredentialRejected) {
         this.#stopPass(`the coordination server did not answer ${what}: ${sentenceOf(error)}`);
       }
       throw error;

@@ -77,6 +77,15 @@ export class FakeCoordination implements ClaimFeed, WorkImport, OwnClaims {
     return this;
   }
 
+  /** A claim that is live no longer: released, or ended by an admin. */
+  ends(item: number): this {
+    const at = this.#claims.findIndex((claim) => claim.item === item);
+    if (at >= 0) {
+      this.#claims.splice(at, 1);
+    }
+    return this;
+  }
+
   /**
    * A claim the token's member, or another, holds with the board status its issue
    * shows; holding it again replaces what was held.

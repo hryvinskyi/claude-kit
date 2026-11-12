@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { OwnMoves } from '../../src/application/mirror-audience.ts';
 import { MirrorClaims } from '../../src/application/mirror-claims.ts';
+import { MAX_REF_ATTEMPTS } from '../../src/application/mirror-lookups.ts';
 import { mirrorCursorKey, mirrorLoginKey, readMirrorRun } from '../../src/application/sync-meta.ts';
 import { BoardDirectory } from '../../src/domain/board-directory.ts';
-import { TransientFailure } from '../../src/domain/errors.ts';
+import { CredentialRejected, TransientFailure } from '../../src/domain/errors.ts';
 import { defaultKindRegistry } from '../../src/domain/kinds/default-kinds.ts';
 import type { MirrorConfig } from '../../src/domain/sync-config.ts';
 import { FakeCoordination, claim, forcedRelease } from '../fakes/fake-coordination.ts';
@@ -210,17 +211,62 @@ describe('following the claim log', () => {
     assert.equal(report.cursor, 3, 'what it passed over is behind the cursor all the same');
   });
 
-  it('passes over an item whose reference cannot be read and files the rest of the page', async () => {
-    const { feed, mirrorClaims, following } = harness();
+  it('files the rest of a page whose item could not be looked up, and reads that page again next run', async () => {
+    const { repository, feed, mirrorClaims, following } = harness();
     await following();
-    feed.log(claim(1, 'claimed', 46, 'alice'), claim(2, 'claimed', 41, 'alice'));
-    feed.fail('itemRef', new TransientFailure('the work item 46 answered 500'));
+    feed.log(claim(1, 'claimed', 45, 'bob'), claim(2, 'claimed', 41, 'alice'));
+    feed.fail('itemRef', new TransientFailure('the work item 45 answered 500'));
+
+    const failed = await mirrorClaims.execute(HELD);
+
+    assert.equal(failed.unresolved, 1);
+    assert.equal(failed.filed, 2, 'the move about #12 is filed');
+    assert.equal(failed.cursor, 0, 'the cursor stays before the move it could not file');
+    assert.equal(await repository.getMeta(CURSOR), '0');
+
+    const again = await mirrorClaims.execute(HELD);
+
+    assert.equal(again.filed, 2, 'the move about #13 is filed once its item can be read');
+    assert.equal(again.duplicates, 1, 'the move about #12 is not filed twice');
+    assert.equal(again.cursor, 2);
+    assert.deepEqual((await repository.list({ kind: 'board.set-fields' })).map((action) => action.payload), [
+      status(12, 'In Progress'),
+      status(13, 'In Progress'),
+    ]);
+  });
+
+  it('passes a move over for good once its item could not be looked up in as many runs as are allowed', async () => {
+    const { repository, feed, logger, mirrorClaims, following } = harness();
+    await following();
+    feed.log(claim(1, 'claimed', 45, 'bob'));
+    for (let attempt = 0; attempt < MAX_REF_ATTEMPTS; attempt += 1) {
+      feed.fail('itemRef', new TransientFailure('the work item 45 answered 500'));
+    }
+
+    const cursors: number[] = [];
+    for (let run = 0; run < MAX_REF_ATTEMPTS; run += 1) {
+      cursors.push((await mirrorClaims.execute(HELD)).cursor);
+    }
+
+    assert.deepEqual(cursors, [...Array.from({ length: MAX_REF_ATTEMPTS - 1 }, () => 0), 1]);
+    assert.deepEqual(await repository.list({}), []);
+    assert.ok(logger.lines.some((line) => line.level === 'error' && /passed over/.test(line.message)));
+    feed.log(claim(3, 'released', 45, 'bob'));
+    const later = await mirrorClaims.execute(HELD);
+    assert.equal(later.filed, 1, 'a later move of the same item is asked for afresh');
+  });
+
+  it('files nothing more and keeps its cursor when the server refuses the token while looking an item up', async () => {
+    const { repository, feed, mirrorClaims, following } = harness();
+    await following();
+    feed.log(claim(1, 'claimed', 45, 'bob'));
+    feed.fail('itemRef', new CredentialRejected('the work item 45', 'the coordination server refused the worker\'s token: 401'));
 
     const report = await mirrorClaims.execute(HELD);
 
-    assert.equal(report.unresolved, 1);
-    assert.equal(report.filed, 2);
-    assert.equal(report.cursor, 2);
+    assert.match(report.error ?? '', /refused the worker's token/);
+    assert.equal(await repository.getMeta(CURSOR), '0');
+    assert.deepEqual(await repository.list({}), []);
   });
 
   it('asks an item\'s reference once and keeps it', async () => {
@@ -411,6 +457,25 @@ describe('starting from the head of the log', () => {
     assert.deepEqual(statuses, [status(13, 'In Progress')], 'the pruned and the later events of #12 were not replayed');
   });
 
+  it('starts from the head again when a live claim\'s item could not be looked up, filing nothing twice', async () => {
+    const { repository, feed, mirrorClaims } = harness();
+    feed.log(claim(1, 'claimed', 41, 'alice'), claim(2, 'claimed', 45, 'bob'));
+    feed.holds(41, 'alice').holds(45, 'bob');
+    feed.fail('itemRef', new TransientFailure('the work item 41 answered 500'));
+
+    const failed = await mirrorClaims.execute(HELD);
+    const again = await mirrorClaims.execute(HELD);
+
+    assert.equal(failed.filed, 2);
+    assert.equal(await repository.getMeta(CURSOR), '2');
+    assert.equal(again.filed, 2);
+    assert.equal(again.duplicates, 1);
+    assert.deepEqual((await repository.list({ kind: 'board.set-fields' })).map((action) => action.payload), [
+      status(13, 'In Progress'),
+      status(12, 'In Progress'),
+    ]);
+  });
+
   it('keeps saying events were lost until the live claims could be filed', async () => {
     const { repository, feed, mirrorClaims } = harness();
     await repository.setMeta(CURSOR, '2');
@@ -560,6 +625,48 @@ describe('filing only the moves of the person this worker runs as', () => {
     assert.equal(report.othersMoves, 1);
     assert.equal(report.cursor, 4);
     assert.equal(feed.calls.filter((call) => call === 'liveClaims').length, 1, 'the live claims are read once a run');
+  });
+
+  it('withdraws a filed move that waited in the queue while the server moved on, so it never writes over the later one', async () => {
+    // Bob's worker filed his claim, then its queue waited out a limit; meanwhile an
+    // admin ended the claim, and the admin's worker filed and ran the release.
+    const { repository, feed, mirrorClaims, following } = harness({ ownLogin: 'bob-gh' });
+    feed.member('carol', 'carol-gh');
+    await following();
+    feed.log(claim(3, 'claimed', 41, 'bob'), claim(4, 'claimed', 45, 'bob')).holds(41, 'bob').holds(45, 'bob');
+    const filed = await mirrorClaims.execute(HELD);
+    assert.equal(filed.filed, 4);
+    feed.ends(41).log(forcedRelease(5, 41, 'bob', 'carol'));
+
+    const next = await mirrorClaims.execute(HELD);
+
+    const twelve = await repository.list({ issue: 12 });
+    assert.deepEqual(twelve.map((action) => action.state), ['skipped', 'skipped'], 'neither the status nor the assignment runs');
+    assert.match(twelve[0]?.result ?? '', /no longer shows the state this move left/);
+    assert.deepEqual((await repository.list({ issue: 13 })).map((action) => action.state), ['queued', 'queued'],
+      'the move that still stands keeps its actions');
+    assert.equal(next.staleMoves, 1);
+    assert.equal(next.othersMoves, 1, 'the release is the admin\'s worker\'s to file');
+  });
+
+  it('forgets a filed move once its actions have run, and asks the server nothing about it', async () => {
+    const { repository, feed, mirrorClaims, following } = harness({ ownLogin: 'bob-gh' });
+    await following();
+    feed.log(claim(3, 'claimed', 41, 'bob')).holds(41, 'bob');
+    await mirrorClaims.execute(HELD);
+    for (const action of await repository.list({})) {
+      action.start(new Date('2026-03-02T09:01:00.000Z'));
+      action.succeed(new Date('2026-03-02T09:01:00.000Z'), 'written');
+      await repository.update(action);
+    }
+    feed.ends(41);
+    const asked = feed.calls.filter((call) => call === 'liveClaims').length;
+
+    const next = await mirrorClaims.execute(HELD);
+
+    assert.equal(next.staleMoves, 0);
+    assert.equal(feed.calls.filter((call) => call === 'liveClaims').length, asked, 'nothing pending, nothing asked');
+    assert.deepEqual((await repository.list({})).map((action) => action.state), ['done', 'done']);
   });
 
   it('files, in the owner\'s worker, the release of a member removed from the server\'s command line', async () => {

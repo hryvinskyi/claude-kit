@@ -22,8 +22,16 @@ import type { Forge, ForgeCoordination, ForgeIdentity } from '../application/for
 import { RunTick } from '../application/run-tick.ts';
 import type { SyncJobs } from '../application/run-tick.ts';
 import { SyncOwner } from '../application/sync-owner.ts';
-import type { ClaimFeed, DependencyReader, LocalIdentity, OwnClaims, WorkImport } from '../application/sync-ports.ts';
+import type {
+  ClaimFeed,
+  DependencyReader,
+  LocalIdentity,
+  OwnClaims,
+  TokenRefusalSink,
+  WorkImport,
+} from '../application/sync-ports.ts';
 import { ShowBoardItem } from '../application/show-board-item.ts';
+import { TokenRefusals } from '../application/token-refusals.ts';
 import { BoardDirectory } from '../domain/board-directory.ts';
 import type { BoardKey, BoardPlacement } from '../domain/board-directory.ts';
 import type { IssueRef } from '../domain/issue-ref.ts';
@@ -144,7 +152,8 @@ export function buildContainer(options: BuildContainerOptions): Container {
   const clock = overrides.clock ?? new SystemClock();
   const sleeper = overrides.sleeper ?? new RealSleeper();
   const logger = new FileLogger(logPath(stateDir), clock);
-  const repository = new SqliteActionRepository(dbPath(stateDir), { clock });
+  const kinds = defaultKindRegistry(config);
+  const repository = new SqliteActionRepository(dbPath(stateDir), { clock, issueOrder: kinds.issueOrder() });
   const directory = BoardDirectory.of(config.boards);
 
   // Built, not used: nothing below asks for a credential until a gateway makes a
@@ -178,7 +187,6 @@ export function buildContainer(options: BuildContainerOptions): Container {
   };
   const boards = new BoardRouter(directory, overrides.lanes ?? networkLanes);
 
-  const kinds = defaultKindRegistry(config);
   const policy = new BudgetPolicy(config.worker);
   const drain = new DrainQueue({ repository, boards, kinds, policy, clock, sleeper, logger, config });
   const audit = new AuditBoard({
@@ -193,6 +201,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
 
   const sync = config.dibs ?? null;
   const closers: (() => void)[] = [];
+  const tokenRefusals = new TokenRefusals();
   const syncJobs = sync === null || !syncIsOn(sync) ? undefined : buildSyncJobs({
     sync,
     env,
@@ -207,6 +216,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
     overrides,
     stateDir,
     closers,
+    tokenRefusals,
     dependencyHttp: memoised((ref: IssueRef) => directory.placementOf(ref), httpFor),
     forgeHttp: memoised((repo: string) => placementOfRepository(directory, repo), (placement) =>
       new GitHubHttp({
@@ -245,7 +255,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
     release: new ReleaseAction(repository, clock),
     cancel: new CancelAction(repository, clock),
     retry: new RetryAction(repository, clock),
-    status: new QueueStatus(repository, clock, sync),
+    status: new QueueStatus(repository, clock, sync, kinds.issueOrder()),
     list: new ListActions(repository),
     show: new ShowBoardItem({ boards, repository, clock }),
     audit,
@@ -264,7 +274,7 @@ export function buildContainer(options: BuildContainerOptions): Container {
           await audit.execute(lease);
         },
       } : {}),
-      ...(syncJobs === undefined ? {} : { sync: syncJobs }),
+      ...(syncJobs === undefined ? {} : { sync: syncJobs, tokenRefusals }),
     }),
     close: () => {
       for (const close of closers) {
@@ -290,6 +300,8 @@ type SyncWiring = {
   stateDir: string;
   /** Where every handle opened here is registered to be closed with the container. */
   closers: (() => void)[];
+  /** Told by the coordination server's transports whenever the token is refused. */
+  tokenRefusals: TokenRefusalSink;
   /** The REST transport an issue's dependency lists are read through: that of the board that carries it. */
   dependencyHttp: (ref: IssueRef) => GitHubHttp;
   /**
@@ -317,6 +329,7 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
     server: sync.server,
     token: dibsToken(sync, env),
     logger,
+    refusals: wiring.tokenRefusals,
     ...(overrides.dibsFetch === undefined ? {} : { fetchImpl: overrides.dibsFetch }),
   });
   const identityDeps = { env, board: firstBoard(wiring.directory), clock, fetchImpl: overrides.appFetch };
@@ -342,7 +355,7 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
       logger,
       audience: MIRROR_AUDIENCES[mirror.scope](overrides.identity ?? localIdentity(identityDeps), sync.mirrorOwner),
     });
-    jobs.mirror = (lease) => claims.execute(lease);
+    jobs.mirror = (lease) => claims.pass(lease);
     jobs.mirrorScope = mirror.scope;
   }
   const finish = sync.finish;
@@ -383,6 +396,7 @@ function buildSyncJobs(wiring: SyncWiring): SyncJobs {
         server: sync.server,
         token: dibsToken(sync, env),
         logger,
+        refusals: wiring.tokenRefusals,
         ...(overrides.dibsFetch === undefined ? {} : { fetchImpl: overrides.dibsFetch }),
       }),
       ledger,

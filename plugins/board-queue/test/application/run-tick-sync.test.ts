@@ -4,7 +4,9 @@ import { OwnMoves } from '../../src/application/mirror-audience.ts';
 import { TickLockLost } from '../../src/application/leased-gateways.ts';
 import { MirrorClaims } from '../../src/application/mirror-claims.ts';
 import { readLastAuditAttemptAt, writeLastAudit, writeLastAuditAttemptAt } from '../../src/application/queue-meta.ts';
+import { QueueStatus } from '../../src/application/queue-status.ts';
 import { RunTick } from '../../src/application/run-tick.ts';
+import { statusLines } from '../../src/delivery/human-text.ts';
 import type { SyncJobs } from '../../src/application/run-tick.ts';
 import { mirrorCursorKey, readSyncRefusal } from '../../src/application/sync-meta.ts';
 import { SyncOwner } from '../../src/application/sync-owner.ts';
@@ -23,6 +25,7 @@ import type { TickFixture } from './tick-fixture.ts';
 
 const SYNC = syncOf();
 const TWELVE = IssueRef.of(FIRST, 12);
+const THIRTEEN = IssueRef.of(FIRST, 13);
 
 /** A board whose statuses include one the mirror never writes. */
 function qaCatalog() {
@@ -59,7 +62,7 @@ function worker(fixture: TickFixture, feed: FakeCoordination, login: string | nu
       clock: fixture.clock,
       logger: fixture.logger,
     }),
-    mirror: (lease) => claims.execute(lease),
+    mirror: (lease) => claims.pass(lease),
   };
   return new RunTick({
     drain: fixture.drain,
@@ -95,6 +98,11 @@ function mirrorFor(fixture: TickFixture, feed: FakeCoordination, sync: SyncConfi
     logger: fixture.logger,
     audience,
   });
+}
+
+/** The mirror as the worker runs it in a pass. */
+function mirrorJob(claims: MirrorClaims): NonNullable<SyncJobs['mirror']> {
+  return (lease) => claims.pass(lease);
 }
 
 function feedWithAClaim(): FakeCoordination {
@@ -185,6 +193,165 @@ describe('a tick that keeps the board in step', () => {
     const mirrored = report.sync?.mirror;
     assert.ok(mirrored !== undefined && !('skipped' in mirrored));
     assert.match(mirrored.error ?? '', /could not be reached/);
+  });
+
+  it('holds mirrored moves back from the drain in a pass whose owner check could not run, and says why in status', async () => {
+    const fixture = tickFixture({
+      catalog: qaCatalog(),
+      items: [seedItem(TWELVE, 'item-12', { Status: 'Todo' }), seedItem(THIRTEEN, 'item-13', {})],
+      issues: [{ ref: TWELVE }, { ref: THIRTEEN }],
+    });
+    await fixture.file({ id: 'mirrored', payload: setFields(12, { status: 'In Progress' }), origin: 'the claim mirror' });
+    await fixture.file({ id: 'mine', payload: setFields(13, { severity: 'S2' }) });
+    await fixture.file({ id: 'close', kind: 'issue.close', payload: { repo: FIRST, issue: 12, reason: 'completed' } });
+
+    const report = await worker(fixture, feedWithAClaim(), null).run();
+    const status = await new QueueStatus(fixture.repository, fixture.clock, SYNC).execute();
+
+    assert.equal(report.done, 1, 'the rest of the queue is drained');
+    assert.equal((await fixture.repository.get('mirrored'))?.state, 'queued');
+    assert.deepEqual(fixture.board.valuesOf(TWELVE), { Status: 'Todo' });
+    assert.match(report.passedOver ?? '', /mirrored moves wait/);
+    const waiting = status.sync?.mirror.waiting;
+    assert.equal(waiting?.count, 1);
+    assert.match(waiting?.reason ?? '', /mirror did not run/);
+    assert.deepEqual(waiting?.held.map((one) => [one.id, one.waiting.map((behind) => behind.id)]), [['mirrored', ['close']]],
+      'the close held behind the mirrored move is named');
+    assert.ok(statusLines(status).some((line) => line.startsWith('mirror: 1 mirrored moves left queued')));
+  });
+
+  it('withdraws its mirrored moves once this worker is no longer the mirror\'s owner, and lets the issue move on', async () => {
+    const fixture = tickFixture({
+      catalog: qaCatalog(),
+      items: [seedItem(TWELVE, 'item-12', { Status: 'Todo' })],
+      issues: [{ ref: TWELVE }],
+    });
+    await fixture.file({ id: 'mirrored', payload: setFields(12, { status: 'In Progress' }), origin: 'the claim mirror' });
+    await fixture.file({ id: 'close', kind: 'issue.close', payload: { repo: FIRST, issue: 12, reason: 'completed' } });
+
+    const report = await worker(fixture, feedWithAClaim(), 'bob').run();
+
+    const mirrored = await fixture.repository.get('mirrored');
+    assert.equal(mirrored?.state, 'skipped');
+    assert.match(mirrored?.result ?? '', /no longer the mirror's owner/);
+    assert.equal((await fixture.repository.get('close'))?.state, 'done');
+    assert.equal(report.passedOver, undefined);
+  });
+
+  it('holds back a mirrored move whose filing it has no record of, where moves can be overtaken', async () => {
+    const fixture = tickFixture({
+      catalog: qaCatalog(),
+      items: [seedItem(TWELVE, 'item-12', { Status: 'Todo' })],
+      issues: [{ ref: TWELVE }],
+    });
+    const feed = new FakeCoordination().member('alice', 'alice-gh').member('bob', 'bob-gh');
+    await fixture.repository.setMeta(mirrorCursorKey(SYNC.server, SYNC.project), '0');
+    await fixture.file({
+      id: 'unrecorded',
+      payload: setFields(12, { status: 'In Progress' }),
+      origin: 'the claim mirror',
+      dedupeKey: `dibs:${SYNC.server}:${SYNC.project}:9:status`,
+    });
+    const sync = ownScopeSync({ importer: { enabled: false } });
+    const bob = identity('bob-gh');
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      sync: {
+        owner: new SyncOwner({ identity: bob, sync, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        mirror: mirrorJob(mirrorFor(fixture, feed, sync, new OwnMoves(bob, SYNC.mirrorOwner))),
+        mirrorScope: 'own',
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.equal((await fixture.repository.get('unrecorded'))?.state, 'queued');
+    assert.deepEqual(fixture.board.valuesOf(TWELVE), { Status: 'Todo' });
+    assert.match(report.passedOver ?? '', /1 mirrored moves wait/);
+  });
+
+  it('runs a mirrored move it has no record of where one worker files every move in order', async () => {
+    const fixture = tickFixture({
+      catalog: qaCatalog(),
+      items: [seedItem(TWELVE, 'item-12', { Status: 'Todo' })],
+      issues: [{ ref: TWELVE }],
+    });
+    await fixture.repository.setMeta(mirrorCursorKey(SYNC.server, SYNC.project), '0');
+    await fixture.file({
+      id: 'unrecorded',
+      payload: setFields(12, { status: 'In Progress' }),
+      origin: 'the claim mirror',
+      dedupeKey: `dibs:${SYNC.server}:${SYNC.project}:9:status`,
+    });
+
+    const report = await worker(fixture, new FakeCoordination(), 'alice').run();
+
+    assert.equal((await fixture.repository.get('unrecorded'))?.state, 'done');
+    assert.equal(report.passedOver, undefined);
+  });
+
+  it('says nothing of mirrored moves waiting when none wait, whatever the last stored run says', async () => {
+    const fixture = tickFixture();
+    await worker(fixture, new FakeCoordination(), 'alice').run();
+    // A run as an older release stored it, naming nothing about the moves it checked.
+    await fixture.repository.setMeta('mirror.lastRun', JSON.stringify({
+      at: '2026-03-02T09:00:00.000Z', events: 0, filed: 0, duplicates: 0, ignored: 0, refused: 0, unresolved: 0,
+      cursor: 0, error: null, cursorExpired: null, startedFromHead: null,
+    }));
+
+    const status = await new QueueStatus(fixture.repository, fixture.clock, SYNC).execute();
+
+    assert.equal(status.sync?.mirror.waiting, null);
+    assert.ok(!statusLines(status).some((line) => /left queued|stay queued/.test(line)));
+  });
+
+  it('holds mirrored moves back from the drain when the server could not say whether they still stand', async () => {
+    const fixture = tickFixture({
+      catalog: qaCatalog(),
+      items: [seedItem(TWELVE, 'item-12', { Status: 'Todo' })],
+      issues: [{ ref: TWELVE }],
+    });
+    const feed = new FakeCoordination()
+      .item(41, 'gh:example-org/first-repo#12')
+      .member('alice', 'alice-gh')
+      .member('bob', 'bob-gh')
+      .log(claim(3, 'claimed', 41, 'bob'))
+      .holds(41, 'bob');
+    await fixture.repository.setMeta(mirrorCursorKey(SYNC.server, SYNC.project), '0');
+    const sync = ownScopeSync({ importer: { enabled: false } });
+    const bob = identity('bob-gh');
+    const mirror = mirrorFor(fixture, feed, sync, new OwnMoves(bob, SYNC.mirrorOwner));
+    await fixture.repository.withTickLock((lease) => mirror.execute(lease));
+    assert.equal((await fixture.repository.list({ states: ['queued'] })).length, 2, 'filed while the queue waited');
+    feed.fail('liveClaims', new TransientFailure('the live claims could not be reached'));
+    const tick = new RunTick({
+      drain: fixture.drain,
+      repository: fixture.repository,
+      policy: fixture.policy,
+      clock: fixture.clock,
+      logger: fixture.logger,
+      sync: {
+        owner: new SyncOwner({ identity: bob, sync, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
+        mirror: (lease) => mirror.pass(lease),
+        mirrorScope: 'own',
+      },
+    });
+
+    const report = await tick.run();
+
+    assert.equal(report.executed, 0);
+    assert.equal((await fixture.repository.list({ states: ['queued'] })).length, 2);
+    assert.deepEqual(fixture.board.valuesOf(TWELVE), { Status: 'Todo' });
+    assert.match(report.passedOver ?? '', /mirrored moves wait/);
+
+    const checked = await tick.run();
+
+    assert.equal(checked.done, 2, 'once the server answers, the moves that still stand run');
+    assert.deepEqual(fixture.board.valuesOf(TWELVE), { Status: 'In Progress' });
   });
 
   it('runs the forge pass after the queue is drained, under the lock, and not while another tick holds it', async () => {
@@ -440,7 +607,7 @@ describe('a tick that keeps the board in step', () => {
       logger: fixture.logger,
       sync: {
         owner: new SyncOwner({ identity: bob, sync, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
-        mirror: (lease) => mirrorFor(fixture, feed, sync, new OwnMoves(bob, SYNC.mirrorOwner)).execute(lease),
+        mirror: (lease) => mirrorFor(fixture, feed, sync, new OwnMoves(bob, SYNC.mirrorOwner)).pass(lease),
         mirrorScope: 'own',
         importer,
       },
@@ -478,7 +645,7 @@ describe('a tick that keeps the board in step', () => {
       logger: fixture.logger,
       sync: {
         owner: new SyncOwner({ identity: owner, sync, repository: fixture.repository, clock: fixture.clock, logger: fixture.logger }),
-        mirror: (lease) => mirrorFor(fixture, feedWithAClaim(), sync, new OwnMoves(counted, SYNC.mirrorOwner)).execute(lease),
+        mirror: (lease) => mirrorFor(fixture, feedWithAClaim(), sync, new OwnMoves(counted, SYNC.mirrorOwner)).pass(lease),
         mirrorScope: 'own',
       },
     });

@@ -3,7 +3,8 @@ import { describe, it } from 'node:test';
 import { writeLastAudit } from '../../src/application/queue-meta.ts';
 import { RunTick } from '../../src/application/run-tick.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
-import { SecondaryRateLimited } from '../../src/domain/errors.ts';
+import { CredentialRejected, SecondaryRateLimited } from '../../src/domain/errors.ts';
+import { TokenRefusals } from '../../src/application/token-refusals.ts';
 import { QueuePause } from '../../src/domain/queue-pause.ts';
 import { seedItem } from '../fakes/fake-board-gateway.ts';
 import { FIRST, graphqlBudget, setFields, tickFixture } from './tick-fixture.ts';
@@ -92,6 +93,59 @@ describe('RunTick', () => {
 
     assert.match(report.skipped ?? '', /paused/);
     assert.equal(audits, 0);
+  });
+
+  it('says a credential GitHub refused stopped the pass, in the pass that met it and in those that wait it out', async () => {
+    const tick = tickFixture({ items: [seedItem(twelve, 'item-7', {})] });
+    await tick.file({ id: 'a-1', payload: setFields(12, { severity: 'S2' }) });
+    tick.board.fail('ensureItem', new CredentialRejected('the board', 'Bad credentials'));
+
+    const met = await runTick(tick).run();
+    tick.clock.advanceMinutes(5);
+    const waiting = await runTick(tick).run();
+
+    assert.equal(met.refusedCredential?.by, 'github');
+    assert.match(met.refusedCredential?.reason ?? '', /Bad credentials/);
+    assert.match(waiting.skipped ?? '', /paused/);
+    assert.equal(waiting.refusedCredential?.by, 'github');
+  });
+
+  it('says nothing of a credential while the queue waits out a limiter, or when nothing was refused', async () => {
+    const tick = tickFixture();
+    const idle = await runTick(tick).run();
+    await tick.repository.setPause(new QueuePause({
+      until: new Date(tick.clock.now().getTime() + 60_000),
+      reason: 'a burst refusal',
+      consecutiveHits: 1,
+    }));
+
+    const limited = await runTick(tick).run();
+
+    assert.equal(idle.refusedCredential, undefined);
+    assert.equal(limited.refusedCredential, undefined);
+  });
+
+  it('says the coordination server refused the token when one of the pass\'s calls met that', async () => {
+    const tick = tickFixture();
+    const refusals = new TokenRefusals();
+    const run = new RunTick({
+      drain: tick.drain,
+      repository: tick.repository,
+      policy: tick.policy,
+      clock: tick.clock,
+      logger: tick.logger,
+      tokenRefusals: refusals,
+    });
+    refusals.tokenRefused('the coordination server refused the worker\'s token: 401');
+
+    const refused = await run.run();
+    const next = await run.run();
+
+    assert.deepEqual(refused.refusedCredential, {
+      by: 'coordination',
+      reason: 'the coordination server refused the worker\'s token: 401',
+    });
+    assert.equal(next.refusedCredential, undefined, 'a later pass reports only the refusals of its own calls');
   });
 
   it('keeps the account of the work when the report itself fails', async () => {

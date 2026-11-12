@@ -6,7 +6,9 @@ import type { FinishReport } from './finish-claims.ts';
 import type { ForgeReport } from './forge-pass.ts';
 import type { ImportReport } from './import-ready-work.ts';
 import { LOCK_LOST, TickLockLost } from './leased-gateways.ts';
-import type { MirrorReport } from './mirror-claims.ts';
+import { isMirrored, withdrawMirrored } from './mirror-claims.ts';
+import type { MirrorPass, MirrorReport } from './mirror-claims.ts';
+import { writeMirrorPassOver } from './sync-meta.ts';
 import type { OwnerRefusal, SyncOwner } from './sync-owner.ts';
 import {
   giveBackLastAuditAttemptAt,
@@ -16,6 +18,7 @@ import {
   writeLastAuditAttemptAt,
 } from './queue-meta.ts';
 import type { ActionRepository, Clock, Logger, TickLease } from './ports.ts';
+import type { TokenRefusalRecord } from './token-refusals.ts';
 
 /**
  * Keeping the boards in step with a coordination server, when this deployment
@@ -25,11 +28,12 @@ import type { ActionRepository, Clock, Logger, TickLease } from './ports.ts';
 export type SyncJobs = {
   owner: SyncOwner;
   /**
-   * Carries claims onto the boards as filed work; runs before the queue is drained.
-   * Each job is handed the lease of the tick lock it runs under, confirms it before
-   * every write, and throws `TickLockLost` once another pass has taken the lock.
+   * Carries claims onto the boards as filed work; runs before the queue is drained,
+   * and answers which mirrored actions may run in this pass. Each job is handed the
+   * lease of the tick lock it runs under, confirms it before every write, and
+   * throws `TickLockLost` once another pass has taken the lock.
    */
-  mirror?: (lease: TickLease) => Promise<MirrorReport>;
+  mirror?: (lease: TickLease) => Promise<MirrorPass>;
   /**
    * Whose moves the mirror files: `all` runs it only in the owner's worker, `own`
    * in every worker, for the moves of the person it runs as. `all` unless named.
@@ -58,7 +62,21 @@ export type SyncTickReport = {
   forge?: ForgeReport | { skipped: string };
 };
 
-export type WorkerReport = TickReport & { sync?: SyncTickReport };
+/**
+ * A credential refused while the pass ran: GitHub's, which put the queue to
+ * sleep and stops every pass until a working one is there, or the coordination
+ * server's token, which every job that asks the server meets.
+ */
+export type RefusedCredential = {
+  readonly by: 'github' | 'coordination';
+  readonly reason: string;
+};
+
+export type WorkerReport = TickReport & {
+  sync?: SyncTickReport;
+  /** Present when a credential the pass depends on was refused; the pass then did not do its job. */
+  refusedCredential?: RefusedCredential;
+};
 
 export type RunTickDeps = {
   drain: DrainQueue;
@@ -73,6 +91,8 @@ export type RunTickDeps = {
    */
   audit?: (lease: TickLease) => Promise<void>;
   sync?: SyncJobs;
+  /** What the coordination server's transports heard about the token, when this deployment talks to one. */
+  tokenRefusals?: TokenRefusalRecord;
 };
 
 /**
@@ -99,6 +119,7 @@ export class RunTick {
   readonly #logger: Logger;
   readonly #audit: ((lease: TickLease) => Promise<void>) | null;
   readonly #sync: SyncJobs | null;
+  readonly #tokenRefusals: TokenRefusalRecord | null;
 
   constructor(deps: RunTickDeps) {
     this.#drain = deps.drain;
@@ -108,6 +129,7 @@ export class RunTick {
     this.#logger = deps.logger;
     this.#audit = deps.audit ?? null;
     this.#sync = deps.sync ?? null;
+    this.#tokenRefusals = deps.tokenRefusals ?? null;
   }
 
   /**
@@ -125,8 +147,18 @@ export class RunTick {
    * lock from this one. Everything after — the drain, the report's stamp, the
    * reads and what they send — is then the other pass's to do, and doing it here
    * as well would write beside it, or put off what it is due to do.
+   *
+   * Whatever the pass did, its report says when a credential it depends on was
+   * refused: a pass that met one, or that is waiting one out, has not done its
+   * job, however quietly every part of it ended.
    */
   async run(): Promise<WorkerReport> {
+    const report = await this.#pass();
+    const refused = await this.#refusedCredential();
+    return refused === null ? report : { ...report, refusedCredential: refused };
+  }
+
+  async #pass(): Promise<WorkerReport> {
     const sync = this.#sync;
     const mirrorWaitsForOwner = sync?.mirror !== undefined && (sync.mirrorScope ?? 'all') === 'all';
     const ownerJobs = sync !== null && (mirrorWaitsForOwner || sync.importer !== undefined || sync.forge !== undefined);
@@ -140,12 +172,16 @@ export class RunTick {
       syncReport.refusal = allowed.refusal;
     }
     const mayKeepInStep = sync !== null && allowed !== null && allowed.ok;
+    let cleared: ReadonlySet<string> = new Set();
     if (sync?.mirror !== undefined && (mayKeepInStep || !mirrorWaitsForOwner)) {
       const mirror = await this.#locked('the claim mirror', sync.mirror);
-      syncReport.mirror = mirror.report;
+      syncReport.mirror = 'skipped' in mirror.report ? mirror.report : mirror.report.report;
+      cleared = 'skipped' in mirror.report ? cleared : mirror.report.cleared;
       if (mirror.lockLost) {
         return { ...notRun(LOCK_LOST), lockLost: true, sync: syncReport };
       }
+    } else if (sync?.mirror !== undefined && allowed?.ok === false && allowed.refusal === 'not-the-owner') {
+      await this.#retireMirrored(allowed.reason);
     }
     if (sync?.finish !== undefined) {
       const finish = await this.#locked('ending finished claims', sync.finish);
@@ -155,7 +191,11 @@ export class RunTick {
       }
     }
 
-    const report = await this.#drain.run();
+    const passedOver = sync?.mirror === undefined ? null : await this.#mirroredWaiting(cleared, syncReport);
+    const drained = await this.#drain.run(
+      passedOver === null ? undefined : (action) => isMirrored(action) && !cleared.has(action.id),
+    );
+    const report: TickReport = passedOver === null ? drained : { ...drained, passedOver };
     if (report.lockLost === true) {
       return sync === null ? report : { ...report, sync: syncReport };
     }
@@ -222,6 +262,59 @@ export class RunTick {
       report: 'done' in outcome ? outcome.done : { skipped: `${name} failed: ${outcome.failed}` },
       lockLost: false,
     };
+  }
+
+  /**
+   * The credential refused in this pass, if one was: GitHub's while the queue
+   * waits one out — whether this pass met the refusal or an earlier one did — or
+   * else the coordination server's token, when one of this pass's calls met it.
+   */
+  async #refusedCredential(): Promise<RefusedCredential | null> {
+    const token = this.#tokenRefusals?.takeRefusal() ?? null;
+    const pause = await this.#repository.getPause();
+    if (pause !== null && pause.cause === 'credential' && pause.isActive(this.#clock.now())) {
+      return { by: 'github', reason: pause.reason };
+    }
+    return token === null ? null : { by: 'coordination', reason: token };
+  }
+
+  /**
+   * Why the mirrored actions still waiting that the mirror did not clear stay
+   * queued this pass, or null when there are none; written down either way, so
+   * that status says what this worker's last pass left. Each was filed while its
+   * move stood, but another worker may have filed and run a later move of the same
+   * item since; only the mirror can ask the server, and for these it did not get
+   * to, so running them now could write the older move over the later one.
+   */
+  async #mirroredWaiting(cleared: ReadonlySet<string>, syncReport: SyncTickReport): Promise<string | null> {
+    const left = (await this.#repository.list({ states: ['queued'] }))
+      .filter((action) => isMirrored(action) && !cleared.has(action.id));
+    if (left.length === 0) {
+      await writeMirrorPassOver(this.#repository, null);
+      return null;
+    }
+    const reason = `${String(left.length)} mirrored moves wait until the server can say they still stand: `
+      + whyUncleared(syncReport);
+    await writeMirrorPassOver(this.#repository, {
+      at: this.#clock.now().toISOString(),
+      reason,
+      ids: left.map((action) => action.id),
+    });
+    return reason;
+  }
+
+  /** Withdraws the mirrored moves of a worker that no longer runs the mirror, under the tick lock. */
+  async #retireMirrored(reason: string): Promise<void> {
+    const withdrawn = await this.#repository.withTickLock((lease) => withdrawMirrored(
+      { repository: this.#repository, clock: this.#clock, logger: this.#logger },
+      lease,
+      `this worker is no longer the mirror's owner, so the moves it filed are left to the worker that is: ${reason}`,
+    ));
+    if (withdrawn !== null && withdrawn > 0) {
+      this.#logger.warn('the mirrored moves this worker filed were withdrawn: it no longer runs the mirror', {
+        withdrawn,
+      });
+    }
   }
 
   /** Whether the queue ran and is not waiting out a refusal, which is when anything may read. */
@@ -303,4 +396,16 @@ function later(one: Date | null, other: Date | null): Date | null {
     return one;
   }
   return one.getTime() >= other.getTime() ? one : other;
+}
+
+/** Why the mirror left some of its waiting actions uncleared in this pass. */
+function whyUncleared(syncReport: SyncTickReport): string {
+  const mirror = syncReport.mirror;
+  if (mirror === undefined) {
+    return syncReport.refused === undefined ? 'the mirror did not run' : `the mirror did not run: ${syncReport.refused}`;
+  }
+  if ('skipped' in mirror) {
+    return mirror.skipped;
+  }
+  return mirror.declined ?? mirror.error ?? 'they were filed before this worker kept a record of what each must find';
 }

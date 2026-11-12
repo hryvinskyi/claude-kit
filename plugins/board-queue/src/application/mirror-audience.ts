@@ -1,5 +1,5 @@
 import { stillStands } from '../domain/sync/claim-moves.ts';
-import type { IssueMove, LiveState } from '../domain/sync/claim-moves.ts';
+import type { LiveState, StandingMove } from '../domain/sync/claim-moves.ts';
 import type { MirrorScope } from '../domain/sync-config.ts';
 import { describeUnknown } from './drain-queue.ts';
 import type { LocalIdentity, WorkMember } from './sync-ports.ts';
@@ -22,8 +22,11 @@ export type Audience = {
   readonly filedFor: string | null;
   /** Whose a move is whose last event this member caused. */
   shareOf(actor: string | null): Share;
-  /** Whether a move this worker would file still stands on the server, so filing it moves nothing back. */
-  stillStands(move: IssueMove, live: LiveClaims): Promise<boolean>;
+  /**
+   * Whether a move this worker files still stands on the server, so filing it —
+   * or letting the actions it filed run — moves nothing back.
+   */
+  stillStands(move: StandingMove, live: LiveClaims): Promise<boolean>;
 };
 
 /** Why a mirror of one's own moves files nothing this run. */

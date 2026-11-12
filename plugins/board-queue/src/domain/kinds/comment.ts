@@ -45,6 +45,13 @@ export class CommentKind implements ActionKind {
 
   readonly narrowsOnRelease = false;
 
+  readonly awaitsDeferredWork = false;
+
+  /** A comment adds to the thread; nothing filed after it is overwritten by it. */
+  writeTargets(): readonly string[] {
+    return [];
+  }
+
   /** It writes no board field, so nothing in it can overwrite a value set since. */
   replayFor(payload: unknown): unknown {
     return validatedReplay(this.payloadSchema, payload);

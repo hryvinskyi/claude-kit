@@ -1,4 +1,4 @@
-import type { WorkerReport } from './run-tick.ts';
+import type { RefusedCredential, WorkerReport } from './run-tick.ts';
 
 /**
  * The ways a pass of the service can decline the one job the service exists for.
@@ -7,17 +7,38 @@ import type { WorkerReport } from './run-tick.ts';
  * kept in step at all, so the pass ends with an exit code of its own and the
  * service's health says which it was, in words that hold nothing secret.
  */
-export type Decline = 'identity-unreadable' | 'not-the-owner' | 'forge-declined' | 'credentials-refused';
+export type Decline =
+  | 'identity-unreadable'
+  | 'not-the-owner'
+  | 'forge-declined'
+  | 'credentials-refused'
+  | 'github-credential-refused'
+  | 'coordination-token-refused';
 
 export const DECLINES = {
   'identity-unreadable': { exitCode: 3, says: 'the GitHub App\'s login could not be read' },
   'not-the-owner': { exitCode: 4, says: 'the GitHub App is not the configured owner' },
   'forge-declined': { exitCode: 5, says: 'the forge jobs would not run under the App\'s credential' },
   'credentials-refused': { exitCode: 6, says: 'the App\'s key or the coordination server\'s token was refused' },
+  'github-credential-refused': { exitCode: 7, says: 'GitHub refused the App\'s credential' },
+  'coordination-token-refused': { exitCode: 8, says: 'the coordination server refused the service\'s token' },
 } as const satisfies Record<Decline, { exitCode: number; says: string }>;
 
-/** What in a pass's report, if anything, says the service declined its job. */
+/** The decline each refused credential stands for. */
+const REFUSED_CREDENTIAL: { readonly [K in RefusedCredential['by']]: Decline } = {
+  github: 'github-credential-refused',
+  coordination: 'coordination-token-refused',
+};
+
+/**
+ * What in a pass's report, if anything, says the service declined its job. A
+ * refused credential comes first: it is why every other part of the pass did
+ * nothing, however that part put it.
+ */
 export function declineOf(report: WorkerReport): Decline | null {
+  if (report.refusedCredential !== undefined) {
+    return REFUSED_CREDENTIAL[report.refusedCredential.by];
+  }
   const sync = report.sync;
   if (sync === undefined) {
     return null;
@@ -30,6 +51,11 @@ export function declineOf(report: WorkerReport): Decline | null {
     return 'forge-declined';
   }
   return null;
+}
+
+/** What the report says about why the pass declined, in its own words, when it says anything. */
+export function declineReasonOf(report: WorkerReport): string | null {
+  return report.refusedCredential?.reason ?? report.sync?.refused ?? null;
 }
 
 /** The decline an exit code stands for, or none for any other code. */

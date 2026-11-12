@@ -114,6 +114,11 @@ export function statusLines(status: QueueStatusView): string[] {
     lines.push(`delayed ${action.id} ${action.kind} ${action.ref ?? NO_ISSUE} `
       + `— runs ${action.runnableAt} (in ${action.inDays.toFixed(1)}d), filed by ${action.origin}`);
   }
+  for (const wait of status.waitingOnDeferred) {
+    const behind = wait.behind.map((action) => `${action.id} ${action.kind} (runs ${action.runnableAt})`).join(', ');
+    lines.push(`waiting ${wait.id} ${wait.kind} ${wait.ref ?? NO_ISSUE} behind deferred ${behind} `
+      + `— runs after ${wait.until} (in ${wait.inDays.toFixed(1)}d)`);
+  }
   for (const action of status.blocked) {
     lines.push(`blocked ${action.id} ${action.kind} ${action.ref ?? NO_ISSUE} — ${oneLine(action.lastError)}`);
   }
@@ -148,6 +153,14 @@ export function syncStatusLines(sync: SyncView): string[] {
     lines.push(sync.refused.refusal === 'not-the-owner'
       ? `not run here — ${sync.refused.reason}`
       : `declined ${sync.refused.at} — ${sync.refused.reason}`);
+  }
+  const waiting = sync.mirror.waiting;
+  if (waiting !== null) {
+    lines.push(`mirror: ${String(waiting.count)} mirrored moves left queued at ${waiting.at} — ${waiting.reason}`);
+    for (const held of waiting.held.filter((one) => one.waiting.length > 0)) {
+      lines.push(`mirror: behind ${held.id} ${held.kind} ${held.ref ?? NO_ISSUE} wait `
+        + held.waiting.map((one) => `${one.id} ${one.kind}`).join(', '));
+    }
   }
   const mirror = sync.mirror.lastRun;
   if (mirror !== null && mirror.declined !== null) {
@@ -305,6 +318,9 @@ function queueTickLines(report: TickReport): string[] {
   ];
   if (report.stoppedBecause !== undefined) {
     lines.push(`stopped: ${report.stoppedBecause}`);
+  }
+  if (report.passedOver !== undefined) {
+    lines.push(`left queued: ${report.passedOver}`);
   }
   if (report.pausedUntil !== undefined) {
     lines.push(`waiting until ${report.pausedUntil}`);

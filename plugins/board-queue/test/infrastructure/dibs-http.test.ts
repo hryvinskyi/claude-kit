@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { CursorExpired, RefusedByRule, TransientFailure } from '../../src/domain/errors.ts';
+import { CredentialRejected, CursorExpired, RefusedByRule, TransientFailure } from '../../src/domain/errors.ts';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -135,6 +135,27 @@ describe('reading the coordination server\'s log', () => {
         && /403 \(forbidden\)/.test(error.describe())
         && !error.describe().includes('Integrations'),
     );
+  });
+
+  it('calls a refused token a refused credential, and tells whoever listens, without repeating the token', async () => {
+    const fetcher = new FakeFetch([{ status: 401, body: { error: { code: 'unauthorized' } } }]);
+    const heard: string[] = [];
+    const dibs = new DibsHttpClient({
+      server: SERVER,
+      token: () => TOKEN,
+      logger: new RecordingLogger(),
+      fetchImpl: fetcher.fetch,
+      refusals: { tokenRefused: (reason) => heard.push(reason) },
+    });
+
+    await assert.rejects(
+      () => dibs.members(),
+      (error: unknown) => error instanceof CredentialRejected
+        && /refused the worker's token: 401 \(unauthorized\)/.test(error.describe())
+        && !error.describe().includes(TOKEN),
+    );
+    assert.equal(heard.length, 1);
+    assert.match(heard[0] ?? '', /401 \(unauthorized\)/);
   });
 
   it('gives up on a call the server does not answer within its deadline', async () => {

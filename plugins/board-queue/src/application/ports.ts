@@ -91,8 +91,10 @@ export interface ActionRepository {
    * action on the same issue is queued, running, failed or blocked. A failed or
    * blocked action keeps holding its issue until it is retried (and so queued
    * again) or cancelled; a held action holds nothing until it is released.
+   * An action `passOver` names is not taken this time: it stays queued, and
+   * goes on holding its issue for whatever was filed after it.
    */
-  claimNextRunnable(now: Date): Promise<Action | null>;
+  claimNextRunnable(now: Date, passOver?: (action: Action) => boolean): Promise<Action | null>;
 
   /** The matching actions, oldest first, so a listing reads in the order things were filed. */
   list(filter: ActionFilter): Promise<Action[]>;

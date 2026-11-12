@@ -14,7 +14,9 @@ import type { Action, ActionState } from './action.ts';
  * queue, often a deploy days away, and it was filed knowing that; it starts to
  * hold its issue once it is released and becomes queued. Done, skipped and
  * cancelled have ended and hold nothing.
-
+ *
+ * A queued action its filer deferred holds less than that until its date comes
+ * (`IssueOrder`).
  */
 export const ISSUE_HOLDING_STATES = ['queued', 'running', 'failed', 'blocked'] as const satisfies readonly ActionState[];
 
@@ -41,6 +43,136 @@ const HOLDING: readonly ActionState[] = ISSUE_HOLDING_STATES;
 
 export function holdsItsIssue(state: ActionState): boolean {
   return HOLDING.includes(state);
+}
+
+/** What the order of an issue's actions reads of each one. */
+export type OrderedAction = {
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly state: ActionState;
+  readonly attempts: number;
+  readonly notBefore: Date | null;
+};
+
+/** What the order of an issue's actions needs to know of a kind. */
+export type OrderedKind = {
+  readonly name: string;
+  /** Whether its actions wait for deferred work filed before them, whatever that work writes. */
+  readonly awaitsDeferredWork: boolean;
+  /** What a payload of it writes; empty for nothing a later action could overwrite, null when it cannot tell. */
+  writeTargets(payload: unknown): readonly string[] | null;
+};
+
+/**
+ * Whether an action is waiting for a date its filer gave it: queued, never run,
+ * and the date still to come. A wait after a failure is never this, because an
+ * action waits after a failure only once a run has counted an attempt against it.
+ */
+export function isDeferred(action: OrderedAction, now: Date): boolean {
+  return action.state === 'queued'
+    && action.attempts === 0
+    && action.notBefore !== null
+    && action.notBefore.getTime() > now.getTime();
+}
+
+/** An action that waits for deferred work filed before it on its issue, and the moment it may run at the soonest. */
+export type DeferredWait = {
+  action: Action;
+  /** The deferred actions in front of it, oldest first. */
+  behind: readonly Action[];
+  /** When the last of them comes due. */
+  until: Date;
+};
+
+/**
+ * The order the actions on one issue run in.
+ *
+ * Actions on one issue run in the order they were filed, so a comment lands
+ * before the close that follows it: an action waits while an older one on its
+ * issue is in a state that holds it (`ISSUE_HOLDING_STATES`). One kind of wait is
+ * narrower. An action its filer deferred to a date holds back two sorts of later
+ * action: those of a kind that awaits deferred work — a close, which must not end
+ * an issue before what was filed in front of it has landed — and those that write
+ * something the deferred action writes too — a board field, an assignee — which
+ * would otherwise run first and be overwritten by the older value when its date
+ * comes. Everything else filed after it runs in its own turn: the filer put the
+ * deferred action off, not the issue. Once its date has come it holds its issue
+ * like any queued action, and among the actions that are ready the order they
+ * were filed in is kept. A kind this order was not told of is taken to await
+ * deferred work and to write everything, so nothing overtakes on a guess.
+ */
+export class IssueOrder {
+  readonly #kinds: ReadonlyMap<string, OrderedKind>;
+
+  constructor(kinds: Iterable<OrderedKind>) {
+    this.#kinds = new Map([...kinds].map((kind) => [kind.name, kind]));
+  }
+
+  /** Whether `earlier`, filed before `later` on the same issue, keeps `later` from running now. */
+  holdsBack(earlier: OrderedAction, later: OrderedAction, now: Date): boolean {
+    if (!holdsItsIssue(earlier.state)) {
+      return false;
+    }
+    if (!isDeferred(earlier, now)) {
+      return true;
+    }
+    const kind = this.#kinds.get(later.kind);
+    return kind === undefined || kind.awaitsDeferredWork || this.#overwrites(earlier, later);
+  }
+
+  /**
+   * The queued actions that wait for deferred work in front of them, given actions
+   * in the order they were filed: each with the deferred actions it waits for and
+   * the date the last of them comes due, before which it cannot run whatever else
+   * stands in front of it.
+   */
+  deferredWaits(actionsInFilingOrder: readonly Action[], now: Date): DeferredWait[] {
+    const waits: DeferredWait[] = [];
+    const lanes = new Map<string, Action[]>();
+    for (const action of actionsInFilingOrder) {
+      const lane = laneOf(action);
+      const earlier = lanes.get(lane) ?? [];
+      if (action.state === 'queued') {
+        const behind = earlier.filter((one) => isDeferred(one, now) && this.holdsBack(one, action, now));
+        const until = latestDate(behind);
+        if (until !== null) {
+          waits.push({ action, behind, until });
+        }
+      }
+      earlier.push(action);
+      lanes.set(lane, earlier);
+    }
+    return waits;
+  }
+
+  /** Whether the deferred action, landing later, would write over something the later one writes. */
+  #overwrites(deferred: OrderedAction, later: OrderedAction): boolean {
+    const written = this.#targetsOf(deferred);
+    if (written !== null && written.length === 0) {
+      return false;
+    }
+    const writing = this.#targetsOf(later);
+    if (written === null || writing === null) {
+      return true;
+    }
+    return writing.some((target) => written.includes(target));
+  }
+
+  #targetsOf(action: OrderedAction): readonly string[] | null {
+    const kind = this.#kinds.get(action.kind);
+    return kind === undefined ? null : kind.writeTargets(action.payload);
+  }
+}
+
+function latestDate(actions: readonly Action[]): Date | null {
+  let latest: Date | null = null;
+  for (const action of actions) {
+    const date = action.notBefore;
+    if (date !== null && (latest === null || date.getTime() > latest.getTime())) {
+      latest = date;
+    }
+  }
+  return latest;
 }
 
 /** An action waiting its turn, and every stopped action filed before it on its issue, oldest first. */

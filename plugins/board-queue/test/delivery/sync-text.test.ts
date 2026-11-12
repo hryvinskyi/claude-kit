@@ -21,7 +21,7 @@ const VIEW: SyncView = {
   project: 'widgets',
   owner: 'alice',
   ownerJobs: ['mirror'],
-  mirror: { enabled: true, scope: 'all', lastRun: null },
+  mirror: { enabled: true, scope: 'all', lastRun: null, waiting: null },
   finish: { enabled: false, handOn: [], complete: [], lastRun: null },
   importer: { enabled: false, lastRun: null },
   forge: { enabled: false, lastRun: null },
@@ -107,6 +107,14 @@ describe('what keeping in step looks like on a terminal', () => {
       mirror: {
         enabled: true,
         scope: 'all',
+        waiting: {
+          count: 1,
+          at: '2026-03-02T09:00:00.000Z',
+          reason: '1 mirrored moves wait until the server can say they still stand: the mirror did not run',
+          held: [{ id: 'm-1', kind: 'board.set-fields', ref: 'example-org/first-repo#12', waiting: [
+            { id: 'c-2', kind: 'issue.close', state: 'queued' },
+          ] }],
+        },
         lastRun: {
           at: '2026-03-02T09:00:00.000Z',
           events: 4,
@@ -130,6 +138,9 @@ describe('what keeping in step looks like on a terminal', () => {
     });
 
     assert.ok(lines.includes('declined 2026-03-02T09:00:00.000Z — this worker runs as bob'));
+    assert.ok(lines.includes('mirror: 1 mirrored moves left queued at 2026-03-02T09:00:00.000Z — 1 mirrored moves wait '
+      + 'until the server can say they still stand: the mirror did not run'));
+    assert.ok(lines.includes('mirror: behind m-1 board.set-fields example-org/first-repo#12 wait c-2 issue.close'));
     assert.ok(lines.some((line) => line.endsWith('— stopped: the event log could not be reached')));
     assert.ok(lines.some((line) => line.startsWith('mirror lost events: the log was pruned through 8')));
     assert.ok(lines.includes('mirror started from the head at event 4 (2026-02-01T09:00:00.000Z) because it had never run'));
@@ -248,7 +259,7 @@ describe('what keeping in step looks like on a terminal', () => {
     const own: SyncView = {
       ...VIEW,
       ownerJobs: ['importer', 'forge'],
-      mirror: { enabled: true, scope: 'own', lastRun: { ...MIRROR_RUN, filedFor: 'bob', othersMoves: 3, orphanMoves: 2, staleMoves: 1 } },
+      mirror: { enabled: true, scope: 'own', lastRun: { ...MIRROR_RUN, filedFor: 'bob', othersMoves: 3, orphanMoves: 2, staleMoves: 1 }, waiting: null },
       importer: { enabled: true, lastRun: null },
       forge: { enabled: true, lastRun: null },
       refused: {
@@ -274,7 +285,7 @@ describe('what keeping in step looks like on a terminal', () => {
   it('says loudly that the configured owner is no member', () => {
     const lines = syncStatusLines({
       ...VIEW,
-      mirror: { enabled: true, scope: 'own', lastRun: { ...MIRROR_RUN, filedFor: 'bob', ownerWarning: 'no member names alcie-gh' } },
+      mirror: { enabled: true, scope: 'own', lastRun: { ...MIRROR_RUN, filedFor: 'bob', ownerWarning: 'no member names alcie-gh' }, waiting: null },
     });
 
     assert.ok(lines.includes('mirror: no member names alcie-gh'));
@@ -287,6 +298,7 @@ describe('what keeping in step looks like on a terminal', () => {
         enabled: true,
         scope: 'own',
         lastRun: { ...MIRROR_RUN, declined: 'this worker runs as dave-gh, and no member of the project names that GitHub login' },
+        waiting: null,
       },
     });
 

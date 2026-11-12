@@ -79,6 +79,14 @@ export class VerifyKind implements ActionKind {
 
   readonly narrowsOnRelease = false;
 
+  /** A check reads what was filed in front of it, so it waits for that to have landed, deferred or not. */
+  readonly awaitsDeferredWork = true;
+
+  /** It reads and writes nothing. */
+  writeTargets(): readonly string[] {
+    return [];
+  }
+
   /** A verification writes nothing, so asking the whole question again overwrites nothing. */
   replayFor(payload: unknown): unknown {
     return validatedReplay(this.payloadSchema, payload);

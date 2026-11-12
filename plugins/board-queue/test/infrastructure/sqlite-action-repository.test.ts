@@ -17,11 +17,16 @@ import type { ProcessTable } from '../../src/infrastructure/process-table.ts';
 import { FakeClock } from '../fakes/in-memory-time.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
+import { defaultKindRegistry } from '../../src/domain/kinds/default-kinds.ts';
+import { testConfig } from '../fixtures/config.ts';
 
 const FIRST = 'Example-Org/First-Repo';
 const SECOND = 'Example-User/Second-Repo';
 
 const BASE = new Date('2026-01-01T09:00:00.000Z');
+
+/** The order of an issue's actions with the kinds the worker runs. */
+const ISSUE_ORDER = defaultKindRegistry(testConfig).issueOrder();
 
 function at(minutes: number): Date {
   return new Date(BASE.getTime() + minutes * 60 * 1000);
@@ -309,17 +314,67 @@ describe('the queue on disk', () => {
     assert.equal(await repository.findCoalescible('board.set-fields', IssueRef.of(FIRST, 12), at(10)), null);
   });
 
-  it('holds the place of a delayed action in the order of its issue', async (t) => {
-    const repository = databaseIn(t)();
-    await repository.insert(anAction({ id: 'delayed', createdAt: at(0), notBefore: at(90) }));
-    await repository.insert(anAction({ id: 'behind-it', kind: 'issue.comment', createdAt: at(1) }));
+  it('lets later work on the issue run past a deferred action, and holds back only the kinds that wait for it', async (t) => {
+    const repository = databaseIn(t)({ issueOrder: ISSUE_ORDER });
+    await repository.insert(anAction({ id: 'deferred', kind: 'issue.comment', createdAt: at(0), notBefore: at(90) }));
+    await repository.insert(anAction({ id: 'fields', createdAt: at(1) }));
+    await repository.insert(anAction({ id: 'close', kind: 'issue.close', createdAt: at(2) }));
 
-    assert.equal(
-      await repository.claimNextRunnable(at(10)),
-      null,
-      'a later action does not overtake one that is waiting for its moment',
-    );
-    assert.equal((await repository.claimNextRunnable(at(90)))?.id, 'delayed');
+    const fields = await repository.claimNextRunnable(at(10));
+    assert.equal(fields?.id, 'fields', 'a field write does not wait a fortnight for a comment put off');
+    assert.ok(fields !== null);
+    fields.succeed(at(11), 'written');
+    await repository.update(fields);
+    assert.equal(await repository.claimNextRunnable(at(12)), null, 'the close waits for the comment filed before it');
+
+    const deferred = await repository.claimNextRunnable(at(90));
+    assert.equal(deferred?.id, 'deferred');
+    assert.ok(deferred !== null);
+    deferred.succeed(at(91), 'posted');
+    await repository.update(deferred);
+    assert.equal((await repository.claimNextRunnable(at(92)))?.id, 'close');
+  });
+
+  it('holds back a later write of the same field or assignee behind a deferred one, so the older value never lands last', async (t) => {
+    const repository = databaseIn(t)({ issueOrder: ISSUE_ORDER });
+    const fields = (fieldValues: Record<string, string>) => ({ repo: FIRST, issue: 12, fields: fieldValues });
+    const people = (add: string[], remove: string[]) => ({ repo: FIRST, issue: 12, add, remove });
+    await repository.insert(anAction({ id: 'ready-for-qa', createdAt: at(0), notBefore: at(90),
+      payload: fields({ status: 'Ready for QA' }) }));
+    await repository.insert(anAction({ id: 'assign-later', kind: 'issue.assignees', createdAt: at(0), notBefore: at(90),
+      payload: people(['Alice'], []) }));
+    await repository.insert(anAction({ id: 'severity', createdAt: at(1), payload: fields({ severity: 'S2' }) }));
+    await repository.insert(anAction({ id: 'bob', kind: 'issue.assignees', createdAt: at(2), payload: people(['bob'], []) }));
+    await repository.insert(anAction({ id: 'correction', createdAt: at(3), payload: fields({ status: 'In Progress' }) }));
+    await repository.insert(anAction({ id: 'unassign', kind: 'issue.assignees', createdAt: at(4),
+      payload: people([], ['alice']) }));
+
+    const ran: string[] = [];
+    for (let claimed = await repository.claimNextRunnable(at(10)); claimed !== null;
+      claimed = await repository.claimNextRunnable(at(10))) {
+      ran.push(claimed.id);
+      claimed.succeed(at(10), 'written');
+      await repository.update(claimed);
+    }
+
+    assert.deepEqual(ran, ['severity', 'bob'], 'only the writes the deferred ones do not touch run now');
+    assert.equal((await repository.claimNextRunnable(at(90)))?.id, 'ready-for-qa', 'come due, the deferred write runs first');
+  });
+
+  it('holds the issue behind a deferred action once its date has come, and behind one waiting out a failure', async (t) => {
+    const repository = databaseIn(t)({ issueOrder: ISSUE_ORDER });
+    await repository.insert(anAction({ id: 'deferred', createdAt: at(0), notBefore: at(5) }));
+    await repository.insert(anAction({ id: 'first', issue: 41, createdAt: at(0) }));
+    await repository.insert(anAction({ id: 'behind-due', kind: 'issue.comment', createdAt: at(1) }));
+    await repository.insert(anAction({ id: 'behind-failure', kind: 'issue.comment', issue: 41, createdAt: at(1) }));
+    const failing = await repository.claimNextRunnable(at(2));
+    assert.equal(failing?.id, 'first');
+    assert.ok(failing !== null);
+    failing.failTransient(at(2), 'the API answered 502', 3, 600);
+    await repository.update(failing);
+
+    assert.equal((await repository.claimNextRunnable(at(6)))?.id, 'deferred', 'come due, it runs in its place');
+    assert.equal(await repository.claimNextRunnable(at(6)), null, 'nothing overtakes it, nor an action waiting out a failure');
   });
 
   it('folds a later request into one that is still waiting', async (t) => {

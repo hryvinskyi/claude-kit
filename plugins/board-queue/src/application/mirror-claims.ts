@@ -1,6 +1,7 @@
 import type { Action } from '../domain/action.ts';
 import type { BoardDirectory } from '../domain/board-directory.ts';
-import { BoardQueueError, CursorExpired } from '../domain/errors.ts';
+import { BoardQueueError, CursorExpired, StaleAction } from '../domain/errors.ts';
+import { STILL_TO_RUN_STATES } from '../domain/issue-order.ts';
 import type { IssueRef } from '../domain/issue-ref.ts';
 import type { KindRegistry } from '../domain/kinds/registry.ts';
 import { boardStatusOf, collapseClaims, statusesTheMirrorOwns } from '../domain/sync/claim-moves.ts';
@@ -19,12 +20,15 @@ import {
   mirrorCursorKey,
   mirrorCursorWrite,
   mirrorItemKey,
+  mirrorPendingKey,
+  mirrorPendingWrite,
   readCount,
   readMirrorCursor,
+  readMirrorPending,
   readMirrorRun,
   writeMirrorRun,
 } from './sync-meta.ts';
-import type { MirrorRun, StoredCursor } from './sync-meta.ts';
+import type { MirrorRun, PendingMove, StoredCursor } from './sync-meta.ts';
 import type { ClaimFeed, ClaimFeedPage, LiveClaim } from './sync-ports.ts';
 
 /** The most events one page of the log holds, which is the most the server hands out. */
@@ -45,6 +49,21 @@ const MAX_PAGES_TO_THE_HEAD = 1000;
 
 const ORIGIN = 'the claim mirror';
 
+/** An item whose reference a later run asks for again, so its page is kept for that run. */
+const RETRY = Symbol('retry');
+
+/** Whether an action is one the mirror filed. */
+export function isMirrored(action: { readonly origin: string }): boolean {
+  return action.origin === ORIGIN;
+}
+
+/** Why the waiting actions of a move the server has moved on from end without running. */
+const OVERTAKEN = 'the server no longer shows the state this move left, so a later move is what the row shows';
+
+/** The actions one filing makes, each named by its part in the filing's dedupe keys. */
+const REQUEST_PARTS = ['status', 'assignees'] as const;
+type RequestPart = (typeof REQUEST_PARTS)[number];
+
 /**
  * Which refusals the log repeats at every run. A login that cannot be read is a
  * fault of this machine somebody should fix; a login the project does not know is
@@ -58,6 +77,17 @@ const SAID_AT_EVERY_RUN: { readonly [K in AudienceRefusal]: boolean } = {
 
 /** What one run of the mirror did, in the words a log line and a status report use. */
 export type MirrorReport = MirrorRun;
+
+/**
+ * One run of the mirror as the pass sees it: what it did, and which of the
+ * mirrored actions still queued may run in this pass — those it filed in this run
+ * and those whose move it found still standing. Every other mirrored action waits
+ * for a run that can say so.
+ */
+export type MirrorPass = {
+  readonly report: MirrorReport;
+  readonly cleared: ReadonlySet<string>;
+};
 
 export type MirrorClaimsDeps = {
   feed: ClaimFeed;
@@ -78,6 +108,8 @@ export type MirrorClaimsDeps = {
 type Filing = {
   readonly item: number;
   readonly ref: IssueRef;
+  /** What the server must still show when the filed actions are about to run. */
+  readonly standing: PendingMove;
   /** The event the state is as of: the last one of the item's run, or the head of a fresh start. */
   readonly asOf: number;
   /** What makes each action's key: the event, or the head and the item. */
@@ -126,6 +158,15 @@ type Drafted = {
  * schedules of their own. A run that cannot settle whose moves it files reads and
  * files nothing, leaves the cursor where it was, and says why.
  *
+ * A move can stand when it is filed and be overtaken before its actions run — the
+ * queue waited out a limit while another worker filed and ran a later move of the
+ * same item. So each run, before it reads the log and before the tick drains the
+ * queue, asks again of every move whose actions are still waiting whether it still
+ * stands, and withdraws the actions of one that does not: they end skipped, and
+ * write nothing over the later move. A pass in which that could not be asked —
+ * the run declined, stopped before it, or did not run — leaves the mirrored
+ * actions queued rather than run them unasked (`RunTick`).
+ *
  * It writes nothing to GitHub itself: what it files is drained by the worker,
  * paced like any other work.
  */
@@ -142,6 +183,7 @@ export class MirrorClaims {
   readonly #audience: MirrorAudience;
   readonly #repos: ReadonlySet<string>;
   readonly #cursorKey: string;
+  readonly #pendingKey: string;
   readonly #owned: readonly string[];
 
   constructor(deps: MirrorClaimsDeps) {
@@ -157,6 +199,7 @@ export class MirrorClaims {
     this.#audience = deps.audience ?? everyone;
     this.#repos = new Set(deps.sync.repos.map((repo) => repo.toLowerCase()));
     this.#cursorKey = mirrorCursorKey(deps.sync.server, deps.sync.project);
+    this.#pendingKey = mirrorPendingKey(deps.sync.server, deps.sync.project);
     this.#owned = statusesTheMirrorOwns(deps.mirror.status);
   }
 
@@ -167,6 +210,12 @@ export class MirrorClaims {
    * holding the lock reads on from where the cursor stood.
    */
   async execute(lease: TickLease): Promise<MirrorReport> {
+    return (await this.pass(lease)).report;
+  }
+
+  /** One run, with the mirrored actions it cleared to run in this pass. */
+  async pass(lease: TickLease): Promise<MirrorPass> {
+    const cleared = new Set<string>();
     const before = await readMirrorRun(this.#repository);
     const stored = await readMirrorCursor(this.#repository, this.#cursorKey);
     const report: MirrorReport = {
@@ -195,13 +244,17 @@ export class MirrorClaims {
       if (answer.ok) {
         report.filedFor = answer.audience.filedFor;
         report.ownerWarning = answer.warning;
-        await this.#read(report, stored, {
+        const lookups: Lookups = {
           refs: new ItemRefs(this.#feed, this.#repository, this.#sync, this.#logger),
           logins,
           audience: answer.audience,
           live: new LiveClaimsOnce(this.#feed),
           lease,
-        });
+          pending: await readMirrorPending(this.#repository, this.#pendingKey),
+          cleared,
+        };
+        await this.#withdrawOvertaken(report, lookups);
+        await this.#read(report, stored, lookups);
       } else {
         report.declined = answer.reason;
         refusal = answer.refusal;
@@ -222,7 +275,7 @@ export class MirrorClaims {
     } else if (refusal !== null && (SAID_AT_EVERY_RUN[refusal] || before?.declined !== report.declined)) {
       this.#logger.warn('the claim mirror files nothing on this worker', { reason: report.declined });
     }
-    return report;
+    return { report, cleared };
   }
 
   /** Reads the log from where the cursor stands: from the head when there is none yet. */
@@ -268,9 +321,16 @@ export class MirrorClaims {
       if (next === null || next <= report.cursor) {
         return;
       }
-      const filings = await this.#filingsOf(collapseClaims(page.claims, this.#mirror.status), report, lookups);
-      await this.#file(filings, next, report, lookups);
+      const { filings, retry } = await this.#filingsOf(collapseClaims(page.claims, this.#mirror.status), report, lookups);
       report.events += page.shown;
+      if (retry) {
+        // An item of this page could not be looked up and will be asked again: the
+        // cursor stays where the page starts, so the next run reads it once more.
+        // What was filed now is marked as filed, and is not filed twice.
+        await this.#file(filings, null, report, lookups);
+        return;
+      }
+      await this.#file(filings, next, report, lookups);
       report.cursor = next;
     }
   }
@@ -279,7 +339,9 @@ export class MirrorClaims {
    * Reads the log to its head without filing anything, then files the state each
    * live claim stands for now, as of that head. Nothing about an issue no live claim
    * holds is filed: what it looked like before is not known, and a guess would move
-   * a row nobody asked to move.
+   * a row nobody asked to move. When an item of a live claim could not be looked up
+   * and will be asked again, the cursor is left where it was, so the next run starts
+   * from the head once more; what was filed now is not filed again as of that head.
    */
   async #startFromTheHead(report: MirrorReport, lookups: Lookups, from: number, because: string): Promise<void> {
     let head = from;
@@ -294,6 +356,7 @@ export class MirrorClaims {
       head = page.next;
     }
     const filings: Filing[] = [];
+    let retry = false;
     for (const claim of await this.#feed.liveClaims()) {
       const share = lookups.audience.shareOf(claim.holder);
       if (share === 'others') {
@@ -301,10 +364,23 @@ export class MirrorClaims {
         continue;
       }
       const ref = await this.#issueOf(claim.item, report, lookups);
-      if (ref !== null) {
-        filings.push(this.#filingOfClaim(claim, ref, head));
-        report.orphanMoves += share === 'orphan' ? 1 : 0;
+      if (ref === RETRY) {
+        retry = true;
+        continue;
       }
+      if (ref === null) {
+        continue;
+      }
+      if (await this.#filedThrough(claim.item, head)) {
+        report.duplicates += 1;
+        continue;
+      }
+      filings.push(this.#filingOfClaim(claim, ref, head));
+      report.orphanMoves += share === 'orphan' ? 1 : 0;
+    }
+    if (retry) {
+      await this.#file(filings, null, report, lookups);
+      return;
     }
     report.cursor = head;
     report.cursorExpired = null;
@@ -320,6 +396,7 @@ export class MirrorClaims {
     return {
       item: claim.item,
       ref,
+      standing: { item: claim.item, lastKind: claim.inReview ? 'review_started' : 'claimed', holder: claim.holder },
       asOf: head,
       key: `head${String(head)}:${String(claim.item)}`,
       status,
@@ -328,8 +405,17 @@ export class MirrorClaims {
     };
   }
 
-  async #filingsOf(moves: readonly IssueMove[], report: MirrorReport, lookups: Lookups): Promise<Filing[]> {
+  /**
+   * The filings of a page's moves, and whether an item of the page could not be
+   * looked up and will be asked again, which keeps the page for the next run.
+   */
+  async #filingsOf(
+    moves: readonly IssueMove[],
+    report: MirrorReport,
+    lookups: Lookups,
+  ): Promise<{ filings: Filing[]; retry: boolean }> {
     const filings: Filing[] = [];
+    let retry = false;
     for (const move of moves) {
       const share = lookups.audience.shareOf(move.causedBy);
       if (share === 'others') {
@@ -344,14 +430,14 @@ export class MirrorClaims {
         continue;
       }
       const ref = await this.#issueOf(move.item, report, lookups);
+      if (ref === RETRY) {
+        retry = true;
+        continue;
+      }
       if (ref === null) {
         continue;
       }
-      const filedThrough = await readCount(
-        this.#repository,
-        mirrorItemKey(this.#sync.server, this.#sync.project, move.item),
-      );
-      if (filedThrough !== null && move.lastEventId <= filedThrough) {
+      if (await this.#filedThrough(move.item, move.lastEventId)) {
         // The item's state as of a later event is filed already; this run of events
         // is behind it, however the pages fell this time.
         report.duplicates += 1;
@@ -361,6 +447,7 @@ export class MirrorClaims {
       filings.push({
         item: move.item,
         ref,
+        standing: { item: move.item, lastKind: move.lastKind, holder: move.holder },
         asOf: move.lastEventId,
         key: String(move.lastEventId),
         status: move.status,
@@ -368,16 +455,33 @@ export class MirrorClaims {
         unassign: move.unassign,
       });
     }
-    return filings;
+    return { filings, retry };
   }
 
-  /** Files the filings, the cursor and the last event filed for each item, in one transaction. */
-  async #file(filings: readonly Filing[], cursor: number, report: MirrorReport, lookups: Lookups): Promise<void> {
+  /** Whether the item's state as of this event, or of a later one, is filed already. */
+  async #filedThrough(item: number, event: number): Promise<boolean> {
+    const filed = await readCount(this.#repository, mirrorItemKey(this.#sync.server, this.#sync.project, item));
+    return filed !== null && event <= filed;
+  }
+
+  /**
+   * Files the filings, the cursor and the last event filed for each item, in one
+   * transaction; with no cursor, the cursor is left where it stands.
+   */
+  async #file(
+    filings: readonly Filing[],
+    cursor: number | null,
+    report: MirrorReport,
+    lookups: Lookups,
+  ): Promise<void> {
     const drafted: Drafted = { actions: [], marks: [] };
+    const pending = new Map(lookups.pending);
     for (const filing of filings) {
+      let drafts = 0;
       for (const request of await this.#requestsFor(filing, lookups)) {
         try {
           drafted.actions.push(draftAction(this.#kinds, this.#directory, request, this.#clock.now()).action);
+          drafts += 1;
         } catch (error) {
           if (!(error instanceof BoardQueueError)) {
             throw error;
@@ -386,26 +490,120 @@ export class MirrorClaims {
           this.#logger.warn('a mirrored move was refused', { ref: filing.ref.toString(), reason: error.describe() });
         }
       }
+      if (drafts > 0) {
+        pending.set(filing.key, filing.standing);
+      }
       drafted.marks.push({
         key: mirrorItemKey(this.#sync.server, this.#sync.project, filing.item),
         value: String(filing.asOf),
       });
     }
+    const marks = [...drafted.marks, mirrorPendingWrite(this.#pendingKey, pending)];
     await confirmStillHeld(lookups.lease);
     const written = await this.#repository.insertAll(
       drafted.actions,
-      [...drafted.marks, mirrorCursorWrite(this.#cursorKey, cursor)],
+      cursor === null ? marks : [...marks, mirrorCursorWrite(this.#cursorKey, cursor)],
     );
+    // Written: the run's own record of the pending moves now says what the notes say.
+    lookups.pending.clear();
+    for (const [key, move] of pending) {
+      lookups.pending.set(key, move);
+    }
+    for (const id of written) {
+      lookups.cleared.add(id);
+    }
     report.filed += written.length;
     report.duplicates += drafted.actions.length - written.length;
   }
 
-  /** The issue a work item stands for, when it is one the configuration keeps in step. */
-  async #issueOf(item: number, report: MirrorReport, lookups: Lookups): Promise<IssueRef | null> {
+  /**
+   * Asks of every mirrored action still waiting whether its move still stands:
+   * clears the queued actions of a move that does to run in this pass, withdraws
+   * those of a move the server has moved on from, and forgets the moves whose
+   * actions have all ended. A move this mirror holds no record of — filed before
+   * the record was kept, or with the record lost — cannot be asked about; where
+   * one worker files every move in the order of the log nothing can overtake it,
+   * so it is cleared, and elsewhere it is left queued. Actions that wait for a
+   * person (failed or blocked) are left to that person.
+   */
+  async #withdrawOvertaken(report: MirrorReport, lookups: Lookups): Promise<void> {
+    const waiting = new Map<string, Action[]>();
+    const unrecorded: Action[] = [];
+    for (const action of await this.#repository.list({ states: [...STILL_TO_RUN_STATES] })) {
+      if (!isMirrored(action)) {
+        continue;
+      }
+      const key = this.#filingKeyOf(action.dedupeKey);
+      if (key === null || !lookups.pending.has(key)) {
+        unrecorded.push(action);
+      } else {
+        waiting.set(key, [...(waiting.get(key) ?? []), action]);
+      }
+    }
+    if (lookups.audience.filedFor === null) {
+      clear(lookups.cleared, unrecorded);
+    }
+    const before = lookups.pending.size;
+    let withdrawn = 0;
+    for (const [key, move] of [...lookups.pending]) {
+      const actions = waiting.get(key) ?? [];
+      const queued = actions.filter((action) => action.state === 'queued');
+      if (actions.length === 0) {
+        lookups.pending.delete(key);
+        continue;
+      }
+      if (queued.length === 0) {
+        continue;
+      }
+      if (await lookups.audience.stillStands(move, lookups.live)) {
+        clear(lookups.cleared, queued);
+        continue;
+      }
+      await confirmStillHeld(lookups.lease);
+      for (const action of queued) {
+        await this.#withdraw(action, OVERTAKEN);
+      }
+      if (queued.length === actions.length) {
+        lookups.pending.delete(key);
+      }
+      withdrawn += 1;
+    }
+    report.staleMoves += withdrawn;
+    if (withdrawn > 0 || lookups.pending.size !== before) {
+      await confirmStillHeld(lookups.lease);
+      await this.#repository.setMeta(this.#pendingKey, mirrorPendingWrite(this.#pendingKey, lookups.pending).value);
+    }
+  }
+
+  /** Ends one waiting action of an overtaken move. */
+  async #withdraw(action: Action, reason: string): Promise<void> {
+    await withdrawOne(action, reason, this.#repository, this.#clock, this.#logger);
+  }
+
+  /** The key of the filing a mirrored action's dedupe key names, or null for a key this mirror did not write. */
+  #filingKeyOf(dedupeKey: string | null): string | null {
+    const prefix = this.#keyPrefix();
+    if (dedupeKey === null || !dedupeKey.startsWith(prefix)) {
+      return null;
+    }
+    const rest = dedupeKey.slice(prefix.length);
+    const part = REQUEST_PARTS.find((one) => rest.endsWith(`:${one}`));
+    return part === undefined ? null : rest.slice(0, rest.length - part.length - 1);
+  }
+
+  #keyPrefix(): string {
+    return `dibs:${this.#sync.server}:${this.#sync.project}:`;
+  }
+
+  /**
+   * The issue a work item stands for, when it is one the configuration keeps in
+   * step; `RETRY` when its reference could not be read and a later run asks again.
+   */
+  async #issueOf(item: number, report: MirrorReport, lookups: Lookups): Promise<IssueRef | null | typeof RETRY> {
     const external = await lookups.refs.of(item);
     if (external !== null && typeof external !== 'string') {
       report.unresolved += 1;
-      return null;
+      return external.retry ? RETRY : null;
     }
     const ref = external === null ? null : issueRefOfExternal(external);
     if (ref === null || !this.#repos.has(ref.repoFullName().toLowerCase())) {
@@ -416,7 +614,7 @@ export class MirrorClaims {
   }
 
   async #requestsFor(filing: Filing, lookups: Lookups): Promise<EnqueueRequest[]> {
-    const key = (part: string): string => `dibs:${this.#sync.server}:${this.#sync.project}:${filing.key}:${part}`;
+    const key = (part: RequestPart): string => `${this.#keyPrefix()}${filing.key}:${part}`;
     const requests: EnqueueRequest[] = [];
     if (filing.status !== null) {
       requests.push({
@@ -456,4 +654,63 @@ type Lookups = {
   readonly live: LiveClaims;
   /** The tick lock the run holds, confirmed before anything is filed. */
   readonly lease: TickLease;
+  /** The moves filed whose actions have not all ended, by filing key; kept up to date as the run files. */
+  readonly pending: Map<string, PendingMove>;
+  /** The queued mirrored actions this run cleared to run in the pass. */
+  readonly cleared: Set<string>;
 };
+
+function clear(cleared: Set<string>, actions: readonly Action[]): void {
+  for (const action of actions) {
+    if (action.state === 'queued') {
+      cleared.add(action.id);
+    }
+  }
+}
+
+/** Ends one waiting mirrored action without running it; one another writer changed meanwhile is left to them. */
+async function withdrawOne(
+  action: Action,
+  reason: string,
+  repository: ActionRepository,
+  clock: Clock,
+  logger: Logger,
+): Promise<boolean> {
+  action.withdraw(clock.now(), reason);
+  try {
+    await repository.update(action);
+  } catch (error) {
+    if (!(error instanceof StaleAction)) {
+      throw error;
+    }
+    return false;
+  }
+  logger.info('a mirrored move was withdrawn before it ran', {
+    action: action.id,
+    ref: action.issueRef?.toString() ?? null,
+    reason,
+  });
+  return true;
+}
+
+/**
+ * Withdraws every mirrored action still queued, for a worker that no longer runs
+ * the mirror whose moves they are: whoever runs it now files those moves, and
+ * these would only hold their issues while they wait for a check this worker will
+ * not make. Answers how many were withdrawn.
+ */
+export async function withdrawMirrored(
+  deps: { repository: ActionRepository; clock: Clock; logger: Logger },
+  lease: TickLease,
+  reason: string,
+): Promise<number> {
+  let withdrawn = 0;
+  for (const action of await deps.repository.list({ states: ['queued'] })) {
+    if (!isMirrored(action)) {
+      continue;
+    }
+    await confirmStillHeld(lease);
+    withdrawn += (await withdrawOne(action, reason, deps.repository, deps.clock, deps.logger)) ? 1 : 0;
+  }
+  return withdrawn;
+}

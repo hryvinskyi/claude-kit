@@ -1,7 +1,15 @@
+/**
+ * What stopped the queue: a limiter, which lets go on its own once the wait is
+ * served, or a credential GitHub refused, which only a person can mend.
+ */
+export type PauseCause = 'limit' | 'credential';
+
 export type QueuePauseProps = {
   until: Date;
   reason: string;
   consecutiveHits: number;
+  /** A limiter's wait unless it says otherwise. */
+  cause?: PauseCause;
 };
 
 /**
@@ -17,11 +25,27 @@ export class QueuePause {
   readonly until: Date;
   readonly reason: string;
   readonly consecutiveHits: number;
+  readonly cause: PauseCause;
 
   constructor(props: QueuePauseProps) {
     this.until = new Date(props.until.getTime());
     this.reason = props.reason;
     this.consecutiveHits = props.consecutiveHits;
+    this.cause = props.cause ?? 'limit';
+  }
+
+  /**
+   * The wait after GitHub refused the credential itself. The queue looks again
+   * when it is over, and until then every pass knows the credential, not the
+   * allowance, is what stops it.
+   */
+  static forRefusedCredential(now: Date, seconds: number, reason: string): QueuePause {
+    return new QueuePause({
+      until: new Date(now.getTime() + seconds * 1000),
+      reason,
+      consecutiveHits: 0,
+      cause: 'credential',
+    });
   }
 
   isActive(now: Date): boolean {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { WorkerReport } from '../../src/application/run-tick.ts';
-import { DECLINES, declineOf, declineOfExitCode } from '../../src/application/service-duty.ts';
+import { DECLINES, declineOf, declineOfExitCode, declineReasonOf } from '../../src/application/service-duty.ts';
 import type { Decline } from '../../src/application/service-duty.ts';
 
 const QUIET: WorkerReport = {
@@ -24,6 +24,18 @@ describe('a pass that declines the service\'s job', () => {
     assert.equal(declineOf({ ...QUIET, sync: { refused: 'x', refusal: 'identity-unreadable' } }), 'identity-unreadable');
     assert.equal(declineOf({ ...QUIET, sync: { forge: { skipped: 'only under an App', declined: true } } }), 'forge-declined');
     assert.equal(declineOf({ ...QUIET, sync: { forge: { skipped: 'another tick holds the lock' } } }), null);
+  });
+
+  it('is read from a refused credential first, whatever else the pass said', () => {
+    const github = { by: 'github', reason: 'Bad credentials; nothing runs until a working one is available' } as const;
+    const token = { by: 'coordination', reason: 'the coordination server refused the worker\'s token: 401' } as const;
+
+    assert.equal(declineOf({ ...QUIET, refusedCredential: github }), 'github-credential-refused');
+    assert.equal(declineOf({ ...QUIET, refusedCredential: token, sync: { forge: { skipped: 'x', declined: true } } }),
+      'coordination-token-refused');
+    assert.equal(declineReasonOf({ ...QUIET, refusedCredential: token, sync: { refused: 'x' } }), token.reason);
+    assert.equal(declineReasonOf({ ...QUIET, sync: { refused: 'this worker runs as bob' } }), 'this worker runs as bob');
+    assert.equal(declineReasonOf(QUIET), null);
   });
 
   it('has an exit code of its own for each way, none of them a code the command line already answers', () => {
