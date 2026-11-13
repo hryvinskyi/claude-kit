@@ -32,6 +32,11 @@ def git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True)
 
 
+def own(*events: str) -> dict:
+    """The `hooks` table of a project's settings that runs a command of its own at each event."""
+    return {event: [{"hooks": [{"type": "command", "command": "./own-hook.sh"}]}] for event in events}
+
+
 class HookTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -69,11 +74,32 @@ class HookTests(unittest.TestCase):
 
     def test_the_brief_leaves_a_project_with_its_own_session_start_hook_alone(self) -> None:
         (self.project / ".claude").mkdir()
-        (self.project / ".claude" / "settings.json").write_text('{"hooks": {"SessionStart": []}}', encoding="utf-8")
+        (self.project / ".claude" / "settings.json").write_text(json.dumps({"hooks": own("SessionStart")}),
+                                                                encoding="utf-8")
 
         brief = self.run_file([str(BRIEF)])
 
         self.assertEqual((brief.returncode, brief.stdout), (0, ""))
+
+    def test_a_personal_session_start_hook_in_the_local_settings_still_gets_the_brief(self) -> None:
+        (self.project / ".claude").mkdir()
+        (self.project / ".claude" / "settings.local.json").write_text(json.dumps({"hooks": own("SessionStart")}),
+                                                                      encoding="utf-8")
+
+        brief = self.run_file([str(BRIEF)])
+
+        self.assertEqual(brief.returncode, 0, brief.stderr)
+        self.assertIn("[NOW]  ship the thing", brief.stdout)
+
+    def test_a_settings_file_that_runs_nothing_at_the_session_start_still_gets_the_brief(self) -> None:
+        (self.project / ".claude").mkdir()
+        (self.project / ".claude" / "settings.json").write_text(
+            '{"hooks": {"SessionStart": []}, "permissions": {"deny": ["SessionStart"]}}', encoding="utf-8")
+
+        brief = self.run_file([str(BRIEF)])
+
+        self.assertEqual(brief.returncode, 0, brief.stderr)
+        self.assertIn("[NOW]  ship the thing", brief.stdout)
 
     def record_conflict(self) -> None:
         """What a session end that parked notes on a conflict branch leaves in the state directory."""
@@ -85,7 +111,7 @@ class HookTests(unittest.TestCase):
 
     def own_hooks(self, *events: str) -> None:
         (self.project / ".claude").mkdir()
-        hooks = {event: [] for event in events}
+        hooks = own(*events)
         (self.project / ".claude" / "settings.json").write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
 
     def test_a_project_briefing_its_own_session_start_still_hears_what_the_session_end_left(self) -> None:

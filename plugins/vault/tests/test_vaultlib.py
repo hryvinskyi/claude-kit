@@ -10,6 +10,7 @@ Run from the plugin directory: python3 -m unittest discover -s tests
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -46,8 +47,8 @@ from pathlib import Path
 lock, work, start = Path(sys.argv[2]), Path(sys.argv[3]), float(sys.argv[4])
 time.sleep(max(0.0, start - time.time()))
 for _ in range(4):
-    with vaultlib.holding(lock, wait=60.0, poll=0.005) as held:
-        if held is None:
+    with vaultlib.waiting_for(lock, wait=60.0, poll=0.005) as hold:
+        if hold.lock is None:
             sys.exit(3)
         try:
             fd = os.open(str(work / "inside"), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -249,13 +250,51 @@ class StateDirectoryTests(StateIsolated):
 
 
 class OwnershipLockAndDisplayTests(StateIsolated):
-    def test_a_project_with_its_own_hook_for_the_event_is_left_to_it(self) -> None:
+    OWN_HOOK = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "./end.sh"}]}]}}
+
+    def settings(self, name: str, text: str) -> Path:
         root = Path(tempfile.mkdtemp())
         (root / ".claude").mkdir()
-        (root / ".claude" / "settings.json").write_text('{"hooks": {"SessionEnd": []}}')
+        (root / ".claude" / name).write_text(text)
+        return root
+
+    def test_a_project_with_its_own_hook_for_the_event_is_left_to_it(self) -> None:
+        root = self.settings("settings.json", json.dumps(self.OWN_HOOK))
         self.assertTrue(vaultlib.project_owns(root, "SessionEnd"))
         self.assertFalse(vaultlib.project_owns(root, "SessionStart"))
         self.assertFalse(vaultlib.project_owns(Path(tempfile.mkdtemp()), "SessionEnd"))
+
+    def test_one_command_among_hooks_that_run_none_is_enough_to_own_the_event(self) -> None:
+        hooks = [{"hooks": [{"type": "prompt", "prompt": "summarise"}]},
+                 {"matcher": "", "hooks": [{"type": "command", "command": ""},
+                                           {"type": "command", "command": "./end.sh"}]}]
+        root = self.settings("settings.json", json.dumps({"hooks": {"SessionEnd": hooks}}))
+        self.assertTrue(vaultlib.project_owns(root, "SessionEnd"))
+
+    def test_a_personal_hook_in_the_local_settings_is_not_the_projects(self) -> None:
+        root = self.settings("settings.local.json", json.dumps(self.OWN_HOOK))
+        self.assertFalse(vaultlib.project_owns(root, "SessionEnd"))
+
+    def test_a_settings_file_that_runs_no_command_for_the_event_owns_nothing(self) -> None:
+        for text in ('{"hooks": {"SessionEnd": []}}',
+                     '{"hooks": {"SessionEnd": [{"matcher": "", "hooks": []}]}}',
+                     '{"hooks": {"SessionEnd": [{"matcher": ""}]}}',
+                     '{"hooks": {"SessionEnd": {"hooks": [{"type": "command"}]}}}',
+                     '{"permissions": {"deny": ["SessionEnd"]}}',
+                     '{"_comment": "SessionEnd", "hooks": {}}',
+                     '{"hooks": [], "SessionEnd": [{"hooks": [{"type": "command"}]}]}',
+                     '{"hooks": {"SessionEnd": [{"hooks": [{"type": "prompt", "prompt": "summarise the session"}]}]}}',
+                     '{"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": ""}]}]}}',
+                     '{"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "  "}]}]}}',
+                     '{"hooks": {"SessionEnd": [{"hooks": [{"type": "command"}]}]}}',
+                     '{"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": ["./end.sh"]}]}]}}',
+                     '{"hooks": {"SessionEnd": [{"hooks": [{"command": "./end.sh"}]}]}}',
+                     '{"hooks": {"SessionEnd": [{"hooks": ["./end.sh", {}]}]}}',
+                     '"SessionEnd"',
+                     '{"hooks": {"SessionEnd": [{"hooks": [{"type": "command"}]}]',
+                     ''):
+            with self.subTest(text=text):
+                self.assertFalse(vaultlib.project_owns(self.settings("settings.json", text), "SessionEnd"))
 
     def test_a_lock_is_exclusive_while_held_and_free_once_released(self) -> None:
         lock = Path(tempfile.mkdtemp()) / "nested" / "x.lock"
@@ -273,36 +312,76 @@ class OwnershipLockAndDisplayTests(StateIsolated):
 
     def test_a_held_lock_is_waited_for_and_released_when_the_block_ends(self) -> None:
         lock = Path(tempfile.mkdtemp()) / "x.lock"
-        first = vaultlib.holding(lock)
-        self.assertIsNotNone(first.__enter__())
+        first = vaultlib.waiting_for(lock)
+        self.assertIsNotNone(first.__enter__().lock)
         waits: list = []
 
         def other_finishes(seconds: float) -> None:
             waits.append(seconds)
             first.__exit__(None, None, None)
 
-        with vaultlib.holding(lock, wait=30.0, sleep=other_finishes) as held:
-            self.assertIsNotNone(held)
+        with vaultlib.waiting_for(lock, wait=30.0, sleep=other_finishes) as hold:
+            self.assertIsNotNone(hold.lock)
             self.assertTrue(lock.exists())
         self.assertEqual(waits, [0.25])
         self.assertFalse(lock.exists())
 
-    def test_a_lock_that_stays_taken_yields_none_once_the_wait_is_over(self) -> None:
+    def test_a_lock_that_stays_taken_is_not_held_once_the_wait_is_over(self) -> None:
         lock = Path(tempfile.mkdtemp()) / "x.lock"
         now = [0.0]
 
         def tick(seconds: float) -> None:
             now[0] += seconds
 
-        with vaultlib.holding(lock):
-            with vaultlib.holding(lock, wait=1.0, sleep=tick, clock=lambda: now[0]) as held:
-                self.assertIsNone(held)
+        with vaultlib.waiting_for(lock):
+            with vaultlib.waiting_for(lock, wait=1.0, sleep=tick, clock=lambda: now[0]) as hold:
+                self.assertEqual((hold.lock, hold.why), (None, None))
         self.assertEqual(now[0], 1.0)
+
+    def test_a_lock_another_process_holds_is_told_apart_from_one_that_cannot_be_taken(self) -> None:
+        lock = Path(tempfile.mkdtemp()) / "x.lock"
+        held = vaultlib.claim(lock)
+        self.addCleanup(held.release)
+        self.assertEqual(vaultlib.attempt(lock), (None, None))
+
+        blocked = Path(tempfile.mkdtemp()) / "a-file"
+        blocked.write_text("not a directory")
+        taken, why = vaultlib.attempt(blocked / "x.lock")
+        self.assertIsNone(taken)
+        self.assertIsInstance(why, str)
+        self.assertTrue(why)
+
+        with unittest.mock.patch.object(vaultlib, "fcntl", None):
+            taken, why = vaultlib.attempt(Path(tempfile.mkdtemp()) / "x.lock")
+        self.assertIsNone(taken)
+        self.assertIn("flock", why)
+
+    def test_waiting_for_a_lock_says_why_it_cannot_be_taken_and_never_why_it_is_busy(self) -> None:
+        blocked = Path(tempfile.mkdtemp()) / "a-file"
+        blocked.write_text("not a directory")
+        waits: list = []
+        with vaultlib.waiting_for(blocked / "x.lock", wait=30.0, sleep=waits.append) as hold:
+            self.assertIsNone(hold.lock)
+            self.assertIn("this user can write", hold.why)
+        self.assertEqual(waits, [])
+
+        with unittest.mock.patch.object(vaultlib, "fcntl", None), \
+                vaultlib.waiting_for(Path(tempfile.mkdtemp()) / "x.lock") as hold:
+            self.assertIsNone(hold.lock)
+            self.assertIn("flock", hold.why)
+
+        lock = Path(tempfile.mkdtemp()) / "x.lock"
+        with vaultlib.waiting_for(lock), vaultlib.waiting_for(lock) as hold:
+            self.assertEqual((hold.lock, hold.why), (None, None))
+        with vaultlib.waiting_for(lock) as hold:
+            self.assertIsNotNone(hold.lock)
+            self.assertIsNone(hold.why)
+        self.assertFalse(lock.exists())
 
     def test_a_holder_never_removes_a_lock_file_that_is_no_longer_its_own(self) -> None:
         lock = Path(tempfile.mkdtemp()) / "x.lock"
-        with vaultlib.holding(lock) as held:
-            self.assertIsNotNone(held)
+        with vaultlib.waiting_for(lock) as hold:
+            self.assertIsNotNone(hold.lock)
             lock.unlink()
             lock.write_text("another process's lock")
         self.assertEqual(lock.read_text(), "another process's lock")
@@ -363,8 +442,8 @@ class OwnershipLockAndDisplayTests(StateIsolated):
         turns: list = []
 
         def turn() -> None:
-            with vaultlib.holding(lock, wait=10.0, poll=0.01) as held:
-                if held is None:
+            with vaultlib.waiting_for(lock, wait=10.0, poll=0.01) as hold:
+                if hold.lock is None:
                     return
                 turns.append(threading.current_thread().name)
                 if inside:

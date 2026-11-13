@@ -3,10 +3,14 @@
 
 Usage:
     vault-capture              # the SessionEnd hook: reads its JSON, hands off, returns
+    vault-capture              # by hand (a terminal, or nothing on stdin): steps 2-4 below for the
+                               # vault found from the current directory, in the foreground, saying
+                               # what each did; no inbox entry, which needs a session's transcript
     vault-capture --worker F   # the detached half, run on the payload saved in F
     vault-capture --update     # the SessionStart fetch and fast-forward, and why it did not happen
     vault-capture --brief      # the inbox, conflict, commit and backup lines for the SessionStart brief
     vault-capture --outcome    # the fast-forward and what the session end recorded, where no brief is printed
+    vault-capture --help       # the usage; any other argument is refused with exit 2 and touches nothing
 
 A project that ships its own SessionEnd hook is left to it, and so is a project that keeps no vault.
 Otherwise the hook saves its payload in the project's state directory and starts a detached worker —
@@ -62,7 +66,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional, TextIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import vaultlib  # noqa: E402
@@ -365,6 +369,7 @@ def capture(vault: vaultlib.Vault, session_id: str, lines: list[str], day: str,
 
 CAPTURE_WAIT = 600.0
 BRIEF_WAIT = 3.0
+HAND_WAIT = 60.0
 PUSH_ATTEMPTS = 3
 SYNC_STATE = "vault-sync.json"
 REGENERATE = "vault-regenerate"
@@ -524,38 +529,102 @@ def hold_back(vault: vaultlib.Vault) -> bool:
     return unstaged
 
 
+def cannot_lock(why: str) -> str:
+    """A lock this process cannot take at all, said with what to change; no wait or rerun changes it."""
+    return f"the vault's lock cannot be taken: {why}"
+
+
+class Unlockable(str):
+    """The outcome "unlockable": this process cannot take the vault's lock at all, and `why` says what to change."""
+
+    why: str
+
+    def __new__(cls, why: str) -> "Unlockable":
+        outcome = super().__new__(cls, "unlockable")
+        outcome.why = why
+        return outcome
+
+
+def not_taken(vault: vaultlib.Vault, hold: vaultlib.Hold, step: str) -> str:
+    """The outcome of a step whose lock was not taken, logged: "busy" while another process held it, else unlockable."""
+    if hold.why is None:
+        vaultlib.log(vault, "session-capture.log", f"vault not {step}: another process held the lock")
+        return "busy"
+    vaultlib.log(vault, "session-capture.log", f"vault not {step}: {cannot_lock(hold.why)}")
+    return Unlockable(hold.why)
+
+
 def commit_vault(vault: vaultlib.Vault, session_id: str, wait: float = 0.0, sleep=time.sleep) -> bool:
     """Commit what changed in a vault that is its own repository, less the files held back; never anything else."""
+    return commit_outcome(vault, session_id, wait, sleep) == "committed"
+
+
+def commit_outcome(vault: vaultlib.Vault, label: str, wait: float = 0.0, sleep=time.sleep) -> str:
+    """Commit the vault as `commit_vault` does, and answer how it ended (a key of COMMIT_OUTCOMES).
+
+    `label` closes the commit's subject: a session's id, of which eight characters are kept.
+    """
     if vault.mode != "own-repo":
-        return False
-    with vaultlib.holding(lock_path(vault), wait, sleep=sleep) as held:
-        if held is None:
-            return False
+        return "not-own-repo"
+    with vaultlib.waiting_for(lock_path(vault), wait, sleep=sleep) as hold:
+        if hold.lock is None:
+            return not_taken(vault, hold, "committed")
         code, status = vaultlib.git_out(vault.path, "status", "--porcelain")
         if code != 0:
-            return False
+            return "unreadable"
         if not status.strip():
             record_held(vault, [])
             record_commit(vault, None)
-            return False
+            return "clean"
         why = vaultlib.unfinished(vault.path, vault.rel)
         if why is not None:
             hold_off(vault, why)
-            return False
+            return "unfinished"
         vaultlib.git_out(vault.path, "add", "-A")
         if not hold_back(vault):
-            return False
+            return "unscreened"
         if vaultlib.git_out(vault.path, "diff", "--cached", "--quiet")[0] == 0:
             record_commit(vault, None)
-            return False
+            return "all-held"
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        code, out = git(vault, "commit", "-q", "-m", f"session {stamp} ({session_id[:8]})")
+        code, out = git(vault, "commit", "-q", "-m", f"session {stamp} ({label[:8]})")
         if code != 0:
             vaultlib.log(vault, "session-capture.log", f"vault commit failed: {out.strip()[:300]}")
             record_commit(vault, {"time": stamp, "reason": why_not_committed(out)})
-            return False
+            return "failed"
         record_commit(vault, None)
-        return True
+        return "committed"
+
+
+# How each commit and integration outcome reads to the person who ran `vault-capture` by hand. The
+# reasons a brief would carry (a held file, a failed commit, a notice) follow on lines of their own;
+# an unlockable outcome carries its own, as `{why}`.
+COMMIT_OUTCOMES = {
+    "committed": "committed the vault's changes",
+    "clean": "nothing to commit: the vault has no changes",
+    "not-own-repo": "not committed: only a vault that is a git repository of its own is committed",
+    "busy": "not committed: another process held the vault's lock throughout the wait; run again once it ends",
+    "unlockable": "not committed: {why}; running again changes nothing until then",
+    "unreadable": "not committed: git could not read the vault's status",
+    "unfinished": "not committed: git is not done with the vault (below)",
+    "unscreened": "not committed: what is staged could not be checked for credentials; session-capture.log says why",
+    "all-held": "nothing committed: every change was held back (below)",
+    "failed": "the commit failed (below)",
+}
+INTEGRATE_OUTCOMES = {
+    "pushed": "pushed to the vault's remote",
+    "current": "the vault's remote already has every commit",
+    "no-remote": "not pushed: the vault's repository has no remote",
+    "busy": "not pushed: another process held the vault's lock throughout the wait; run again once it ends",
+    "unlockable": "not pushed: {why}; running again changes nothing until then",
+}
+
+
+def told(outcomes: dict, outcome: str, otherwise: str) -> str:
+    """How an outcome reads by hand: its line in `outcomes`, `otherwise` when it has none."""
+    if isinstance(outcome, Unlockable):
+        return outcomes["unlockable"].format(why=cannot_lock(outcome.why))
+    return outcomes.get(outcome, otherwise)
 
 
 SIGNING_FAILED = re.compile(r"failed to sign|signing failed|gpg: signing|error: cannot run gpg|ssh-keygen.*sign", re.I)
@@ -854,10 +923,9 @@ def integrate_vault(vault: vaultlib.Vault, wait: float = 0.0, sleep=time.sleep,
     """Bring this clone's vault commits onto the remote: fetch, rebase, push, a few times if refused."""
     if vault.mode != "own-repo" or not vault_remote(vault):
         return "no-remote"
-    with vaultlib.holding(lock_path(vault), wait, sleep=sleep) as held:
-        if held is None:
-            vaultlib.log(vault, "session-capture.log", "vault not integrated: another process held the lock")
-            return "busy"
+    with vaultlib.waiting_for(lock_path(vault), wait, sleep=sleep) as hold:
+        if hold.lock is None:
+            return not_taken(vault, hold, "integrated")
         why = vaultlib.unfinished(vault.path, vault.rel)
         if why is not None:
             return hold_off(vault, why)
@@ -916,8 +984,10 @@ def update_vault(vault: vaultlib.Vault, wait: float = BRIEF_WAIT, sleep=time.sle
     """Bring the vault up to date at session start — fetch, then fast-forward or say why not. Never rebases."""
     if vault.mode != "own-repo" or not vault_remote(vault):
         return []
-    with vaultlib.holding(lock_path(vault), wait, sleep=sleep) as held:
-        if held is None:
+    with vaultlib.waiting_for(lock_path(vault), wait, sleep=sleep) as hold:
+        if hold.lock is None and hold.why is not None:
+            return [f"[VAULT] not brought up to date — {cannot_lock(hold.why)}"]
+        if hold.lock is None:
             return ["[VAULT] not brought up to date — another session is syncing the vault"]
         why = vaultlib.unfinished(vault.path, vault.rel)
         if why is not None:
@@ -1047,12 +1117,11 @@ def worker(payload_path: Path) -> int:
     # Under the lock, so a session start's fast-forward cannot land between reading the inbox and
     # writing it back — the write would quietly undo the entries the fast-forward brought. A lock
     # that stays taken means the inbox is not written at all, and the next brief says so.
-    filed = True
-    with vaultlib.holding(lock_path(vault), CAPTURE_WAIT) as held:
-        if held is None:
-            filed = False
-            vaultlib.log(vault, "session-capture.log",
-                         f"inbox not written for {session_id}: another process held the vault's lock")
+    unfiled = None
+    with vaultlib.waiting_for(lock_path(vault), CAPTURE_WAIT) as hold:
+        if hold.lock is None:
+            unfiled = "another process held the vault's lock" if hold.why is None else cannot_lock(hold.why)
+            vaultlib.log(vault, "session-capture.log", f"inbox not written for {session_id}: {unfiled}")
         else:
             try:
                 capture(vault, session_id, lines, datetime.now().strftime("%Y-%m-%d"))
@@ -1063,11 +1132,73 @@ def worker(payload_path: Path) -> int:
                  cwd=vault.root, timeout=900)
     commit_vault(vault, session_id, wait=CAPTURE_WAIT)
     integrate_vault(vault, wait=CAPTURE_WAIT)
-    if not filed:
-        add_notice(vault, f"[VAULT] session {session_id[:8]} was not checked for the inbox — another process "
-                          f"held the vault's lock; {vault.shown(vault.state)}/session-capture.log says when")
+    if unfiled is not None:
+        add_notice(vault, f"[VAULT] session {session_id[:8]} was not checked for the inbox — {unfiled}; "
+                          f"{vault.shown(vault.state)}/session-capture.log says when")
     vaultlib.run([sys.executable, str(here / "vault_search.py"), "refresh", "--root", str(vault.root)],
                  cwd=vault.root, timeout=3600)
+    return 0
+
+
+def by_hand(vault: vaultlib.Vault, wait: float = HAND_WAIT) -> Iterator[str]:
+    """Run, for a person, what the worker runs that needs no session, saying what each step did as it ends.
+
+    The order is the worker's: the vault check refreshes the stamps and the brief's cache, the vault
+    is committed and integrated with its remote, and the search index is refreshed. No inbox entry is
+    filed or cleared — that is read from a session's transcript, and a run by hand has none. A
+    project that ends its sessions with a hook of its own is left to it, as the session end leaves it.
+    """
+    if vaultlib.project_owns(vault.root, "SessionEnd"):
+        yield "vault-capture: this project ends its sessions with a hook of its own — left to it"
+        return
+    say = "vault-capture: "
+    yield say + "no inbox entry filed: a run by hand has no session to read"
+    here = Path(__file__).resolve().parent
+    code, out = vaultlib.run([sys.executable, str(here / "vault_check.py"), "--quiet", "--root", str(vault.root)],
+                             cwd=vault.root, timeout=900)
+    yield from (line for line in out.splitlines() if line.strip())
+    if code in (0, 1):
+        yield say + "review stamps and the brief's vault-check lines refreshed"
+    else:
+        yield say + f"the vault check ended with {code}, so the stamps and the brief's cache were not refreshed"
+    committed = commit_outcome(vault, "by hand", wait)
+    yield say + told(COMMIT_OUTCOMES, committed, "not committed (below)")
+    if committed != "not-own-repo":
+        integrated = integrate_vault(vault, wait=wait)
+        yield say + told(INTEGRATE_OUTCOMES, integrated, "not pushed (below)")
+        yield from sync_lines(vault)
+    code, out = vaultlib.run([sys.executable, str(here / "vault_search.py"), "refresh", "--root", str(vault.root)],
+                             cwd=vault.root, timeout=3600)
+    yield say + ("search index refreshed, where qmd and the project's index exist" if code == 0
+                 else f"the search index refresh ended with {code}: {out.strip()[:200]}")
+
+
+def enclosing_vault(cwd: Path) -> Optional[vaultlib.Vault]:
+    """The vault a directory lies in when that vault is a repository of its own inside its project.
+
+    There, git names the vault's own repository as the project, which keeps no vault; the project is
+    the work tree around it.
+    """
+    top = vaultlib.project_root(cwd)
+    if top == cwd and not (cwd / ".git").exists():
+        return None
+    vault = vaultlib.locate(top.parent)
+    if vault is None or os.path.realpath(str(vault.path)) != os.path.realpath(str(top)):
+        return None
+    return vault
+
+
+def run_by_hand() -> int:
+    """`vault-capture` with no payload: the project's vault is the one found from the current directory."""
+    if vaultlib.disabled():
+        print("vault-capture: the vault tools are switched off (CLAUDE_NO_VAULT_TOOLS)")
+        return 0
+    vault = vaultlib.locate() or enclosing_vault(Path.cwd())
+    if vault is None:
+        print("vault-capture: this project keeps no vault — nothing to capture")
+        return 0
+    for line in by_hand(vault):
+        print(line, flush=True)
     return 0
 
 
@@ -1186,28 +1317,51 @@ def brief(vault: vaultlib.Vault) -> None:
         print(backup)
 
 
-def main(argv: list[str]) -> int:
-    if "--update" in argv:
+USAGE = """\
+usage: vault-capture               the session-end hook with its JSON on stdin; by hand, commit, push
+                                   and refresh the vault found from the current directory
+       vault-capture --update      bring the vault up to date (the session start's fetch and fast-forward)
+       vault-capture --outcome     the fast-forward and what the session end recorded
+       vault-capture --brief       the inbox, conflict, commit and backup lines of the brief
+       vault-capture --worker F    the detached half of the hook, on the payload saved in F
+       vault-capture --help        this text"""
+
+
+def print_lines(lines: list[str]) -> None:
+    for line in lines:
+        print(line)
+
+
+# The options a session start runs, each printing its lines for the vault found from here.
+SESSION_START = {
+    "--update": lambda vault: print_lines(update_vault(vault)),
+    "--outcome": lambda vault: print_lines(outcome(vault)),
+    "--brief": brief,
+}
+
+
+def main(argv: list[str], stdin: Optional[TextIO] = None) -> int:
+    if argv in (["-h"], ["--help"]):
+        print(USAGE)
+        return 0
+    if len(argv) == 2 and argv[0] == "--worker":
+        return worker(Path(argv[1]))
+    if len(argv) == 1 and argv[0] in SESSION_START:
         vault = None if vaultlib.disabled() else vaultlib.locate()
         if vault:
-            for line in update_vault(vault):
-                print(line)
+            SESSION_START[argv[0]](vault)
         return 0
-    if "--outcome" in argv:
-        vault = None if vaultlib.disabled() else vaultlib.locate()
-        if vault:
-            for line in outcome(vault):
-                print(line)
-        return 0
-    if "--brief" in argv:
-        vault = None if vaultlib.disabled() else vaultlib.locate()
-        if vault:
-            brief(vault)
-        return 0
-    if "--worker" in argv:
-        index = argv.index("--worker")
-        return worker(Path(argv[index + 1])) if index + 1 < len(argv) else 0
-    return hook(sys.stdin.read())
+    # Anything else falls to the hand run, which commits and pushes: an argument nobody meant is refused first.
+    if argv:
+        print(f"vault-capture: not understood: {' '.join(argv)}\n{USAGE}", file=sys.stderr)
+        return 2
+    # Claude Code hands the hook its payload on stdin. A person runs it at a terminal, which is never
+    # read, or with nothing piped in.
+    stream = sys.stdin if stdin is None else stdin
+    text = "" if stream is None or stream.isatty() else stream.read()
+    if text.strip():
+        return hook(text)
+    return run_by_hand()
 
 
 if __name__ == "__main__":

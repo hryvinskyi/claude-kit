@@ -1,5 +1,6 @@
 #!/bin/sh
-# vault-capture [--brief | --worker F] — the session-end capture; see session_capture.py beside it.
+# vault-capture [--update | --brief | --outcome | --worker F | --help] — the session-end capture, or run by hand with
+# nothing on stdin for what it does that needs no session; see session_capture.py beside it.
 # Its own directory, through any links that lead here.
 SELF=$0
 while [ -L "$SELF" ]; do

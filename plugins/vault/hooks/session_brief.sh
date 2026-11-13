@@ -24,10 +24,21 @@ VAULT=$("$PLUGIN_ROOT/bin/find-vault.sh" 2>/dev/null) || exit 0
 [ -z "$VAULT" ] && exit 0
 BOARD="$VAULT/To DO.md"
 
+# Whether the project in this directory runs a SessionStart hook of its own, read
+# the way the capture reads it (vaultlib.project_owns): the shared
+# .claude/settings.json parsed, never searched for the word, and a personal hook
+# in the local settings never counted. Without python3 nothing can parse it, so the
+# project owns nothing. Isolated (-I), so no module in the project's directory
+# is imported in place of the standard library's.
+project_briefs() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import vaultlib
+sys.exit(0 if vaultlib.project_owns(Path.cwd(), "SessionStart") else 1)' "$PLUGIN_ROOT/bin" 2>/dev/null
+}
+
 # Project ships its own SessionStart brief, or there is no board -> no brief of
 # ours, only what the session end left.
-if { [ -f .claude/settings.json ] && grep -q '"SessionStart"' .claude/settings.json 2>/dev/null; } \
-    || [ ! -f "$BOARD" ]; then
+if project_briefs || [ ! -f "$BOARD" ]; then
     if command -v python3 >/dev/null 2>&1 && [ -z "${CLAUDE_NO_VAULT_TOOLS:-}" ]; then
         python3 "$PLUGIN_ROOT/bin/session_capture.py" --outcome 2>/dev/null
     fi

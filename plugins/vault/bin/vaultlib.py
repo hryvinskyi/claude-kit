@@ -25,6 +25,7 @@ it exited — is free, and no process ever takes over a lock another one still h
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -38,7 +39,7 @@ from typing import Callable, Iterator, Optional, Union
 
 try:
     import fcntl
-except ImportError:  # not a POSIX system: no lock is ever held, so nothing that needs one runs
+except ImportError:  # not a POSIX system: no lock can be taken, and `attempt` says so
     fcntl = None
 
 HOME_CLAUDE = Path.home() / ".claude"
@@ -273,12 +274,37 @@ def unfinished(clone: Path, shown: str) -> Optional[str]:
 
 
 def project_owns(root: Path, event: str) -> bool:
-    """Whether the project ships its own hook for an event, which the global tools then leave to it."""
+    """Whether the project runs a hook of its own at an event, which the global tools then leave to it.
+
+    Only the shared `.claude/settings.json` speaks for the project. Claude Code declares hooks there as
+    `{"hooks": {"<event>": [{"matcher": …, "hooks": [{"type": "command", "command": …}]}]}}`, and the
+    project owns the event when an entry for it holds at least one hook of type `command` with a
+    non-blank `command` string; a prompt hook, or one with no command, runs nothing. A hook in
+    the git-ignored `.claude/settings.local.json` is one person's (a sound, a status line) and owns
+    nothing; neither does a file that cannot be read or is not valid JSON.
+    """
+    return _runs_hook(root / ".claude" / "settings.json", event)
+
+
+def _runs_hook(settings: Path, event: str) -> bool:
     try:
-        text = (root / ".claude" / "settings.json").read_text(encoding="utf-8")
-    except OSError:
+        parsed = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return False
-    return f'"{event}"' in text
+    hooks = parsed.get("hooks") if isinstance(parsed, dict) else None
+    entries = hooks.get(event) if isinstance(hooks, dict) else None
+    if not isinstance(entries, list):
+        return False
+    return any(_runs_command(hook)
+               for entry in entries if isinstance(entry, dict) and isinstance(entry.get("hooks"), list)
+               for hook in entry["hooks"])
+
+
+def _runs_command(hook: object) -> bool:
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    return isinstance(command, str) and bool(command.strip())
 
 
 class HeldLock:
@@ -303,24 +329,38 @@ class HeldLock:
 
 
 def claim(lock: Path) -> Optional[HeldLock]:
-    """Take a lock without waiting; None while another process holds it.
+    """Take a lock without waiting; None while another process holds it, or when it cannot be taken at all."""
+    return attempt(lock)[0]
+
+
+def attempt(lock: Path) -> tuple[Optional[HeldLock], Optional[str]]:
+    """Take a lock without waiting, telling a lock somebody holds from one nobody can take.
+
+    (the lock, None) when it is taken; (None, None) while another process holds it, which waiting
+    may change; (None, why) when this process cannot take it at all — no `flock` on this system, or a
+    lock file it cannot create or open — which no wait changes.
 
     The lock file is removed when it is released, so a waiter that locked a file just unlinked
     checks that the path still names the file it locked, and tries again when it does not.
     """
     if fcntl is None:
-        return None
+        return None, "this system has no flock(2), which the vault's locks need — run the vault tools on macOS or Linux"
     for _ in range(20):
         try:
             lock.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
-        except OSError:
-            return None
+        except OSError as error:
+            return None, (f"{lock} cannot be created or opened ({error.strerror or error.__class__.__name__}) — "
+                          f"make {lock.parent} a directory this user can write")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except BlockingIOError:
             os.close(fd)
-            return None
+            return None, None
+        except OSError as error:
+            os.close(fd)
+            return None, (f"{lock} cannot be locked ({error.strerror or error.__class__.__name__}) — keep "
+                          f"{lock.parent} on a file system that supports flock(2)")
         try:
             mine, there = os.fstat(fd), os.stat(str(lock))
         except OSError:
@@ -334,25 +374,41 @@ def claim(lock: Path) -> Optional[HeldLock]:
             os.write(fd, f"{os.getpid()} {uuid.uuid4().hex}\n".encode())
         except OSError:
             pass
-        return HeldLock(lock, fd)
-    return None
+        return HeldLock(lock, fd), None
+    # The file changed hands on every try: other processes are taking and releasing it.
+    return None, None
+
+
+@dataclass(frozen=True)
+class Hold:
+    """What waiting for a lock came to.
+
+    `lock` is the lock, held for the block, when it was taken. Otherwise `why` says why this process
+    cannot take it at all, with what to change — or is None when another process held it throughout
+    the wait, which a later run may find free.
+    """
+    lock: Optional[HeldLock]
+    why: Optional[str]
 
 
 @contextmanager
-def holding(lock: Path, wait: float = 0.0, poll: float = 0.25,
-            sleep: Callable[[float], None] = time.sleep,
-            clock: Callable[[], float] = time.monotonic) -> Iterator[Optional[HeldLock]]:
-    """Hold a lock for the block, waiting up to `wait` seconds for it; yields None when it stayed taken."""
+def waiting_for(lock: Path, wait: float = 0.0, poll: float = 0.25,
+                sleep: Callable[[float], None] = time.sleep,
+                clock: Callable[[], float] = time.monotonic) -> Iterator[Hold]:
+    """Hold a lock for the block, waiting up to `wait` seconds for it, and say how the wait ended.
+
+    A lock that cannot be taken at all is not waited for: the hold comes back at once with its reason.
+    """
     deadline = clock() + wait
-    held = claim(lock)
-    while held is None and clock() < deadline:
+    held, why = attempt(lock)
+    while held is None and why is None and clock() < deadline:
         sleep(poll)
-        held = claim(lock)
+        held, why = attempt(lock)
     if held is None:
-        yield None
+        yield Hold(None, why)
         return
     try:
-        yield held
+        yield Hold(held, None)
     finally:
         held.release()
 

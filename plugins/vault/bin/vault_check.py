@@ -10,7 +10,10 @@ Usage (anywhere inside the project, or with --root DIR):
 
 Exits 1 while a hard finding stands (never with --brief), 0 otherwise, and 0 when there is no vault.
 One check runs per vault at a time: the detached --refresh gives way to a running one, every other
-run waits for it (the lock is free the moment its holder exits, however it exits).
+run waits for it up to LOCK_WAIT seconds and then exits 2 (the lock is free the moment its holder
+exits, however it exits). A lock that cannot be taken at all — no flock(2), a state directory it
+cannot write — is not waited for: a read-only --check runs without it, any run that would write
+exits 2 and says why.
 
 **Living notes** describe the code as it is: every note in a folder named for units of code —
 Modules, Bridges, Plugins, Kernel, Packages, Services — the Runbooks, and the `00 …` overview at the
@@ -22,9 +25,13 @@ HARD finding; a cited file that changed since the paragraph citing it was stampe
 are linted against the `YYYY-MM-DD slug.md` + `type: decision` template only in a vault whose records
 overwhelmingly follow it: a vault with a convention of its own is not held to somebody else's.
 
-A code span is read as a path when its first segment exists at the project root, or — in a note named
-for a package — inside that package (`packages/<note>/`, `plugins/<note>/`, `vendor/*/<note>/`, or a
-directory a configured note-base rule derives from the note's name). A class name is looked up, case-insensitively,
+A code span is read as a path when its first segment exists at the project root in any case, or
+once did in the history of HEAD or the default branch, or — in a note named for a package — inside
+that package (`packages/<note>/`, `plugins/<note>/`, `vendor/*/<note>/`, or a directory a configured
+note-base rule derives from the note's name). Its segments are compared with the names on disk, so a
+path cited in the wrong case is HARD even where the file system ignores case. `path::member` checks
+the path, then the member: HARD when neither the file nor any other code names it (it may be
+inherited). A class name is looked up, case-insensitively,
 as a PHP file name in the repository, then as a whole word in its non-Markdown files, then as a PHP file
 name under `vendor/`. A git-ignored path is machine state, never a finding.
 
@@ -83,6 +90,9 @@ TTL = int(os.environ.get("VAULT_CHECK_TTL", "1800"))
 # A background check shares the machine with the work it describes: a quarter of the cores, at least two.
 GREP_THREADS = max(2, (os.cpu_count() or 4) // 4)
 LOCK_POLL = 1.0
+# How long a run waits for another check of the same vault before it gives up with exit 2, so a holder
+# that never ends cannot hang the session end that runs a check.
+LOCK_WAIT = 300.0
 # Paths per walk of the default branch's history, so a command line never grows past what a system takes.
 HISTORY_BATCH = 100
 
@@ -96,7 +106,9 @@ FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[ \t]*$", re.M | re
 STRUCK = re.compile(r"~~.+?~~", re.S)
 SPAN = re.compile(r"`([^`\n]+)`")
 NAME = re.compile(r"[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+")
-PATH = re.compile(r"([^\s/:#`@\\]+(?:/[^\s:#`\\]+)+?)/?(?::\d+(?:-\d+)?)?(?:#\S*)?")
+# A path, then a line (`:48`, `:48-60`) or a member (`::read`, `::read()`, `::$items`), then an anchor.
+PATH = re.compile(r"([^\s/:#`@\\]+(?:/[^\s:#`\\]+)+?)/?"
+                  r"(?::\d+(?:-\d+)?|::\$?([A-Za-z_]\w*)(?:\(.*\))?)?(?:#\S*)?")
 TEMPLATE_GROUP = re.compile(r"\{(\d+)\}")
 NOTE_BASE_KEY = "vault-check.noteBase"
 WIKILINK = re.compile(r"\[\[([^\]]*)\]\]")
@@ -113,6 +125,7 @@ class Citations:
 
     names: dict[str, list[str]] = field(default_factory=dict)
     paths: dict[str, list[str]] = field(default_factory=dict)
+    members: dict[tuple[str, str], list[str]] = field(default_factory=dict)  # (path, member) as cited
 
 
 def prose_of(text: str) -> str:
@@ -144,12 +157,19 @@ def span_path(span: str) -> Optional[str]:
     return None if re.search(r"[{}<>*$%|?\[\]…]", path) else path
 
 
+def span_member(span: str) -> Optional[str]:
+    """The member a path-shaped span names after `::` (`src/X.php::read()` → `read`), or None."""
+    if span_path(span) is None:
+        return None
+    return PATH.fullmatch(span.strip()).group(2)
+
+
 def paragraphs(text: str) -> list[str]:
     return [p for p in re.split(r"\n[ \t]*\n", text) if p.strip()]
 
 
 def citations(prose: str) -> Citations:
-    """Class names and path-shaped spans cited in code spans, outside fences and strike-through."""
+    """Class names, path-shaped spans and the members those name, cited in code spans outside fences and strike-through."""
     found = Citations()
     for para in paragraphs(FENCE.sub("", prose)):
         for span in SPAN.findall(STRUCK.sub("", para)):
@@ -159,6 +179,9 @@ def citations(prose: str) -> Citations:
             path = span_path(span)
             if path:
                 found.paths.setdefault(path, []).append(para)
+                member = span_member(span)
+                if member:
+                    found.members.setdefault((path, member), []).append(para)
     return found
 
 
@@ -341,15 +364,38 @@ def resolve_path(path: str, bases: list[str], exists: Callable[[str], bool]) -> 
     return None
 
 
-def names_the_repository(path: str, bases: list[str], root_entries: set[str],
-                         exists: Callable[[str], bool]) -> bool:
-    """Whether a path-shaped span is about this repository at all: its first segment must exist somewhere.
+def homes_of(path: str, bases: list[str], root_entries: set[str], exists: Callable[[str], bool],
+             existed: frozenset = frozenset(),
+             in_vault: Callable[[str], bool] = lambda rel: False) -> list[str]:
+    """The bases a path-shaped span is a claim about: "" for the project root, then the note's package bases.
 
     `text/plain` or `and/or` in prose is shaped like a path and names nothing here; a first segment
-    at the project root, or inside the note's own package, is what makes it a claim about the tree.
+    at the project root — spelled in any case, or one the project's history held and has since
+    removed (`existed`) — or inside the note's own package is what makes it a claim about the tree.
+    A path inside the vault is no claim about the tree: its first segment is spelled exactly as an
+    entry at the top of the vault and not exactly as one at the project root, and the whole path
+    either exists inside the vault (`in_vault`) or has a note's shape, `<folder>/<name>.md`, which a
+    note may cite before it is written (`Modules/crm.md`). Anything else under such a segment —
+    `Plugins/x/src/Y.ts`, `Plugins/x/README.md` — is a claim about the tree, cited in the wrong case.
     """
     first = path.split("/", 1)[0]
-    return first in root_entries or any(exists(base + first) for base in bases)
+    segments = path.rstrip("/").split("/")
+    note_shaped = len(segments) == 2 and segments[1].endswith(".md")
+    if first not in root_entries and in_vault(first) and (note_shaped or in_vault(path)):
+        return []
+    homes = [""] if first.casefold() in {e.casefold() for e in root_entries} or first in existed else []
+    return homes + [base for base in bases if exists(base + first)]
+
+
+def defines(path: Path, member: str) -> bool:
+    """Whether a file names a member as a whole word; a directory, or a file that cannot be read, is not asked."""
+    if not path.is_file():
+        return True
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+    return re.search(r"(?<!\w)%s(?!\w)" % re.escape(member), text) is not None
 
 
 # --- the repository -----------------------------------------------------------
@@ -361,6 +407,52 @@ def php_index_of(paths) -> dict[str, list[str]]:
     for rel in sorted({p for p in paths if p.endswith(".php")}):
         index.setdefault(rel.rsplit("/", 1)[-1][:-4], []).append(rel)
     return index
+
+
+class Disk:
+    """The work tree's names as they are spelled, each directory listed once.
+
+    `Path.exists()` answers yes for any spelling on a case-insensitive file system, so a path cited
+    in the wrong case would pass for one that exists; every segment here is compared with the names
+    its directory lists.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.listed: dict[str, Optional[list[str]]] = {}
+
+    def names(self, directory: str) -> Optional[list[str]]:
+        """What a directory of the work tree holds, or None when it is no directory."""
+        if directory not in self.listed:
+            try:
+                self.listed[directory] = sorted(os.listdir(str(self.root / directory) if directory else str(self.root)))
+            except OSError:
+                self.listed[directory] = None
+        return self.listed[directory]
+
+    def spelled(self, rel: str, exact: bool = True) -> Optional[str]:
+        """The path as the work tree spells it, or None when it holds no such path.
+
+        Exact, every segment must be spelled as on disk; otherwise a segment matches in any case.
+        """
+        parts = [part for part in rel.split("/") if part not in ("", ".")]
+        if not parts or ".." in parts:
+            return None
+        current = ""
+        for part in parts:
+            listed = self.names(current)
+            if listed is None:
+                return None
+            if part not in listed:
+                folded = [name for name in listed if name.casefold() == part.casefold()]
+                if exact or not folded:
+                    return None
+                part = folded[0]
+            current = f"{current}/{part}" if current else part
+        return current
+
+    def exists(self, rel: str) -> bool:
+        return self.spelled(rel) is not None
 
 
 class CodeSearchUnfinished(RuntimeError):
@@ -418,6 +510,39 @@ class Repo:
         if code not in (0, 1):
             raise CodeSearchUnfinished(code)
         return {token.casefold() for token in out.split()}
+
+    def words_in_vendor(self, names: set[str]) -> set[str]:
+        """The casefolded names occurring as a whole word, in any case, in the files under `vendor/`.
+
+        `vendor/` is ignored as a rule, so it is read as plain files rather than through git's index.
+        """
+        if not names or not (self.root / "vendor").is_dir():
+            return set()
+        fd, patterns = tempfile.mkstemp(suffix=".txt")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(sorted(names)) + "\n")
+            code, out = self.git("-c", f"grep.threads={GREP_THREADS}", "grep", "--no-index", "-I", "-h", "-o", "-i",
+                                 "-w", "-F", "-f", patterns, "--", "vendor")
+        finally:
+            os.unlink(patterns)
+        if code not in (0, 1):
+            raise CodeSearchUnfinished(code)
+        return {token.casefold() for token in out.split()}
+
+    def ever_held(self, entries: set[str], refs: list[str]) -> set[str]:
+        """Those top-level `entries` that some commit reachable from `refs` held; a history git cannot read holds none."""
+        if not entries or not refs:
+            return set()
+        held: set[str] = set()
+        ordered = sorted(entries)
+        for start in range(0, len(ordered), HISTORY_BATCH):
+            batch = ordered[start:start + HISTORY_BATCH]
+            code, out = self.git("--literal-pathspecs", "log", "-z", "--format=", "--name-only", "--no-renames",
+                                 *refs, "--", *batch)
+            if code == 0:
+                held.update(path.strip("\n").split("/", 1)[0] for path in out.split("\0") if path.strip("\n"))
+        return held & entries
 
     def vendor_stems(self) -> set[str]:
         stems: set[str] = set()
@@ -819,16 +944,40 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
     vendor_dirs = repo.vendor_dirs()
     note_bases, report.config_problems = load_note_bases(vault.path)
     root_entries = {p.name for p in vault.root.iterdir()} | {p.split("/", 1)[0] for p in ref_paths}
+    vault_disk = Disk(vault.path)
+
+    def in_vault(rel: str) -> bool:
+        """Whether a path exists inside the vault as spelled, every link followed staying inside it."""
+        spelled = vault_disk.spelled(rel)
+        return spelled is not None and vaultlib.strictly_inside(vault.path, vault.path / spelled)
     bases = {rel: package_bases(rel, vendor_dirs, note_bases) for rel in living}
+    disk = Disk(vault.root)
+    ref_spelling = {path.casefold(): path for path in sorted(ref_paths)}
 
     def here(rel: str) -> bool:
-        return (vault.root / rel).exists()
+        return disk.exists(rel)
 
     def anywhere(rel: str) -> bool:
         return here(rel) or rel.rstrip("/") in ref_paths
 
     def in_base(rel: str) -> bool:
         return rel.rstrip("/") in at_base()[2]
+
+    def spelling(rel: str) -> Optional[str]:
+        """How the work tree or the default branch spells a path cited in any case."""
+        return disk.spelled(rel, exact=False) or ref_spelling.get(rel.rstrip("/").casefold())
+
+    def in_any_case(rel: str) -> bool:
+        return anywhere(rel) or spelling(rel) is not None
+
+    # A first segment found nowhere now may be a directory the project removed: the history of HEAD
+    # and of the default branch tells it from a word shaped like a path (`text/plain`).
+    folded_root = {entry.casefold() for entry in root_entries}
+    absent = {path.split("/", 1)[0] for c in living.values() for path in c.paths} - {".", ".."}
+    absent = {first for first in absent if first.casefold() not in folded_root}
+    refs = [ref for ref in dict.fromkeys(["HEAD", reference]) if ref and repo.commit_of(ref)]
+    existed = frozenset(repo.ever_held(absent, refs))
+    unseen_members: list[tuple[str, str, str, str]] = []  # (note, cited path, file, member)
 
     index = repo.php_index()
     cited: set[str] = set()
@@ -876,9 +1025,14 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
                 "SOFT", rel, f"`{name}` is gone from this branch while the default branch still has it — correct "
                              f"the prose if this branch removes it, or strike it through: ~~`{name}`~~", removed=True))
         for cited_path in sorted(living[rel].paths):
-            if not names_the_repository(cited_path, bases[rel], root_entries, anywhere):
+            homes = homes_of(cited_path, bases[rel], root_entries, in_any_case, existed, in_vault)
+            if not homes:
                 continue
-            if resolve_path(cited_path, bases[rel], here) is not None:
+            resolved = resolve_path(cited_path, bases[rel], here)
+            if resolved is not None:
+                members = sorted(member for path, member in living[rel].members if path == cited_path)
+                unseen_members += [(rel, cited_path, resolved, member)
+                                   for member in members if not defines(vault.root / resolved, member)]
                 continue
             if resolve_path(cited_path, bases[rel], anywhere) is not None:
                 if resolve_path(cited_path, bases[rel], in_base) is not None:
@@ -887,14 +1041,33 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
                                      f"it — correct the prose if this branch removes it", removed=True))
                 continue
             # Asked only where the path could live — a base under an ignored vendor/ must not excuse it.
-            first = cited_path.split("/", 1)[0]
-            homes = [base for base in ["", *bases[rel]]
-                     if (first in root_entries if base == "" else anywhere(base + first))]
             if repo.ignored([base + cited_path for base in homes]):
                 continue
+            misspelled = resolve_path(cited_path, bases[rel], lambda candidate: spelling(candidate) is not None)
+            hint = f" as written — the tree spells it `{spelling(misspelled)}`" if misspelled else ""
             report.findings.append(Finding(
-                "HARD", rel, f"`{cited_path}` does not exist — correct the prose, "
+                "HARD", rel, f"`{cited_path}` does not exist{hint} — correct the prose, "
                              f"or strike it through as history"))
+
+    # A member the cited file does not name may be inherited, so it is gone only when no code names it.
+    if unseen_members:
+        wanted = {member for *_, member in unseen_members}
+        try:
+            named = repo.words_in_code(wanted)
+            named |= repo.words_in_vendor({member for member in wanted if member.casefold() not in named})
+        except CodeSearchUnfinished as unfinished:
+            reason = ("did not finish in time" if unfinished.code == vaultlib.TIMED_OUT
+                      else f"failed ({unfinished.code})")
+            report.findings.append(Finding(
+                "HARD", vault.rel, f"the search of the code for {len(wanted)} cited member(s) {reason}, so none of "
+                                   "them was checked — keep large untracked trees out of it (.git/info/exclude) and "
+                                   "run again"))
+            unseen_members, named = [], set()
+        for note, cited_path, resolved, member in unseen_members:
+            if member.casefold() not in named:
+                report.findings.append(Finding(
+                    "HARD", note, f"`{cited_path}::{member}` — `{member}` appears neither in `{resolved}` nor "
+                                  f"anywhere else in the code — correct the prose, or strike it through as history"))
 
     current = {rel: anchors_for(c, bases[rel], ref_index, ref_blobs) for rel, c in living.items()}
     report.anchors = sum(len(a) for a in current.values())
@@ -1016,12 +1189,23 @@ def main(argv: list[str]) -> int:
 
     write = "--check" not in argv or bool(restamp)
     lock = vault.state / "vault-check.lock"
-    held = vaultlib.claim(lock)
-    if held is None and "--refresh" in argv:
+    held, why = vaultlib.attempt(lock)
+    if held is None and why is None and "--refresh" in argv:
         return 0
-    while held is None:
+    deadline = time.monotonic() + LOCK_WAIT
+    while held is None and why is None:
+        if time.monotonic() >= deadline:
+            print(f"vault-check: another check of this vault has held {lock} for over {int(LOCK_WAIT)}s — "
+                  "nothing was measured; run again once it ends", file=sys.stderr)
+            return 2
         time.sleep(LOCK_POLL)
-        held = vaultlib.claim(lock)
+        held, why = vaultlib.attempt(lock)
+    if held is None and write:
+        print(f"vault-check: the check's lock cannot be taken ({why}), so nothing was measured, stamped or "
+              "cached; vault-check --check reads the vault without it", file=sys.stderr)
+        return 2
+    # Past this point either the lock is held, or this is a read-only --check, which writes nothing a
+    # concurrent check could lose.
     try:
         report = measure(vault, write=write, restamp=restamp)
         if write:
@@ -1031,7 +1215,8 @@ def main(argv: list[str]) -> int:
             if restamp:
                 print(f"stamped: {', '.join(sorted(restamp))}")
     finally:
-        held.release()
+        if held is not None:
+            held.release()
     return 1 if report.hard else 0
 
 

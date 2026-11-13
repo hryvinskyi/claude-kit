@@ -77,6 +77,9 @@ mkvault "$TMP/p4" "kb"
 mkdir -p "$TMP/p4/.claude"
 printf '{"hooks":{"SessionStart":[]}}' > "$TMP/p4/.claude/settings.json"
 OUT=$(cd "$TMP/p4" && "$SB")
+case "$OUT" in *"[NOW]"*) ok ;; *) ko "brief: deferred to a SessionStart entry that runs nothing" ;; esac
+printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"./brief.sh"}]}]}}' > "$TMP/p4/.claude/settings.json"
+OUT=$(cd "$TMP/p4" && "$SB")
 [ -z "$OUT" ] && ok || ko "brief: did not defer to project hook"
 mkdir -p "$TMP/p5/kb/Decisions"
 printf '# Board\n## In progress\n- thing\n' > "$TMP/p5/kb/To DO.md"
@@ -152,7 +155,7 @@ SC="$BIN/session_capture.py"
 mkvault "$TMP/s1" "kb"
 printf 'Knowledge-base directory: `kb/`\n' > "$TMP/s1/CLAUDE.md"
 mkdir -p "$TMP/s1/.claude"
-printf '{"hooks":{"SessionEnd":[]}}' > "$TMP/s1/.claude/settings.json"
+printf '{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"./end.sh"}]}]}}' > "$TMP/s1/.claude/settings.json"
 printf '{"session_id":"abcdefgh-1234","cwd":"%s"}' "$TMP/s1" | python3 "$SC"
 ls "$CLAUDE_VAULT_STATE"/*/payloads/abcdefgh-1234.json >/dev/null 2>&1 \
   && ko "capture: did not defer to the project's own SessionEnd hook" || ok

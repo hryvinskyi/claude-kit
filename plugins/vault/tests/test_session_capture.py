@@ -14,6 +14,8 @@ Run from the plugin directory: python3 -m unittest discover -s tests
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -197,9 +199,20 @@ class ProjectTests(unittest.TestCase):
             sc.hook(stdin, spawn=lambda args, cwd: spawned.append(args))
         self.assertEqual(len(spawned), 1)
 
-        (self.root / ".claude" / "settings.json").write_text('{"hooks": {"SessionEnd": []}}')
+        settings = self.root / ".claude" / "settings.json"
+        settings.write_text('{"hooks": {"SessionEnd": []}, "permissions": {"deny": ["SessionEnd"]}}')
         sc.hook(json.dumps(payload), spawn=lambda args, cwd: spawned.append(args))
-        self.assertEqual(len(spawned), 1)
+        self.assertEqual(len(spawned), 2, "a settings file that runs nothing at the session end owns nothing")
+
+        own = json.dumps({"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "./end.sh"}]}]}})
+        settings.write_text("{}")
+        (self.root / ".claude" / "settings.local.json").write_text(own)
+        sc.hook(json.dumps(payload), spawn=lambda args, cwd: spawned.append(args))
+        self.assertEqual(len(spawned), 3, "a personal hook in the local settings is not the project's session end")
+
+        settings.write_text(own)
+        sc.hook(json.dumps(payload), spawn=lambda args, cwd: spawned.append(args))
+        self.assertEqual(len(spawned), 3)
 
 
 class NeverTheProjectTests(unittest.TestCase):
@@ -290,9 +303,9 @@ class NeverTheProjectTests(unittest.TestCase):
         payload.write_text(json.dumps({"session_id": SESSION, "cwd": str(project),
                                        "transcript_path": str(transcript)}))
         inbox = vault.machine_file("Inbox.md")
-        with vaultlib.holding(sc.lock_path(vault)) as held, \
+        with vaultlib.waiting_for(sc.lock_path(vault)) as hold, \
                 unittest.mock.patch.object(sc, "CAPTURE_WAIT", 0.0):
-            self.assertIsNotNone(held)
+            self.assertIsNotNone(hold.lock)
             self.assertEqual(sc.worker(payload), 0)
             self.assertFalse(inbox.exists(), "the inbox was written without the lock")
         self.assertTrue(any("was not checked for the inbox" in line for line in sc.sync_lines(vault)))
@@ -301,6 +314,193 @@ class NeverTheProjectTests(unittest.TestCase):
                                        "transcript_path": str(transcript)}))
         self.assertEqual(sc.worker(payload), 0)
         self.assertIn("feat: shipped quietly", inbox.read_text())
+
+
+class ByHandTests(unittest.TestCase):
+    """`vault-capture` run by a person: no payload, so everything a session end does that needs no session."""
+
+    setUp = NeverTheProjectTests.setUp
+    tearDown = NeverTheProjectTests.tearDown
+    published = NeverTheProjectTests.published
+    assertUntouched = NeverTheProjectTests.assertUntouched
+
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+        def read(self, *args) -> str:
+            raise AssertionError("a terminal was read, and a person would wait on it")
+
+    def project_with_vault(self, cwd: str = "kb/Decisions") -> tuple[Path, Path]:
+        project = self.published("project")
+        vault_dir = project / "kb"
+        vault_dir.mkdir()
+        make_repo(vault_dir)
+        (vault_dir / "Decisions").mkdir()
+        (vault_dir / "Decisions" / "README.md").write_text("# Decisions\n")
+        commit(vault_dir, "init", "2026-09-01T10:00:00+00:00", "To DO.md")
+        remote = self.tmp / "kb.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        git(vault_dir, "remote", "add", "origin", str(remote))
+        git(vault_dir, "push", "-q", "-u", "origin", "main")
+        (project / "CLAUDE.md").write_text("Knowledge-base directory: `kb/`\n")
+        (vault_dir / "Decisions" / "2026-09-11 a choice.md").write_text("---\ntype: decision\n---\n")
+        here = os.getcwd()
+        os.chdir(str(project / cwd))
+        self.addCleanup(os.chdir, here)
+        return project, remote
+
+    def run_by_hand(self, stdin) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(sc.main([], stdin=stdin), 0)
+        return out.getvalue()
+
+    def test_a_run_with_nothing_on_stdin_refreshes_commits_and_pushes_the_vault(self) -> None:
+        project, remote = self.project_with_vault()
+
+        printed = self.run_by_hand(io.StringIO(""))
+
+        vault = vaultlib.locate(project)
+        self.assertEqual(git(remote, "rev-list", "--count", "main").strip(), "2", printed)
+        self.assertIn("a choice.md", git(remote, "ls-tree", "-r", "--name-only", "main"))
+        self.assertEqual(git(vault.path, "status", "--porcelain"), "")
+        self.assertTrue((vault.state / "vault-check.txt").is_file(), "the vault check did not run")
+        self.assertIn("committed", printed)
+        self.assertIn("pushed", printed)
+        self.assertIn("no session", printed)
+        self.assertUntouched(project)
+
+    def test_a_run_at_a_terminal_never_waits_on_it(self) -> None:
+        _, remote = self.project_with_vault(cwd=".")
+
+        printed = self.run_by_hand(self.Terminal())
+
+        self.assertEqual(git(remote, "rev-list", "--count", "main").strip(), "2", printed)
+
+    def test_a_run_by_hand_in_a_project_without_a_vault_says_so(self) -> None:
+        here = os.getcwd()
+        os.chdir(tempfile.mkdtemp())
+        self.addCleanup(os.chdir, here)
+        self.assertIn("no vault", self.run_by_hand(io.StringIO("")))
+
+    def run_with(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = sc.main(argv, stdin=self.Terminal())
+        return code, out.getvalue(), err.getvalue()
+
+    def test_an_argument_it_does_not_know_is_refused_and_the_vault_is_left_alone(self) -> None:
+        project, remote = self.project_with_vault()
+        vault = vaultlib.locate(project)
+
+        for argv in (["--brif"], ["-x"], ["extra"], ["--worker"], ["--brief", "--outcome"], ["--update", "now"],
+                     ["--help", "--brief"]):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_with(argv)
+
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("usage: vault-capture", err)
+                self.assertEqual(git(remote, "rev-list", "--count", "main").strip(), "1", err)
+                self.assertIn("a choice.md", git(vault.path, "status", "--porcelain", "--untracked-files=all"))
+
+    def test_help_prints_the_usage_and_leaves_the_vault_alone(self) -> None:
+        project, remote = self.project_with_vault()
+        vault = vaultlib.locate(project)
+
+        for argv in (["-h"], ["--help"]):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_with(argv)
+
+                self.assertEqual((code, err), (0, ""))
+                self.assertIn("usage: vault-capture", out)
+                self.assertEqual(git(remote, "rev-list", "--count", "main").strip(), "1", out)
+                self.assertIn("a choice.md", git(vault.path, "status", "--porcelain", "--untracked-files=all"))
+
+    def test_a_payload_on_stdin_still_goes_to_the_hook(self) -> None:
+        payload = json.dumps({"session_id": SESSION, "cwd": "/nowhere"})
+        with unittest.mock.patch.object(sc, "hook", return_value=0) as hook, \
+                unittest.mock.patch.object(sc, "by_hand") as by_hand:
+            self.assertEqual(sc.main([], stdin=io.StringIO(payload)), 0)
+        hook.assert_called_once_with(payload)
+        by_hand.assert_not_called()
+
+
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes into a read-only directory")
+class UnlockableTests(unittest.TestCase):
+    """A lock this process cannot take at all is never reported as one another process holds: running
+    again does not help it, so every caller names the reason and what to change instead."""
+
+    setUp = NeverTheProjectTests.setUp
+    tearDown = NeverTheProjectTests.tearDown
+    published = NeverTheProjectTests.published
+    Terminal = ByHandTests.Terminal
+    project_with_vault = ByHandTests.project_with_vault
+
+    BUSY = ("another process", "another session", "run again once it ends")
+
+    def unwritable_state(self) -> vaultlib.Vault:
+        """A vault whose state directory, where its lock lives, this user cannot write."""
+        project, _ = self.project_with_vault()
+        vault = vaultlib.locate(project)
+        vault.state.mkdir(parents=True, exist_ok=True)
+        vault.state.chmod(0o500)
+        self.addCleanup(vault.state.chmod, 0o700)
+        return vault
+
+    def assertNotBusy(self, text: str) -> None:
+        for busy in self.BUSY:
+            self.assertNotIn(busy, text)
+
+    def test_the_commit_the_integration_and_the_update_say_the_lock_cannot_be_taken(self) -> None:
+        vault = self.unwritable_state()
+
+        self.assertEqual(sc.commit_outcome(vault, "by hand"), "unlockable")
+        self.assertEqual(sc.integrate_vault(vault), "unlockable")
+        lines = sc.update_vault(vault, wait=30.0, sleep=lambda _s: self.fail("an unlockable lock was waited for"))
+
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("lock cannot be taken", lines[0])
+        self.assertIn(vault.shown(vault.state), lines[0])
+        self.assertIn("writ", lines[0])
+        self.assertNotBusy(lines[0])
+
+    def test_a_run_by_hand_names_the_reason_and_what_to_change(self) -> None:
+        vault = self.unwritable_state()
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(sc.main([], stdin=self.Terminal()), 0)
+
+        printed = out.getvalue()
+        said = [line for line in printed.splitlines()
+                if line.startswith("vault-capture:") and "lock cannot be taken" in line]
+        self.assertEqual(len(said), 2, printed)
+        self.assertTrue(said[0].startswith("vault-capture: not committed"), printed)
+        self.assertTrue(said[1].startswith("vault-capture: not pushed"), printed)
+        for line in said:
+            self.assertIn(vault.shown(vault.state), line)
+        self.assertNotBusy(printed)
+        self.assertIn("a choice.md", git(vault.path, "status", "--porcelain", "--untracked-files=all"))
+
+    def test_the_worker_logs_the_reason_and_the_brief_carries_it(self) -> None:
+        project, remote = self.project_with_vault()
+        vault = vaultlib.locate(project)
+        payload = vault.state / "payload.json"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text(json.dumps({"session_id": SESSION, "cwd": str(project), "transcript_path": "/none.jsonl"}))
+
+        with unittest.mock.patch.object(vaultlib, "fcntl", None):
+            self.assertEqual(sc.worker(payload), 0)
+
+        log = (vault.state / "session-capture.log").read_text()
+        self.assertIn("flock", log)
+        self.assertNotBusy(log)
+        notice = [line for line in sc.sync_lines(vault) if "was not checked for the inbox" in line]
+        self.assertEqual(len(notice), 1, sc.sync_lines(vault))
+        self.assertIn("flock", notice[0])
+        self.assertNotBusy(notice[0])
+        self.assertEqual(git(remote, "rev-list", "--count", "main").strip(), "1")
 
 
 class InboxTests(unittest.TestCase):

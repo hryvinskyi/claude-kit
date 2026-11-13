@@ -66,14 +66,45 @@ class SpanTests(unittest.TestCase):
         for span in ("packages/{module}/src", "modules/*/Api", "https://example.com/x", "@scope/pkg", "a / b"):
             self.assertIsNone(vc.span_path(span), span)
 
+    def test_a_path_with_a_member_is_read_as_its_path_and_the_member(self) -> None:
+        for span, member in (("packages/crm/src/X.php::read", "read"), ("packages/crm/src/X.php::read()", "read"),
+                             ("packages/crm/src/X.php::read(int $id)", "read"), ("src/X.php::$items", "items"),
+                             ("src/X::LIMIT", "LIMIT")):
+            self.assertEqual(vc.span_path(span), span.split("::", 1)[0], span)
+            self.assertEqual(vc.span_member(span), member, span)
+            self.assertIsNone(vc.span_name(span), span)
+        self.assertIsNone(vc.span_member("packages/crm/src/X.php:48"))
+        cited = vc.citations("Reads `src/X.php::read()` and `src/X.php`.\n")
+        self.assertEqual(sorted(cited.paths), ["src/X.php"])
+        self.assertEqual(sorted(cited.members), [("src/X.php", "read")])
+
 
 class ScopeTests(unittest.TestCase):
     def test_a_path_is_about_the_repository_only_when_its_first_segment_exists(self) -> None:
         entries = {"packages", "scripts", ".claude"}
         exists = {"modules/Acme/Catalog/etc"}.__contains__
-        self.assertTrue(vc.names_the_repository("scripts/x.py", [], entries, exists))
-        self.assertFalse(vc.names_the_repository("text/plain", [], entries, exists))
-        self.assertTrue(vc.names_the_repository("etc/settings.ini", ["modules/Acme/Catalog/"], entries, exists))
+        self.assertEqual(vc.homes_of("scripts/x.py", [], entries, exists), [""])
+        self.assertEqual(vc.homes_of("Scripts/x.py", [], entries, exists), [""])
+        self.assertEqual(vc.homes_of("text/plain", [], entries, exists), [])
+        self.assertEqual(vc.homes_of("tools/x.py", [], entries, exists, frozenset({"tools"})), [""])
+        self.assertEqual(vc.homes_of("etc/settings.ini", ["modules/Acme/Catalog/"], entries, exists),
+                         ["modules/Acme/Catalog/"])
+
+    def test_a_path_inside_the_vault_itself_is_no_claim_about_the_repository(self) -> None:
+        entries = {"modules", "plugins", "scripts"}
+        in_vault = {"Modules", "Plugins", "Plugins/board-queue.md", "Plugins/assets/map.png",
+                    "Plugins/assets/notes.md", "scripts"}.__contains__
+        exists = set().__contains__
+        self.assertEqual(vc.homes_of("Plugins/board-queue.md", [], entries, exists, in_vault=in_vault), [])
+        self.assertEqual(vc.homes_of("Plugins/assets/map.png", [], entries, exists, in_vault=in_vault), [])
+        self.assertEqual(vc.homes_of("Modules/not-yet-written.md", [], entries, exists, in_vault=in_vault), [])
+        self.assertEqual(vc.homes_of("Plugins/assets/notes.md", [], entries, exists, in_vault=in_vault), [])
+        self.assertEqual(vc.homes_of("Plugins/x/src/Y.ts", [], entries, exists, in_vault=in_vault), [""])
+        self.assertEqual(vc.homes_of("Plugins/board-queue/README.md", [], entries, exists, in_vault=in_vault), [""])
+        self.assertEqual(vc.homes_of("Docs/guide.md", [], entries | {"docs"}, exists, in_vault=in_vault), [""])
+        self.assertEqual(vc.homes_of("modules/crm/x.py", [], entries, exists, in_vault=in_vault), [""])
+        self.assertEqual(vc.homes_of("scripts/x.py", [], entries, exists, in_vault=in_vault), [""])
+        self.assertEqual(vc.homes_of("MODULES/crm/x.py", [], entries, exists, in_vault=in_vault), [""])
 
     def test_a_package_note_gets_its_packages_as_bases(self) -> None:
         self.assertEqual(vc.package_bases("Modules/crm.md", ["acme"]),
@@ -557,6 +588,115 @@ class MeasureTests(unittest.TestCase):
             release.cancel()
         self.assertTrue((self.vault.state / "vault-check.txt").is_file())
         self.assertFalse(lock.exists())
+
+    def spin_guard(self, limit: int = 200):
+        """A stand-in for time.sleep that sleeps briefly and fails a run that keeps polling."""
+        real = vc.time.sleep
+        calls: list = []
+
+        def sleep(seconds: float) -> None:
+            calls.append(seconds)
+            if len(calls) > limit:
+                raise AssertionError(f"still waiting after {limit} polls")
+            real(min(seconds, 0.01))
+
+        return unittest.mock.patch.object(vc.time, "sleep", sleep)
+
+    def test_a_foreground_check_gives_up_on_a_lock_held_too_long_and_says_so(self) -> None:
+        self.hold_the_lock()
+        err = io.StringIO()
+        with unittest.mock.patch.object(vc, "LOCK_WAIT", 0.3), unittest.mock.patch.object(vc, "LOCK_POLL", 0.05), \
+                self.spin_guard(), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(vc.main(["--quiet", "--root", str(self.root)]), 2)
+        self.assertIn("another check", err.getvalue())
+        self.assertFalse((self.vault.state / "vault-check.txt").exists())
+
+    def test_a_read_only_check_runs_without_a_lock_that_cannot_be_taken(self) -> None:
+        out = io.StringIO()
+        with unittest.mock.patch.object(vaultlib, "fcntl", None), self.spin_guard(), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(vc.main(["--check", "--quiet", "--root", str(self.root)]), 1)
+        self.assertIn("3 hard", out.getvalue())
+        self.assertFalse((self.vault.state / "vault-check.txt").exists())
+
+    def test_a_writing_check_refuses_a_lock_that_cannot_be_taken(self) -> None:
+        err = io.StringIO()
+        with unittest.mock.patch.object(vaultlib, "fcntl", None), self.spin_guard(), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(vc.main(["--quiet", "--root", str(self.root)]), 2)
+            self.assertEqual(vc.main(["--root", str(self.root), "--stamp", "crm"]), 2)
+        self.assertIn("cannot be taken", err.getvalue())
+        self.assertIn("--check", err.getvalue())
+        self.assertFalse((self.vault.state / "vault-check.txt").exists())
+
+    def paths_note(self, *spans: str) -> list[str]:
+        """The hard findings of a runbook citing each span, and nothing else of the project's."""
+        self.write(".claude/kb/Runbooks/Paths.md", "## Steps\n\n" + "\n\n".join(f"See `{s}`." for s in spans) + "\n")
+        return [m for m in self.messages(vc.measure(self.vault, write=False), "HARD")
+                if m.startswith("Runbooks/Paths.md")]
+
+    def test_a_note_citing_a_note_by_its_path_in_the_vault_is_no_finding(self) -> None:
+        self.write("modules/billing/etc/config.ini", "[billing]\n")
+        self.write("plugins/board-queue/package.json", "{}\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "a module and a plugin")
+        self.write(".claude/kb/Plugins/board-queue.md", "## Purpose\n\nQueues board writes.\n")
+
+        found = self.paths_note("Plugins/board-queue.md", "Modules/crm.md", "Modules/not-yet-written.md",
+                                "plugins/board-queue/missing.ts")
+
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("`plugins/board-queue/missing.ts` does not exist", found[0])
+
+    def test_a_code_path_in_the_case_of_a_vault_folder_is_still_the_wrong_case(self) -> None:
+        self.write("plugins/x/src/Y.ts", "export const y = 1;\n")
+        self.write("plugins/board-queue/README.md", "# board-queue\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "a plugin")
+        self.write(".claude/kb/Plugins/board-queue.md", "## Purpose\n\nQueues board writes.\n")
+        os.symlink(str(self.root / "plugins" / "x"), str(self.root / ".claude" / "kb" / "Plugins" / "out"))
+
+        found = self.paths_note("Plugins/x/src/Y.ts", "Plugins/out/src/Y.ts", "Plugins/board-queue.md",
+                                "Plugins/board-queue/README.md")
+
+        self.assertEqual(len(found), 3, found)
+        for cited, spelled in (("Plugins/x/src/Y.ts", "plugins/x/src/Y.ts"),
+                               ("Plugins/board-queue/README.md", "plugins/board-queue/README.md")):
+            wrong = next((m for m in found if f"`{cited}`" in m), "")
+            self.assertIn(f"the tree spells it `{spelled}`", wrong, found)
+        self.assertTrue(any("`Plugins/out/src/Y.ts` does not exist" in m for m in found), found)
+
+    def test_a_path_whose_first_segment_left_the_repository_is_hard(self) -> None:
+        self.write("scripts/old-tool.py", "print('x')\n")
+        git(self.root, "add", "scripts")
+        git(self.root, "commit", "-q", "-m", "a tool")
+        git(self.root, "rm", "-q", "-r", "scripts")
+        git(self.root, "commit", "-q", "-m", "the tool goes")
+
+        found = self.paths_note("scripts/old-tool.py", "text/plain", "and/or")
+
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("`scripts/old-tool.py` does not exist", found[0])
+
+    def test_a_path_cited_in_the_wrong_case_is_hard_and_names_the_spelling(self) -> None:
+        found = self.paths_note("packages/crm/src/service/ContactReader.php",
+                                "Packages/crm/src/Service/ContactReader.php",
+                                "packages/crm/src/Service/ContactReader.php")
+
+        self.assertEqual(len(found), 2, found)
+        for wrong in ("packages/crm/src/service/ContactReader.php", "Packages/crm/src/Service/ContactReader.php"):
+            line = next((m for m in found if f"`{wrong}`" in m), "")
+            self.assertIn("`packages/crm/src/Service/ContactReader.php`", line, found)
+
+    def test_a_path_with_a_member_is_checked_by_its_path_and_its_member(self) -> None:
+        found = self.paths_note("packages/crm/src/Service/ContactReader.php::EnumOnlyCase",
+                                "packages/crm/src/Service/ContactReader.php::reportWriter()",
+                                "packages/crm/src/Service/ContactReader.php::vanishedMethod()",
+                                "packages/crm/src/Service/GoneReader.php::read")
+
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(any("`packages/crm/src/Service/GoneReader.php` does not exist" in m for m in found), found)
+        self.assertTrue(any("`vanishedMethod`" in m and "ContactReader.php" in m for m in found), found)
 
     def module_note(self) -> None:
         """A package whose directory only a note-base rule names, and a note citing one live and one gone path."""

@@ -436,8 +436,8 @@ class LockTests(SharedVault):
         sc.commit_vault(self.bob, SESSION)
         sc.integrate_vault(self.bob, sleep=no_wait([]))
         before = head(self.alice.path)
-        with vaultlib.holding(sc.lock_path(self.alice)) as held:
-            self.assertIsNotNone(held)
+        with vaultlib.waiting_for(sc.lock_path(self.alice)) as hold:
+            self.assertIsNotNone(hold.lock)
             with unittest.mock.patch.object(sc, "net", side_effect=AssertionError("fetched under a held lock")):
                 lines = sc.update_vault(self.alice, wait=0.0)
         self.assertEqual(lines, ["[VAULT] not brought up to date — another session is syncing the vault"])
@@ -448,8 +448,8 @@ class LockTests(SharedVault):
         sc.commit_vault(self.alice, SESSION)
         events: list = []
         lock = sc.lock_path(self.alice)
-        holder = vaultlib.holding(lock)
-        self.assertIsNotNone(holder.__enter__())
+        holder = vaultlib.waiting_for(lock)
+        self.assertIsNotNone(holder.__enter__().lock)
         original = sc.net
 
         def brief_finishes(seconds: float) -> None:
@@ -470,11 +470,11 @@ class LockTests(SharedVault):
     def test_the_commit_waits_for_the_lock_and_never_races_it(self) -> None:
         self.note(self.alice, "Modules/a.md", "note\n")
         lock = sc.lock_path(self.alice)
-        with vaultlib.holding(lock):
+        with vaultlib.waiting_for(lock):
             self.assertFalse(sc.commit_vault(self.alice, SESSION))
         self.assertTrue(git(self.alice.path, "status", "--porcelain").strip())
 
-        holder = vaultlib.holding(lock)
+        holder = vaultlib.waiting_for(lock)
         holder.__enter__()
         self.assertTrue(sc.commit_vault(self.alice, SESSION, wait=60.0,
                                         sleep=lambda s: holder.__exit__(None, None, None)))

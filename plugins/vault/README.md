@@ -13,10 +13,14 @@ kept as Markdown beside the code, and the tools that keep it honest.
 | `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync` | on request | Write a decision record, a journal entry, work the TODO board, refresh the notes from the code |
 | `vault:wiki-updater` | spawned by `/vault:wiki-sync` | Runs the project's sync tooling and writes the prose a script cannot. A project that defines its own `wiki-updater` agent gets that one instead |
 
-A project whose own `.claude/settings.json` declares a `SessionStart` or `SessionEnd` hook is left to
-its own tooling for that event: the brief and the capture exit without doing anything there. One
-thing crosses that line: where this plugin's session end runs, what it did reaches the next session
-start. A project that briefs its own session start, or a vault with no `To DO.md`, still gets the
+A project whose shared `.claude/settings.json` runs a `SessionStart` or `SessionEnd` hook — an entry
+under `hooks.<event>` holding a hook of type `command` with a non-blank `command` — is left to its
+own tooling for that event: the brief and the capture exit without doing anything there. An empty
+list, a prompt hook or one with no command, the word elsewhere in the file, or a file that is not
+valid JSON leaves the event to this plugin, and so does a hook in the git-ignored
+`.claude/settings.local.json`, which is one person's (a sound, a status line) and not the project's.
+One thing crosses that line: where this plugin's session end runs, what it did reaches the next
+session start. A project that briefs its own session start, or a vault with no `To DO.md`, still gets the
 vault's fast-forward and the session end's outcome lines — a conflict branch, a failed commit, files
 held back, the inbox (`vault-capture --outcome`) — and nothing else of the brief. A project that also
 ends its own sessions gets none of it.
@@ -42,7 +46,7 @@ The plugin's `bin/` is on the Bash tool's search path while the plugin is enable
 |---|---|
 | `find-vault [root]` | the resolver |
 | `vault-check [--check \| --quiet \| --brief \| --stamp NOTE…]` | `bin/vault_check.py`: holds the notes to the code — a cited class or path that exists nowhere, or a broken link, is a hard finding; a cited file that changed on the project's default branch since its paragraph was stamped, or one this branch removed, is a soft one |
-| `vault-capture [--brief \| --outcome]` | `bin/session_capture.py` |
+| `vault-capture [--update \| --brief \| --outcome \| --help]` | `bin/session_capture.py`. Any other argument is refused with the usage and exit 2, and nothing is done. Run by hand with no argument (at a terminal, or with nothing on stdin) it does in the foreground what the session end does that needs no session, for the vault found from the current directory: refreshes the vault check's stamps and the brief's cache, commits a vault that is a repository of its own and integrates it with its remote, refreshes the search index, and prints a line for each. It files no inbox entry: that is read from a session's transcript |
 | `vault-search ensure \| refresh` | `bin/vault_search.py`: a `qmd` search index of the vault in `<project>/.qmd/` |
 | `vault-merge <driver> %O %A %B %P` | `bin/vault_merge/`: the git merge drivers below |
 | `vault-merge selfcheck FILE…` | reads each file as the `keyed` driver does and fails unless it writes back byte for byte; prints counts only |
@@ -78,6 +82,20 @@ tried first), else HEAD. What only the default branch holds is a soft finding wh
 branch shares with it (their merge base) held it too — this branch removed it, and the session that
 did is told to correct the prose before it merges — and no finding when the merge base did not: the
 default branch added it after this branch left. Only what neither holds is a hard finding.
+
+A path-shaped code span is a claim about the repository when its first segment is at the project root
+(in any case), is a directory the history of HEAD or the default branch once held, or lies inside the
+note's own package; `text/plain` is none of these and is never a finding. A span whose first segment
+is spelled exactly as an entry at the top of the vault, and not exactly as one at the project root,
+is a path inside the vault and no claim about the repository when it exists inside the vault (links
+followed, never out of it) or has a note's shape, `<folder>/<name>.md`, which a note may cite before
+it is written: `Modules/crm.md` beside a project's `modules/`. Any other span under such a segment —
+`Plugins/x/src/Y.ts` beside `plugins/x/src/Y.ts`, or a deeper `Plugins/x/README.md` the vault does
+not hold — is checked against the repository, where it is a path cited in the wrong case. A path is compared with the names on disk
+segment by segment, so one cited in the wrong letter case is a hard finding naming the tree's
+spelling, even on a file system that ignores case. A span `path::member` (`src/X.php::read()`,
+`src/X.php::$items`) checks the path, and then the member: one the file does not name is a hard finding
+only when no other code — `vendor/` included — names it either, since it may be inherited.
 
 Review stamps are anchored on the default branch's tree, read through git without checking anything
 out, so the branch a session is on never moves, resets or downgrades a stamp, and two people on
@@ -154,7 +172,13 @@ older way, without the hash, is adopted by the first project it fits that no oth
 the `project` file inside a state directory names the project it belongs to.
 
 The locks are `flock(2)` locks, so the tools run on macOS and Linux: a lock is free the moment the
-process holding it exits, however it exits, and no process takes over a lock another one holds.
+process holding it exits, however it exits, and no process takes over a lock another one holds. A
+lock that cannot be taken at all — no `flock`, a state directory that cannot be written — is never
+waited for, and is never reported as one another process holds: the hand run, the session end's log
+and the brief name the reason and what to change, since running again changes nothing until then.
+`vault-check` waits up to five minutes for another check of the same vault and then exits 2; where
+its lock cannot be taken, `vault-check --check` reads the vault without it and every run that would
+write exits 2 and says why.
 
 ## A vault shared by several people
 
