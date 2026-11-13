@@ -101,7 +101,8 @@ Rules (each has cases in tests.sh):
          … tick`, `npx -c`/`npm exec -c|--call` lines, the package's `cli`
          script run by npm/pnpm/yarn (`yarn workspace <name> run cli tick`),
          `tick` handed to it by xargs (also as `{}`), the
-         launcher its schedule runs (board-queue-tick.sh), and `tick` handed to
+         launcher its schedule runs (board-queue-tick.sh, or an install's
+         own board-queue-tick.<12 hex digits>.sh), and `tick` handed to
          a program named by a substitution or a variable it cannot read --
          whatever variables are set or exported first, BOARD_QUEUE_SCHEDULED
          included. A syntax check (`bash -n`, `node --check`) passes. The
@@ -1593,8 +1594,10 @@ def eslint_suppressions_danger(argv, cwd):
 
 # The names the board queue's command line goes by: its wrapper and its entry point
 BOARD_QUEUE_PROGRAMS = {"board-queue", "board-queue.ts", "board-queue.js", "board-queue.mjs"}
-# The launcher the queue's schedule runs: one pass, with the variable that marks it as scheduled
-BOARD_QUEUE_LAUNCHER = "board-queue-tick.sh"
+# The launcher the queue's schedule runs: one pass, with the variable that marks it as scheduled.
+# An install at the default places names it board-queue-tick.sh; any other install adds its own
+# twelve hex digits (board-queue-tick.0123456789ab.sh)
+BOARD_QUEUE_LAUNCHER = re.compile(r"^board-queue-tick(\.[0-9a-f]{12})?\.sh$")
 # The variable a script calls the command line by
 BOARD_QUEUE_CLI_WORDS = {"$BOARD_QUEUE_CLI", "${BOARD_QUEUE_CLI}"}
 # Programs that run a script named among their arguments
@@ -1609,6 +1612,11 @@ BOARD_QUEUE_PASS = ("a pass of the board queue (`board-queue tick`) is run by it
                     "passes by hand, and BOARD_QUEUE_SCHEDULED marks the schedule's own passes, whoever sets "
                     "it. Read where the queue stands with `board_status` (or `board-queue status`) and wait "
                     "for the next scheduled pass.")
+
+
+def names_launcher(names):
+    """Whether one of the program names is the launcher a board queue schedule runs."""
+    return any(BOARD_QUEUE_LAUNCHER.fullmatch(name) for name in names)
 
 
 def board_queue_programs(word, ctx):
@@ -1643,7 +1651,7 @@ def program_operand(argv, ctx):
             j += 1 if word in PACKAGE_VALUE_OPTIONS else 0
             continue
         names = board_queue_programs(word, ctx) or set()
-        if BOARD_QUEUE_LAUNCHER in names:
+        if names_launcher(names):
             return ["tick"]
         if names & BOARD_QUEUE_PROGRAMS:
             return list(argv[j:])
@@ -1679,14 +1687,14 @@ def board_queue_arguments(argv, cwd, ctx=None):
     runs nothing.
     """
     names = board_queue_programs(argv[0], ctx) or set()
-    if BOARD_QUEUE_LAUNCHER in names:
+    if names_launcher(names):
         return ["tick"]
     if names & BOARD_QUEUE_PROGRAMS:
         return list(argv[1:])
     if names & set(SHELLS):
         script = shell_script_operand(argv) or [""]
         named = board_queue_programs(script[0], ctx) or set()
-        if BOARD_QUEUE_LAUNCHER in named:
+        if names_launcher(named):
             return ["tick"]
         return list(script[1:]) if named & BOARD_QUEUE_PROGRAMS else None
     in_package = "board-queue" in cwd or any("board-queue" in a for a in argv)

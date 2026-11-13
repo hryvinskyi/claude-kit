@@ -69,6 +69,41 @@ export function previousConfigPaths(env: Env = process.env): string[] {
  * file, that file is the only one read.
  */
 export function loadConfig(env: Env = process.env, notice: Notice = toStandardError): Config {
+  const found = foundConfig(env);
+  const config = parsed(found.text, found.file, notice);
+  adoptFound(found, env, notice);
+  return config;
+}
+
+/**
+ * Copies a configuration found only at its previous location to the current
+ * one, and says so, as `loadConfig` does; nothing when it is at the current one
+ * already. For a command that read it with `readConfig` and writes only once
+ * everything it was going to refuse has been checked.
+ */
+export function adoptConfig(env: Env = process.env, notice: Notice = toStandardError): void {
+  adoptFound(foundConfig(env), env, notice);
+}
+
+function adoptFound(found: { file: string; text: string }, env: Env, notice: Notice): void {
+  const file = configPath(env);
+  if (found.file !== file) {
+    notice(adopted(found.file, file, found.text));
+  }
+}
+
+/**
+ * The configuration `loadConfig` would answer, read from the same file, with
+ * nothing written: one found only at a previous location is read there and
+ * left where it is. For a command that promises to change nothing.
+ */
+export function readConfig(env: Env = process.env, notice: Notice = toStandardError): Config {
+  const found = foundConfig(env);
+  return parsed(found.text, found.file, notice);
+}
+
+/** The file the configuration is read from, and its text; refused when there is none. */
+function foundConfig(env: Env): { file: string; text: string } {
   const file = configPath(env);
   const named = env[CONFIG_VAR]?.trim();
   const candidates = named === undefined || named === '' ? [file, ...previousConfigPaths(env)] : [file];
@@ -80,12 +115,7 @@ export function loadConfig(env: Env = process.env, notice: Notice = toStandardEr
       + 'the repositories this queue may write to and the fields it may set',
     );
   }
-
-  const config = parsed(found.text, found.file, notice);
-  if (found.file !== file) {
-    notice(adopted(found.file, file, found.text));
-  }
-  return config;
+  return found;
 }
 
 function firstReadable(files: readonly string[]): { file: string; text: string } | null {

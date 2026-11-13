@@ -615,9 +615,9 @@ board-queue service         # the worker as a long-running service (see As a ser
 board-queue health [--json] # whether that service is doing its job; exits 1 when it is not
 board-queue audit [--json]
 board-queue brief --repo example-org/example-repo
-board-queue install-launchd   # macOS
-board-queue install-systemd   # Linux
-board-queue schedule-names    # the names those two give this install's job; writes nothing
+board-queue install-launchd [--check]   # macOS; --check says which files it would write, and writes none
+board-queue install-systemd [--check]   # Linux; the same
+board-queue schedule-names              # the names those two give this install's job; writes nothing
 board-queue help
 ```
 
@@ -685,12 +685,13 @@ config.json`, is read from there once, copied to the current one, and a line on 
 moved and the old file can go.
 
 `install-launchd` writes the job description and the small launcher it runs
-(`board-queue-tick.sh` in the state directory); `install-systemd` writes a one-shot service and its timer
+(`board-queue-tick.sh` in the state directory, `board-queue-tick.<12 hex digits>.sh` for an install with
+names of its own, so two installs sharing a state directory never overwrite each other's); `install-systemd` writes a one-shot service and its timer
 under `${XDG_CONFIG_HOME:-~/.config}/systemd/user/` and the same launcher. The job's names are
 `com.user.board-queue` and `board-queue.service`/`board-queue.timer` for an install at the default places,
 and names of their own otherwise (*Two installs on one machine*, below); `board-queue schedule-names` prints
-them, with the launcher's path, as `label=`, `plist=`, `service=`, `timer=` and `launcher=` lines,
-without writing anything. Every path is absolute
+them, with the launcher's path and the job's log, as `label=`, `plist=`, `service=`, `timer=`, `launcher=`
+and `log=` lines, without writing anything. Every path is absolute
 and baked in — a scheduled job starts with no checkout's directory — and the launcher runs the pass through
 `~/.local/bin/board-queue`, so it keeps working when the plugin moves. Both commands refuse while that
 command is not installed, and print what to run without running it: `launchctl bootstrap` (the job's
@@ -706,10 +707,36 @@ if nobody runs passes back to back, and a session that empties the queue by hand
 allowance every other session shares. A person operating the schedule sets the variable by hand
 (`BOARD_QUEUE_SCHEDULED=1 board-queue tick`); a session reads `status` and waits. Run it again whenever an
 upgrade moves the Node binary; until then the launcher falls back to whichever `node` the job's own path
-finds. The job runs every 300 seconds and appends to `launchd.log` in the state directory. `launchctl print
+finds. The job runs every 300 seconds and appends what it prints to a log in the state directory:
+`launchd.log` for an install at the default places, `launchd.<12 hex digits>.log` for one with names of its
+own, so two installs that share a state directory keep two logs; the systemd service appends to the same
+file (`StandardOutput=append:`), not to the journal. Before each pass the launcher moves a log over 5 MiB
+to the same name with `.1` after it, replacing the one moved there before. The scheduler opened the log
+before the launcher ran, so the pass that moves it still writes to the `.1` file, and the next pass starts a
+new log. The log thus holds at most 5 MiB plus one pass's output, the `.1` file at most 5 MiB plus two
+passes' output; nothing bounds what a single pass prints. `launchctl print
 gui/$(id -u)/<label>` shows what the system thinks of it; `launchctl bootout` removes it
 (`systemctl --user status <timer>` and `disable --now` on Linux). Both install commands print the
 exact commands that stop and remove the job they wrote.
+
+**Checking before installing.** `board-queue install-launchd --check` and `install-systemd --check` render
+exactly what the install would write, through the same code, and write, load and enable nothing; the
+configuration is read where it is found and the state directory is not created. The install itself renders
+everything the same way, then probes the place of every file, before it writes anything: a place that holds
+something other than a file, a file this account may not write, a directory it may not create files in, or a
+file where a directory has to be refuses the install (and exits a check with 2). An install refused at either
+step leaves nothing behind — it copies no configuration from its previous place and makes no state
+directory. A write the system refuses only when it happens (a full disk) can still fail after those two were
+settled. They print each file the
+install would create or change — a job description, a unit or the launcher that is missing, holds other
+text, or (the launcher) is not mode 755 — as its absolute path, one to a line, in the order the install
+writes them, and nothing else on the answer stream. The exit code says the result:
+
+| code | meaning |
+|---|---|
+| `0` | every file is as the install would write it; nothing is printed |
+| `1` | the install would write at least one file; each is printed |
+| `2` | the check could not be made — no `board-queue` command, no readable configuration, a value a job file cannot hold, a file that cannot be read — and one sentence on the error stream says why; nothing is printed on the answer stream. An unknown option also exits 2, with the usage |
 
 **What the job is handed.** A scheduler starts a job with a bare environment, so the install writes into the
 job description (the plist's `EnvironmentVariables`, the service's `Environment=`) every variable that tells
@@ -731,7 +758,9 @@ these.
 of its own environment (`${XDG_CONFIG_HOME:-~/.config}/board-queue/config.json`, `~/.claude/state/board-queue`)
 keeps the plain names. Any other pair
 gets names of its own, derived from the two paths: `com.user.board-queue.<12 hex digits>` on macOS,
-`board-queue-<12 hex digits>.service` and `.timer` on Linux. Running the same install again replaces its own
+`board-queue-<12 hex digits>.service` and `.timer` on Linux, its launcher is `board-queue-tick.<12 hex digits>.sh`
+and its log `launchd.<12 hex digits>.log`.
+Running the same install again replaces its own
 job; an install for another configuration or queue adds a second job instead of overwriting the first. When
 an install under a derived name finds a job under the default name, it says so: if that job was written
 earlier for the same configuration and queue, remove it with the default name's commands, or both run passes.
@@ -851,17 +880,16 @@ post and everything the API answered with.
 |---|---|
 | `queue.db` | the queue itself (SQLite, WAL), the cursor of the mirror, the dependency answers the importer keeps, and what the forge jobs keep: each repository's listing cursor, the pull requests seen and what the server was told of them, the statuses written and the writes of the last hour, each claimed branch's last measure, and the commits holds name |
 | `queue.db.before-layout<N>.bak` | a whole copy taken once before the file was brought to layout `N`; delete it once the new version runs |
-
-The file records two numbers. `schema_version` is the oldest generation of this code that can read it, and is
-what every release checks; a change of layout that older releases still read leaves it alone, so going back to
-an older release never stops the queue. `layout_revision` is the layout written, and only grows. A skipped action
-is stored as cancelled, marked in a column older releases never read, so they list it as finished.
 | `worker.log` | structured lines from the worker and the tools, credentials redacted |
 | `audit.json` | the last report-only pass over every board |
 | `service.json` | the heartbeat `board-queue service` writes after every pass, which `board-queue health` reads |
-| `launchd.log` | whatever the scheduled job printed |
+| `launchd.log` | whatever the scheduled job printed (`launchd.<12 hex digits>.log` for an install with names of its own); once over 5 MiB it is moved to the same name with `.1` after it (`launchd.log.1`, `launchd.<12 hex digits>.log.1`), replacing the one there |
+| `board-queue-tick.sh` | the launcher a scheduled job runs (`board-queue-tick.<12 hex digits>.sh` for an install with names of its own) |
 
-| `board-queue-tick.sh` | the launcher a scheduled job runs |
+`queue.db` records two numbers. `schema_version` is the oldest generation of this code that can read it, and is
+what every release checks; a change of layout that older releases still read leaves it alone, so going back to
+an older release never stops the queue. `layout_revision` is the layout written, and only grows. A skipped action
+is stored as cancelled, marked in a column older releases never read, so they list it as finished.
 
 `$BOARD_QUEUE_STATE_DIR` moves all of it; `$BOARD_QUEUE_CONFIG` names another configuration file. Both are
 what the tests use, and what a second installation would use. The configuration and the credential file

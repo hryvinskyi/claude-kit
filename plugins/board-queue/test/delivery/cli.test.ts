@@ -545,7 +545,7 @@ describe('the queue on a command line', () => {
       });
       const plistPath = written(installed.out, '.plist');
       const label = /\/(com\.user\.board-queue\.[0-9a-f]{12})\.plist$/.exec(plistPath)?.[1] ?? '';
-      const launcherPath = join(space.stateDir, 'board-queue-tick.sh');
+      const launcherPath = join(space.stateDir, `board-queue-tick.${label.slice('com.user.board-queue.'.length)}.sh`);
       const plist = readFileSync(plistPath, 'utf8');
       const launcher = readFileSync(launcherPath, 'utf8');
       const lint = spawnSync('plutil', ['-lint', plistPath], { encoding: 'utf8' });
@@ -559,7 +559,10 @@ describe('the queue on a command line', () => {
       assert.match(plist, new RegExp(`<string>${label}</string>`));
       assert.match(plist, /<integer>300<\/integer>/);
       assert.match(plist, new RegExp(`<string>${launcherPath}</string>`));
-      assert.match(plist, new RegExp(`<string>${join(space.stateDir, 'launchd.log')}</string>`));
+      // The workspace's job has a name of its own, and so does its log, so
+      // another install that shares the state directory writes another file.
+      const instance = label.slice('com.user.board-queue.'.length);
+      assert.match(plist, new RegExp(`<string>${join(space.stateDir, `launchd.${instance}.log`)}</string>`));
       // The job looks where the install found its commands first: a GitHub
       // command line tool outside the fixed directories is found all the same.
       const fixed = SEARCH_PATH.split(':').filter((directory) => directory !== '/usr/bin' && directory !== '/bin');
@@ -591,13 +594,14 @@ describe('the queue on a command line', () => {
       const timerUnit = timerPath.slice(unitDir.length + 1);
       const service = readFileSync(servicePath, 'utf8');
       const timer = readFileSync(timerPath, 'utf8');
-      const launcherPath = join(space.stateDir, 'board-queue-tick.sh');
+      const launcherPath = join(space.stateDir, serviceUnit.replace(/^board-queue-([0-9a-f]{12})\.service$/, 'board-queue-tick.$1.sh'));
 
       assert.equal(installed.code, 0, installed.err);
       assert.match(service, /^Type=oneshot$/m);
       assert.match(service, new RegExp(`^ExecStart=/bin/sh "${launcherPath}"$`, 'm'));
       assert.match(service, new RegExp(`^WorkingDirectory=${space.stateDir}$`, 'm'));
-      assert.match(service, new RegExp(`^StandardOutput=append:${join(space.stateDir, 'launchd.log')}$`, 'm'));
+      const instance = /^board-queue-([0-9a-f]{12})\.service$/.exec(serviceUnit)?.[1] ?? '';
+      assert.match(service, new RegExp(`^StandardOutput=append:${join(space.stateDir, `launchd.${instance}.log`)}$`, 'm'));
       assert.match(timer, /^OnUnitActiveSec=300s$/m);
       assert.match(serviceUnit, /^board-queue-[0-9a-f]{12}\.service$/);
       assert.equal(timerUnit, serviceUnit.replace(/\.service$/, '.timer'));
@@ -626,16 +630,19 @@ describe('the queue on a command line', () => {
     });
   });
 
-  it('refuses to write a schedule that would run a command that is not installed', async () => {
+  it('refuses to write a schedule that would run a command that is not installed, and writes nothing at all', async () => {
     await workspace(async (space) => {
       const home = join(space.directory, 'home');
-      mkdirSync(home, { recursive: true });
+      const untouched = beforeARefusedInstall(space, home);
 
-      const installed = await space.run(['install-launchd'], { home });
+      const launchd = await space.run(['install-launchd'], { home, env: untouched.env });
+      const systemd = await space.run(['install-systemd'], { home, env: untouched.env });
 
-      assert.equal(installed.code, 1);
-      assert.match(installed.err, /no board-queue command at .*\.local\/bin\/board-queue/);
-      assert.equal(existsSync(join(home, 'Library', 'LaunchAgents')), false);
+      assert.equal(launchd.code, 1);
+      assert.equal(systemd.code, 1);
+      assert.match(launchd.err, /no board-queue command at .*\.local\/bin\/board-queue/);
+      assert.match(systemd.err, /no board-queue command at .*\.local\/bin\/board-queue/);
+      untouched.assertNothingWritten();
     });
   });
 
@@ -723,18 +730,58 @@ describe('the queue on a command line', () => {
     });
   });
 
+  it('refuses an install whose job description has a directory where the file goes, leaving nothing behind', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const untouched = beforeARefusedInstall(space, home);
+      const named = await space.run(['schedule-names'], { home, env: untouched.env });
+      const plist = lines(named.out).find((line) => line.startsWith('plist='))?.slice('plist='.length) ?? '';
+      mkdirSync(plist, { recursive: true });
+
+      const checked = await space.run(['install-launchd', '--check'], { home, env: untouched.env });
+      const installed = await space.run(['install-launchd'], { home, env: untouched.env });
+
+      assert.equal(named.code, 0, named.err);
+      assert.equal(checked.code, 2, checked.err);
+      assert.match(checked.err, /is not a file/);
+      assert.equal(installed.code, 1);
+      assert.match(installed.err, /is not a file/);
+      assert.equal(existsSync(join(home, '.config', 'board-queue', 'config.json')), false, 'the configuration was copied');
+      assert.equal(existsSync(untouched.env['BOARD_QUEUE_STATE_DIR'] ?? ''), false, 'the state directory was made');
+    });
+  });
+
+  it('copies a configuration found at its previous place and makes the state directory owner-only once the install is rendered', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const untouched = beforeARefusedInstall(space, home);
+      const stateDir = untouched.env['BOARD_QUEUE_STATE_DIR'] ?? '';
+
+      const installed = await space.run(['install-launchd'], { home, env: untouched.env });
+
+      assert.equal(installed.code, 0, installed.err);
+      assert.ok(existsSync(join(home, '.config', 'board-queue', 'config.json')), 'the configuration was not copied');
+      assert.equal(statSync(stateDir).mode & 0o777, 0o700);
+      assert.equal(dirname(written(installed.out, '.sh')), stateDir);
+    });
+  });
+
   it('refuses a key carried as its text rather than its file, writing nothing and never repeating it', async () => {
     await workspace(async (space) => {
       const home = join(space.directory, 'home');
       fakeCommand(home);
       const key = 'LS0tLS1CRUdJTiBSU0Eg' + 'UFJJVkFURSBLRVktLS0tLQ';
 
-      const installed = await space.run(['install-launchd'], { home, env: { ...NOTHING_CARRIED, GITHUB_APP_PRIVATE_KEY: key } });
+      const untouched = beforeARefusedInstall(space, home);
+
+      const installed = await space.run(['install-launchd'], { home, env: { ...untouched.env, GITHUB_APP_PRIVATE_KEY: key } });
 
       assert.equal(installed.code, 1);
       assert.match(installed.err, /GITHUB_APP_PRIVATE_KEY/);
       assert.equal((installed.out + installed.err).includes(key), false, 'the refusal repeated the key');
-      assert.equal(existsSync(join(home, 'Library', 'LaunchAgents')), false);
+      untouched.assertNothingWritten();
     });
   });
 
@@ -773,13 +820,17 @@ describe('the queue on a command line', () => {
       assert.equal(named.code, 0, named.err);
       assert.ok(madeNothing, 'schedule-names wrote something');
       const plist = written(launchd.out, '.plist');
+      const log = /^and writes to (.+)$/m.exec(launchd.out)?.[1] ?? '';
       assert.deepEqual(lines(named.out), [
         `label=${/\/([^/]+)\.plist$/.exec(plist)?.[1] ?? ''}`,
         `plist=${plist}`,
         `service=${written(systemd.out, '.service')}`,
         `timer=${written(systemd.out, '.timer')}`,
         `launcher=${written(launchd.out, '.sh')}`,
+        `log=${log}`,
       ]);
+      assert.ok(readFileSync(plist, 'utf8').includes(`<string>${log}</string>`));
+      assert.ok(readFileSync(written(systemd.out, '.service'), 'utf8').includes(`StandardOutput=append:${log}\n`));
       assert.match(named.out, /^label=com\.user\.board-queue\.[0-9a-f]{12}$/m);
     });
   });
@@ -800,7 +851,150 @@ describe('the queue on a command line', () => {
         `service=${join(home, '.config', 'systemd', 'user', 'board-queue.service')}`,
         `timer=${join(home, '.config', 'systemd', 'user', 'board-queue.timer')}`,
         `launcher=${join(home, '.claude', 'state', 'board-queue', 'board-queue-tick.sh')}`,
+        `log=${join(home, '.claude', 'state', 'board-queue', 'launchd.log')}`,
       ]);
+    });
+  });
+
+  it('says which files install-launchd would write, writing and loading nothing, and is quiet once they are current', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      const command = fakeCommand(home);
+      const stateDir = join(space.directory, 'not yet made');
+      const env = { ...NOTHING_CARRIED, BOARD_QUEUE_STATE_DIR: stateDir, PATH: '/usr/bin:/bin' };
+      const fakes = launchctlRecorder(space.directory);
+
+      const before = await space.run(['install-launchd', '--check'], { home, env: { ...env, PATH: `${fakes}:/usr/bin:/bin` } });
+      const madeNothing = !existsSync(stateDir) && !existsSync(join(home, 'Library'));
+      const installed = await space.run(['install-launchd'], { home, env });
+      const after = await space.run(['install-launchd', '--check'], { home, env });
+
+      assert.equal(before.code, 1, before.err);
+      assert.ok(madeNothing, 'install-launchd --check wrote something');
+      assert.equal(existsSync(join(space.directory, 'launchctl.argv')), false, 'install-launchd --check ran launchctl');
+      assert.equal(existsSync(`${command}.argv`), false, 'install-launchd --check ran a pass');
+      assert.equal(installed.code, 0, installed.err);
+      assert.deepEqual(lines(before.out), [written(installed.out, '.plist'), written(installed.out, '.sh')]);
+      assert.equal(before.err, '');
+      assert.deepEqual([after.code, after.out, after.err], [0, '', '']);
+    });
+  });
+
+  it('names only the file an install would change, a launcher that lost its mode included', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const tools = join(space.directory, 'tools');
+      mkdirSync(tools);
+      const installed = await space.run(['install-launchd'], { home, env: NOTHING_CARRIED });
+      const plist = written(installed.out, '.plist');
+      const launcher = written(installed.out, '.sh');
+
+      const otherPath = await space.run(['install-launchd', '--check'], {
+        home,
+        env: { ...NOTHING_CARRIED, PATH: `${tools}:${process.env['PATH'] ?? ''}` },
+      });
+      chmodSync(launcher, 0o644);
+      const notExecutable = await space.run(['install-launchd', '--check'], { home, env: NOTHING_CARRIED });
+
+      assert.equal(installed.code, 0, installed.err);
+      assert.deepEqual([otherPath.code, lines(otherPath.out)], [1, [plist]], otherPath.err);
+      assert.deepEqual([notExecutable.code, lines(notExecutable.out)], [1, [launcher]], notExecutable.err);
+    });
+  });
+
+  it('says which files install-systemd would write, and is quiet once they are current', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+
+      const before = await space.run(['install-systemd', '--check'], { home, env: NOTHING_CARRIED });
+      const madeNothing = !existsSync(join(home, '.config'));
+      const installed = await space.run(['install-systemd'], { home, env: NOTHING_CARRIED });
+      const current = await space.run(['install-systemd', '--check'], { home, env: NOTHING_CARRIED });
+      const timer = written(installed.out, '.timer');
+      writeFileSync(timer, `${readFileSync(timer, 'utf8')}# edited by hand\n`, 'utf8');
+      const edited = await space.run(['install-systemd', '--check'], { home, env: NOTHING_CARRIED });
+
+      assert.equal(before.code, 1, before.err);
+      assert.ok(madeNothing, 'install-systemd --check wrote something');
+      assert.equal(installed.code, 0, installed.err);
+      assert.deepEqual(lines(before.out), [
+        written(installed.out, '.service'),
+        timer,
+        written(installed.out, '.sh'),
+      ]);
+      assert.deepEqual([current.code, current.out, current.err], [0, '', '']);
+      assert.deepEqual([edited.code, lines(edited.out)], [1, [timer]], edited.err);
+    });
+  });
+
+  it('answers a check it cannot make with a code of its own and a sentence, never one that reads as a change', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      mkdirSync(home, { recursive: true });
+
+      const noCommand = await space.run(['install-launchd', '--check'], { home, env: NOTHING_CARRIED });
+      fakeCommand(home);
+      const noConfig = await space.run(['install-systemd', '--check'], {
+        home,
+        env: { ...NOTHING_CARRIED, BOARD_QUEUE_CONFIG: join(space.directory, 'nowhere.json') },
+      });
+
+      assert.equal(noCommand.code, 2);
+      assert.equal(noCommand.out, '');
+      assert.match(noCommand.err, /no board-queue command at/);
+      assert.equal(noConfig.code, 2);
+      assert.equal(noConfig.out, '');
+      assert.match(noConfig.err, /no configuration at/);
+      assert.equal(existsSync(join(home, 'Library')) || existsSync(join(home, '.config')), false);
+    });
+  });
+
+  it('checks against a configuration found at its previous place without moving it', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const previous = join(home, '.claude', 'tools', 'board-queue', 'config.json');
+      mkdirSync(dirname(previous), { recursive: true });
+      writeFileSync(previous, readFileSync(space.configPath, 'utf8'), 'utf8');
+
+      const checked = await space.run(['install-launchd', '--check'], {
+        home,
+        env: { ...NOTHING_CARRIED, BOARD_QUEUE_CONFIG: '' },
+      });
+
+      assert.equal(checked.code, 1, checked.err);
+      assert.equal(existsSync(join(home, '.config', 'board-queue', 'config.json')), false, 'the check copied the configuration');
+    });
+  });
+
+  it('gives two installs that share a state directory a launcher each, and both stay current', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const second = join(space.directory, 'second.json');
+      writeFileSync(second, readFileSync(space.configPath, 'utf8'), 'utf8');
+      const otherEnv = { ...NOTHING_CARRIED, BOARD_QUEUE_CONFIG: second };
+
+      const first = await space.run(['install-launchd'], { home, env: NOTHING_CARRIED });
+      const other = await space.run(['install-launchd'], { home, env: otherEnv });
+      const firstNames = await space.run(['schedule-names'], { home, env: NOTHING_CARRIED });
+      const otherNames = await space.run(['schedule-names'], { home, env: otherEnv });
+      const firstCheck = await space.run(['install-launchd', '--check'], { home, env: NOTHING_CARRIED });
+      const otherCheck = await space.run(['install-launchd', '--check'], { home, env: otherEnv });
+
+      assert.equal(first.code + other.code, 0, first.err + other.err);
+      const firstLauncher = written(first.out, '.sh');
+      const otherLauncher = written(other.out, '.sh');
+      assert.notEqual(firstLauncher, otherLauncher);
+      assert.equal(dirname(firstLauncher), space.stateDir);
+      assert.equal(dirname(otherLauncher), space.stateDir);
+      assert.ok(lines(firstNames.out).includes(`launcher=${firstLauncher}`), firstNames.out);
+      assert.ok(lines(otherNames.out).includes(`launcher=${otherLauncher}`), otherNames.out);
+      assert.ok(readFileSync(written(other.out, '.plist'), 'utf8').includes(`<string>${otherLauncher}</string>`));
+      assert.deepEqual([firstCheck.code, firstCheck.out], [0, ''], firstCheck.err);
+      assert.deepEqual([otherCheck.code, otherCheck.out], [0, ''], otherCheck.err);
     });
   });
 
@@ -808,9 +1002,9 @@ describe('the queue on a command line', () => {
     await workspace(async (space) => {
       const home = join(space.directory, 'home');
       const command = fakeCommand(home);
-      await space.run(['install-launchd'], { home, env: NOTHING_CARRIED });
+      const installed = await space.run(['install-launchd'], { home, env: NOTHING_CARRIED });
 
-      const ran = spawnSync('/bin/sh', [join(space.stateDir, 'board-queue-tick.sh')], {
+      const ran = spawnSync('/bin/sh', [written(installed.out, '.sh')], {
         encoding: 'utf8',
         env: { PATH: '/usr/bin:/bin', HOME: home },
       });
@@ -874,4 +1068,43 @@ function assertLauncherRunsThroughTheCommand(launcher: string, launcherPath: str
   assert.match(launcher, /^NODE='\/.+'$/m);
   assert.match(launcher, /^exec "\$COMMAND" tick$/m);
   assert.ok((statSync(launcherPath).mode & 0o111) !== 0, 'the launcher is not executable');
+}
+
+/**
+ * A directory holding a `launchctl` that records that it was run, beside the
+ * workspace, for a command that must not run it.
+ */
+function launchctlRecorder(directory: string): string {
+  const fakes = join(directory, 'fakes');
+  mkdirSync(fakes, { recursive: true });
+  const launchctl = join(fakes, 'launchctl');
+  writeFileSync(launchctl, ['#!/bin/sh', `printf '%s\\n' "$@" >> '${join(directory, 'launchctl.argv')}'`, ''].join('\n'), 'utf8');
+  chmodSync(launchctl, 0o755);
+  return fakes;
+}
+
+/**
+ * A home whose configuration is only at its previous place and whose state
+ * directory is not made yet, for an install that is going to be refused: the
+ * environment to run it with, and the check that it copied no configuration,
+ * made no state directory and wrote no job file or launcher.
+ */
+function beforeARefusedInstall(space: Workspace, home: string): {
+  env: Record<string, string>;
+  assertNothingWritten: () => void;
+} {
+  const previous = join(home, '.claude', 'tools', 'board-queue', 'config.json');
+  mkdirSync(dirname(previous), { recursive: true });
+  writeFileSync(previous, readFileSync(space.configPath, 'utf8'), 'utf8');
+  const stateDir = join(space.directory, 'not yet made');
+  return {
+    env: { ...NOTHING_CARRIED, BOARD_QUEUE_CONFIG: '', BOARD_QUEUE_STATE_DIR: stateDir },
+    assertNothingWritten: () => {
+      assert.equal(existsSync(join(home, '.config', 'board-queue', 'config.json')), false, 'the configuration was copied');
+      assert.equal(existsSync(stateDir), false, 'the state directory was made');
+      assert.equal(existsSync(join(stateDir, 'board-queue-tick.sh')), false, 'a launcher was written');
+      assert.equal(existsSync(join(home, 'Library', 'LaunchAgents')), false, 'a job description was written');
+      assert.equal(existsSync(join(home, '.config', 'systemd')), false, 'a unit was written');
+    },
+  };
 }

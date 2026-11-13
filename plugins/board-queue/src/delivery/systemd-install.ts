@@ -1,8 +1,17 @@
 import path from 'node:path';
 import { RefusedByRule } from '../domain/errors.ts';
 import type { CarriedVariable } from './schedule-environment.ts';
-import { earlierJob, jobEnvironment, render, shellWord, templateNamed, write, writeLauncher } from './schedule-files.ts';
-import type { JobOptions, Launcher } from './schedule-files.ts';
+import {
+  earlierJob,
+  jobEnvironment,
+  render,
+  renderLauncher,
+  shellWord,
+  nothingToSettle,
+  templateNamed,
+  writeRendered,
+} from './schedule-files.ts';
+import type { JobOptions, Launcher, RenderedSchedule } from './schedule-files.ts';
 
 /** What the units of an install at the default places are called, before the suffix that says which unit. */
 const UNIT_STEM = 'board-queue';
@@ -46,16 +55,15 @@ export type SystemdOptions = JobOptions & {
 };
 
 /**
- * Writes the Linux user units — a one-shot service and the timer that starts
- * it — and the launcher the service runs, and answers what went where.
- *
- * As with the macOS job, nothing is enabled here: the person runs the commands
- * this prints, which are also the ones that show or stop the job later.
+ * The Linux user units — a one-shot service and the timer that starts it — and
+ * the launcher the service runs, as an install writes them, and what goes
+ * where; nothing is written. Installing and asking whether an install would
+ * change anything both start here, so the two never differ.
  */
-export function installSystemdUnits(options: SystemdOptions): SystemdInstallation {
-  const launcher = writeLauncher(options);
+export function renderSystemdUnits(options: SystemdOptions): RenderedSchedule<SystemdInstallation> {
+  const launcher = renderLauncher(options);
   const installation: SystemdInstallation = {
-    ...launcher,
+    ...launcher.installation,
     ...systemdUnitNames(options.home, options.configHome, options.instance),
     earlierJobPath: earlierJob(options.instance, systemdUnitNames(options.home, options.configHome, null).timerPath),
   };
@@ -69,9 +77,29 @@ export function installSystemdUnits(options: SystemdOptions): SystemdInstallatio
     INTERVAL: unitText(String(installation.intervalSec)),
     SERVICE: unitText(installation.serviceUnit),
   });
-  write(installation.servicePath, service);
-  write(installation.timerPath, timer);
-  return installation;
+  return {
+    installation,
+    files: [
+      { path: installation.servicePath, contents: service, mode: null },
+      { path: installation.timerPath, contents: timer, mode: null },
+      ...launcher.files,
+    ],
+  };
+}
+
+/**
+ * Writes the Linux user units and the launcher the service runs, and answers
+ * what went where. Everything is rendered before anything is written, and
+ * `beforeWriting` runs between the two, so a refused install writes nothing.
+ *
+ * As with the macOS job, nothing is enabled here: the person runs the commands
+ * this prints, which are also the ones that show or stop the job later.
+ */
+export function installSystemdUnits(
+  options: SystemdOptions,
+  beforeWriting: () => void = nothingToSettle,
+): SystemdInstallation {
+  return writeRendered(renderSystemdUnits(options), beforeWriting);
 }
 
 /** The value of `Environment=`: one double-quoted `NAME=value` word per variable. */

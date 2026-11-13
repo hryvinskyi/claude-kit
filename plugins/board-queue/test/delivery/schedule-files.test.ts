@@ -1,28 +1,38 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { z } from 'zod';
-import { installSchedule, loadCommands, reloadCommands, removeCommands } from '../../src/delivery/launchd-install.ts';
-import { SEARCH_PATH, jobEnvironment, writeLauncher } from '../../src/delivery/schedule-files.ts';
+import { installSchedule, loadCommands, reloadCommands, removeCommands, renderSchedule } from '../../src/delivery/launchd-install.ts';
+import {
+  SCHEDULER_LOG_CAP_BYTES,
+  SEARCH_PATH,
+  jobEnvironment,
+  render,
+  renderLauncher,
+  staleScheduleFiles,
+  writeScheduleFiles,
+} from '../../src/delivery/schedule-files.ts';
 import type { JobOptions } from '../../src/delivery/schedule-files.ts';
 import {
   enableCommands,
   installSystemdUnits,
   reloadCommands as reloadUnitCommands,
   removeCommands as removeUnitCommands,
+  renderSystemdUnits,
 } from '../../src/delivery/systemd-install.ts';
 import { RefusedByRule } from '../../src/domain/errors.ts';
 
 /**
  * A directory name that every one of the three formats has to carry as it is: a
  * space, both quotes, an ampersand and angle brackets, a variable, two command
- * substitutions, a percent sign and a backslash. A path that loses or runs any of
- * it reaches the wrong file, or runs `touch` in the job's directory.
+ * substitutions, a percent sign, a backslash, and the name of a placeholder the
+ * templates fill. A path that loses or runs any of it reaches the wrong file, or
+ * runs `touch` in the job's directory.
  */
-const HOSTILE = 'it\'s "q" & <x> $HOME $(touch pwned) `touch pwned` 50% \\x';
+const HOSTILE = 'it\'s "q" & <x> $HOME $(touch pwned) `touch pwned` 50% \\x {{LOG}}';
 
 type Sandbox = {
   directory: string;
@@ -180,7 +190,9 @@ function withoutVariables(word: string): string {
 describe('schedule files of a home whose path holds every character a format reads', () => {
   it('writes a launcher that the shell reads and that runs the command with the Node it names', async () => {
     await sandbox((space) => {
-      const launcher = writeLauncher(space.options);
+      const rendered = renderLauncher(space.options);
+      writeScheduleFiles(rendered.files);
+      const launcher = rendered.installation;
 
       const parsed = spawnSync('/bin/sh', ['-n', launcher.launcherPath], { encoding: 'utf8' });
 
@@ -236,6 +248,7 @@ describe('schedule files of a home whose path holds every character a format rea
 
       assert.throws(() => installSystemdUnits(options), RefusedByRule);
       assert.equal(existsSync(join(options.home, '.config', 'systemd', 'user', 'board-queue.service')), false);
+      assert.equal(existsSync(join(options.stateDir, 'board-queue-tick.sh')), false, 'a launcher was written');
     });
   });
 
@@ -245,6 +258,7 @@ describe('schedule files of a home whose path holds every character a format rea
 
       assert.throws(() => installSchedule(options), RefusedByRule);
       assert.equal(existsSync(join(options.home, 'Library', 'LaunchAgents', 'com.user.board-queue.plist')), false);
+      assert.equal(existsSync(join(options.stateDir, 'board-queue-tick.sh')), false, 'a launcher was written');
     });
   });
 });
@@ -477,6 +491,184 @@ describe('the search path a scheduled pass starts with', () => {
       const words = unitWords(withoutSpecifiers(setting(settings, 'Environment')));
 
       assert.deepEqual(words, [`PATH=${[...own, SEARCH_PATH].join(':')}`]);
+    });
+  });
+});
+
+describe('filling a template in', () => {
+  it('puts each value in as it is, never reading a value\'s own text as a placeholder', () => {
+    const filled = render('from {{FIRST}} to {{SECOND}}', { FIRST: '/home/{{SECOND}}/a', SECOND: '/state/{{NOBODY}}' });
+
+    assert.equal(filled, 'from /home/{{SECOND}}/a to /state/{{NOBODY}}');
+  });
+
+  it('refuses a template with a placeholder nothing was supplied for, naming it', () => {
+    assert.throws(() => render('{{FIRST}} and {{MISSING}}', { FIRST: 'one' }), (error: unknown) => {
+      assert.ok(error instanceof RefusedByRule);
+      assert.match(error.message, /\{\{MISSING\}\}/);
+      return true;
+    });
+  });
+});
+
+describe('the log of the scheduled job', () => {
+  it('keeps the plain name for an install at the default places, so an existing log stays where it is', async () => {
+    await sandbox((space) => {
+      const launchd = installSchedule(space.options);
+      const systemd = installSystemdUnits({ ...space.options, configHome: null });
+
+      assert.equal(launchd.logPath, join(space.options.stateDir, 'launchd.log'));
+      assert.equal(systemd.logPath, launchd.logPath);
+    });
+  });
+
+  it('is a file of its own for each install that shares a state directory with another', async () => {
+    await sandbox((space) => {
+      const first = installSchedule(space.options);
+      const second = installSchedule({ ...space.options, instance: '0123456789ab' });
+      const units = installSystemdUnits({ ...space.options, instance: '0123456789ab', configHome: null });
+      const settings = unitSettings(readFileSync(units.servicePath, 'utf8'));
+
+      assert.equal(second.logPath, join(space.options.stateDir, 'launchd.0123456789ab.log'));
+      assert.notEqual(second.logPath, first.logPath);
+      assert.ok(readFileSync(second.plistPath, 'utf8').includes(`<string>${xmlEscaped(second.logPath)}</string>`));
+      assert.equal(withoutSpecifiers(setting(settings, 'StandardOutput')), `append:${second.logPath}`);
+      assert.equal(withoutSpecifiers(setting(settings, 'StandardError')), `append:${second.logPath}`);
+    });
+  });
+});
+
+/** A value as the plist writes it inside an element. */
+function xmlEscaped(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll('\'', '&apos;');
+}
+
+describe('the launcher of the scheduled job', () => {
+  it('keeps the plain name for an install at the default places, so an existing launcher stays where it is', async () => {
+    await sandbox((space) => {
+      const installation = installSchedule(space.options);
+
+      assert.equal(installation.launcherPath, join(space.options.stateDir, 'board-queue-tick.sh'));
+    });
+  });
+
+  it('is a file of its own for each of two installs that share a state directory and run different Node binaries',
+    async () => {
+      await sandbox((space) => {
+        const otherNode = join(space.root, 'other node', 'node');
+        executable(otherNode, ['#!/bin/sh', 'exit 0']);
+        const first = { ...space.options, instance: '0123456789ab' };
+        const second = { ...space.options, instance: 'ba9876543210', nodePath: otherNode };
+
+        const firstJob = installSchedule(first);
+        const firstUnits = installSystemdUnits({ ...first, configHome: null });
+        const secondJob = installSchedule(second);
+        const secondUnits = installSystemdUnits({ ...second, configHome: null });
+
+        assert.equal(firstJob.launcherPath, join(space.options.stateDir, 'board-queue-tick.0123456789ab.sh'));
+        assert.equal(secondJob.launcherPath, join(space.options.stateDir, 'board-queue-tick.ba9876543210.sh'));
+        assert.equal(firstUnits.launcherPath, firstJob.launcherPath);
+        assert.match(readFileSync(firstJob.launcherPath, 'utf8'), new RegExp(`^NODE='[^\\n]*/node bin/node'$`, 'm'));
+        assert.match(readFileSync(secondJob.launcherPath, 'utf8'), new RegExp(`^NODE='[^\\n]*/other node/node'$`, 'm'));
+        assert.deepEqual(staleScheduleFiles(renderSchedule(first).files), [], 'the second install changed the first one\'s files');
+        assert.deepEqual(staleScheduleFiles(renderSchedule(second).files), []);
+        assert.deepEqual(staleScheduleFiles(renderSystemdUnits({ ...first, configHome: null }).files), []);
+        assert.deepEqual(staleScheduleFiles(renderSystemdUnits({ ...second, configHome: null }).files), []);
+        const service = unitSettings(readFileSync(secondUnits.servicePath, 'utf8'));
+        assert.deepEqual(unitWords(withoutSpecifiers(setting(service, 'ExecStart'))).map(withoutVariables),
+          ['/bin/sh', secondJob.launcherPath]);
+        assert.ok(readFileSync(secondJob.plistPath, 'utf8').includes(`<string>${xmlEscaped(secondJob.launcherPath)}</string>`));
+      });
+    });
+});
+
+/** A file of exactly `bytes` bytes, every one of them a letter. */
+function fileOf(file: string, bytes: number, letter: string): void {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, letter.repeat(bytes), 'utf8');
+}
+
+describe('the bound on the log of the scheduled job', () => {
+  it('moves a log past the cap aside before the pass, replacing the one moved aside before', async () => {
+    await sandbox((space) => {
+      const installation = installSchedule({ ...space.options, instance: '0123456789ab' });
+      fileOf(installation.logPath, SCHEDULER_LOG_CAP_BYTES + 1, 'n');
+      fileOf(`${installation.logPath}.1`, 10, 'o');
+
+      runJob(space, ['/bin/sh', installation.launcherPath]);
+
+      assert.equal(existsSync(installation.logPath), false, 'the log past the cap is still there');
+      assert.equal(statSync(`${installation.logPath}.1`).size, SCHEDULER_LOG_CAP_BYTES + 1);
+      assert.equal(readFileSync(`${installation.logPath}.1`, 'utf8').charAt(0), 'n');
+    });
+  });
+
+  it('leaves a log at the cap where it is', async () => {
+    await sandbox((space) => {
+      const installation = installSchedule(space.options);
+      fileOf(installation.logPath, SCHEDULER_LOG_CAP_BYTES, 'n');
+
+      runJob(space, ['/bin/sh', installation.launcherPath]);
+
+      assert.equal(statSync(installation.logPath).size, SCHEDULER_LOG_CAP_BYTES);
+      assert.equal(existsSync(`${installation.logPath}.1`), false);
+    });
+  });
+
+  it('runs the pass when there is no log yet', async () => {
+    await sandbox((space) => {
+      const installation = installSystemdUnits({ ...space.options, configHome: null });
+
+      runJob(space, ['/bin/sh', installation.launcherPath]);
+
+      assert.equal(existsSync(`${installation.logPath}.1`), false);
+    });
+  });
+});
+
+/** Whether this process can write where its mode says it may not: root can, so a read-only directory proves nothing. */
+const IGNORES_MODES = process.getuid?.() === 0;
+
+describe('an install that could not write all of its files', () => {
+  it('is refused before anything is settled or written when the job\'s directory may not be written',
+    { skip: IGNORES_MODES ? 'root writes whatever the mode says' : false }, async () => {
+      await sandbox((space) => {
+        const agents = join(space.options.home, 'Library', 'LaunchAgents');
+        mkdirSync(agents, { recursive: true });
+        chmodSync(agents, 0o555);
+        let settled = false;
+        try {
+          assert.throws(() => installSchedule(space.options, () => {
+            settled = true;
+          }), (error: unknown) => {
+            assert.ok(error instanceof RefusedByRule);
+            assert.match(error.message, /cannot be written/);
+            return true;
+          });
+          assert.throws(() => staleScheduleFiles(renderSchedule(space.options).files), RefusedByRule);
+        } finally {
+          chmodSync(agents, 0o755);
+        }
+
+        assert.equal(settled, false, 'the install settled its places before it was refused');
+        assert.equal(existsSync(join(space.options.stateDir, 'board-queue-tick.sh')), false, 'a launcher was written');
+      });
+    });
+
+  it('is refused before anything is settled or written when a unit has a directory where the file goes', async () => {
+    await sandbox((space) => {
+      const options = { ...space.options, configHome: null };
+      mkdirSync(join(options.home, '.config', 'systemd', 'user', 'board-queue.timer'), { recursive: true });
+      let settled = false;
+
+      assert.throws(() => installSystemdUnits(options, () => {
+        settled = true;
+      }), RefusedByRule);
+
+      assert.equal(settled, false, 'the install settled its places before it was refused');
+      assert.equal(existsSync(join(options.home, '.config', 'systemd', 'user', 'board-queue.service')), false);
+      assert.equal(existsSync(join(options.stateDir, 'board-queue-tick.sh')), false, 'a launcher was written');
     });
   });
 });

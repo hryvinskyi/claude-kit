@@ -6,8 +6,9 @@ import { ACTION_STATES, isActionState } from '../application/action-states.ts';
 import type { EnqueueRequest } from '../application/enqueue-action.ts';
 import type { ActionFilter } from '../application/ports.ts';
 import type { ActionState } from '../domain/action.ts';
+import type { Config } from '../domain/config.ts';
 import { RefusedByRule } from '../domain/errors.ts';
-import { configPath, defaultConfigPath, loadConfig } from '../infrastructure/config-file.ts';
+import { adoptConfig, configPath, defaultConfigPath, loadConfig, readConfig } from '../infrastructure/config-file.ts';
 import { dibsTokenFileVariables } from '../infrastructure/dibs-token.ts';
 import { defaultStateDir, stateDir, stateDirNamedBy } from '../infrastructure/paths.ts';
 import { auditLines } from './audit-text.ts';
@@ -32,20 +33,22 @@ import { checkServiceCredentials } from '../infrastructure/service-credentials.t
 import {
   installSchedule,
   launchdJobNames,
+  renderSchedule,
   loadCommands,
   reloadCommands,
   removeCommands as unloadCommands,
 } from './launchd-install.ts';
 import { BRIEF_STATES, briefLines, briefOf } from './repository-brief.ts';
 import { carriedEnvironment, installSearchPath } from './schedule-environment.ts';
-import { launcherPathIn } from './schedule-files.ts';
-import type { JobOptions } from './schedule-files.ts';
+import { launcherPathIn, schedulerLogIn, staleScheduleFiles } from './schedule-files.ts';
+import type { JobOptions, ScheduleFile } from './schedule-files.ts';
 import { scheduleInstance } from './schedule-instance.ts';
 import {
   enableCommands,
   installSystemdUnits,
   reloadCommands as reloadUnitCommands,
   removeCommands as disableCommands,
+  renderSystemdUnits,
   systemdUnitNames,
 } from './systemd-install.ts';
 
@@ -410,11 +413,16 @@ function commandShim(context: CommandContext): string {
  * from are carried into the job as they are set now, and they decide the job's
  * name, so a second install for another configuration or queue gets a job of
  * its own.
+ *
+ * Nothing is written to find them: the configuration is read where it is, and
+ * the state directory is named, not made. An install settles both only once
+ * its files rendered (`settleInstallPlaces`); a check never does.
  */
 function jobOptions(context: CommandContext): JobOptions {
   const env = process.env;
-  const sync = loadConfig(env).dibs;
-  const state = path.resolve(context.cwd, stateDir());
+  const config: Config = readConfig(env);
+  const sync = config.dibs;
+  const state = path.resolve(context.cwd, stateDirNamedBy(env, context.home));
   return {
     home: context.home,
     nodePath: context.nodePath,
@@ -481,16 +489,67 @@ const scheduleNames: Command = {
       ['plist', job.plistPath],
       ['service', units.servicePath],
       ['timer', units.timerPath],
-      ['launcher', launcherPathIn(state)],
+      ['launcher', launcherPathIn(state, instance)],
+      ['log', schedulerLogIn(state, instance)],
     ]);
   },
 };
 
+/**
+ * What an install settles on disk once its files rendered and before they are
+ * written: a configuration found only at its previous location is copied to the
+ * current one, and the state directory is made, owner-only.
+ */
+function settleInstallPlaces(): void {
+  adoptConfig(process.env);
+  stateDir();
+}
+
+/** What `--check` exits with: every file is as an install would write it. */
+const CHECK_CURRENT = 0;
+/** What `--check` exits with: an install would write at least one file. */
+const CHECK_WOULD_WRITE = 1;
+/** What `--check` exits with when it cannot tell, a sentence on the error stream saying why. */
+const CHECK_FAILED = 2;
+
+const CHECK_FLAG: FlagSpec = { check: { type: 'boolean' } };
+
+/**
+ * Prints each file an install would write, one path to a line, and answers the
+ * code that says whether there was any. The files are rendered by the same code
+ * the install writes them with; nothing is written and nothing is loaded. A
+ * check that fails exits with a code of its own rather than 1, so a failure is
+ * never read as a change.
+ */
+function checkedFiles(context: CommandContext, rendered: () => readonly ScheduleFile[]): number {
+  let stale: string[];
+  try {
+    stale = staleScheduleFiles(rendered());
+    for (const file of stale) {
+      if (/[\r\n]/.test(file)) {
+        throw new RefusedByRule(`the path ${JSON.stringify(file)} holds a line break, which a line of its own cannot carry`);
+      }
+    }
+  } catch (error) {
+    context.err(sentenceOf(error));
+    return CHECK_FAILED;
+  }
+  for (const file of stale) {
+    context.out(file);
+  }
+  return stale.length === 0 ? CHECK_CURRENT : CHECK_WOULD_WRITE;
+}
+
 const installLaunchd: Command = {
-  usage: 'install-launchd',
-  summary: 'write the macOS scheduler files and print the commands that start them',
+  usage: 'install-launchd [--check]',
+  summary: 'write the macOS scheduler files and print the commands that start them; with --check, print the '
+    + 'files it would write, write nothing, and exit 0 when none, 1 when some, 2 when it cannot tell',
+  flags: CHECK_FLAG,
   run: async (context) => {
-    const installation = installSchedule(jobOptions(context));
+    if (context.flags.on('check')) {
+      return checkedFiles(context, () => renderSchedule(jobOptions(context)).files);
+    }
+    const installation = installSchedule(jobOptions(context), settleInstallPlaces);
     context.out(`wrote ${installation.plistPath}`);
     context.out(`wrote ${installation.launcherPath}`);
     context.out(`it runs ${installation.commandPath} with ${installation.nodePath} `
@@ -507,10 +566,15 @@ const installLaunchd: Command = {
 };
 
 const installSystemd: Command = {
-  usage: 'install-systemd',
-  summary: 'write the Linux user units and print the commands that start them',
+  usage: 'install-systemd [--check]',
+  summary: 'write the Linux user units and print the commands that start them; with --check, print the '
+    + 'files it would write, write nothing, and exit 0 when none, 1 when some, 2 when it cannot tell',
+  flags: CHECK_FLAG,
   run: async (context) => {
-    const installation = installSystemdUnits({ ...jobOptions(context), configHome: context.configHome });
+    if (context.flags.on('check')) {
+      return checkedFiles(context, () => renderSystemdUnits({ ...jobOptions(context), configHome: context.configHome }).files);
+    }
+    const installation = installSystemdUnits({ ...jobOptions(context), configHome: context.configHome }, settleInstallPlaces);
     context.out(`wrote ${installation.servicePath}`);
     context.out(`wrote ${installation.timerPath}`);
     context.out(`wrote ${installation.launcherPath}`);

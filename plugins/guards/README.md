@@ -237,7 +237,7 @@ variable assigned on the line (`BQ=board-queue; $BQ tick`), its entry point run 
 `npx -c` / `npm exec -c|--call` with a command line running it, the package's `cli` script run by `npm`,
 `pnpm` or `yarn` (`yarn workspace <name> run cli tick`, options before or after the script), `tick` handed
 to it by `xargs` (also as `{}`), and the launcher the schedule runs
-(`board-queue-tick.sh`) — whatever variables are set or exported first, the schedule's own
+(`board-queue-tick.sh`, or `board-queue-tick.<12 hex digits>.sh` for an install with names of its own) — whatever variables are set or exported first, the schedule's own
 `BOARD_QUEUE_SCHEDULED=1` included, and inside a loop, `timeout`, `env`, `bash -c` or a substitution. A
 program the guard cannot name (`"$(command -v board-queue)"`, a variable it cannot read) handed `tick` is
 refused as well. A syntax check (`bash -n`, `node --check`) runs nothing and passes. The refusal points at

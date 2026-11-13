@@ -1,8 +1,17 @@
 import path from 'node:path';
 import { RefusedByRule } from '../domain/errors.ts';
 import type { CarriedVariable } from './schedule-environment.ts';
-import { earlierJob, jobEnvironment, render, shellWord, templateNamed, write, writeLauncher } from './schedule-files.ts';
-import type { JobOptions, Launcher } from './schedule-files.ts';
+import {
+  earlierJob,
+  jobEnvironment,
+  render,
+  renderLauncher,
+  shellWord,
+  nothingToSettle,
+  templateNamed,
+  writeRendered,
+} from './schedule-files.ts';
+import type { JobOptions, Launcher, RenderedSchedule } from './schedule-files.ts';
 
 /** The name the scheduler knows the job of an install at the default places by. */
 export const SCHEDULE_LABEL = 'com.user.board-queue';
@@ -30,30 +39,40 @@ export function launchdJobNames(home: string, instance: string | null): LaunchdJ
 }
 
 /**
- * Writes the macOS job description and the launcher it runs, and answers what
- * went where.
- *
- * Nothing is loaded here. Handing the two commands to the person instead of
- * running them keeps the moment a background job starts running on this machine a
- * decision somebody took, and the commands are the same ones they would use to
- * look at it later.
+ * The macOS job description and the launcher it runs, as an install writes
+ * them, and what goes where; nothing is written. Installing and asking whether
+ * an install would change anything both start here, so the two never differ.
  */
-export function installSchedule(options: JobOptions): ScheduleInstallation {
-  const launcher = writeLauncher(options);
+export function renderSchedule(options: JobOptions): RenderedSchedule<ScheduleInstallation> {
+  const launcher = renderLauncher(options);
   const installation: ScheduleInstallation = {
-    ...launcher,
+    ...launcher.installation,
     ...launchdJobNames(options.home, options.instance),
     earlierJobPath: earlierJob(options.instance, launchdJobNames(options.home, null).plistPath),
   };
-  write(installation.plistPath, render(templateNamed('com.user.board-queue.plist.template'), {
+  const plist = render(templateNamed('com.user.board-queue.plist.template'), {
     LABEL: xmlText(installation.label),
     LAUNCHER: xmlText(installation.launcherPath),
     INTERVAL: xmlText(String(installation.intervalSec)),
     LOG: xmlText(installation.logPath),
     WORKDIR: xmlText(installation.workDir),
     ENVIRONMENT: plistEnvironment(jobEnvironment(options)),
-  }));
-  return installation;
+  });
+  return { installation, files: [{ path: installation.plistPath, contents: plist, mode: null }, ...launcher.files] };
+}
+
+/**
+ * Writes the macOS job description and the launcher it runs, and answers what
+ * went where. Everything is rendered before anything is written, and
+ * `beforeWriting` runs between the two, so a refused install writes nothing.
+ *
+ * Nothing is loaded here. Handing the two commands to the person instead of
+ * running them keeps the moment a background job starts running on this machine a
+ * decision somebody took, and the commands are the same ones they would use to
+ * look at it later.
+ */
+export function installSchedule(options: JobOptions, beforeWriting: () => void = nothingToSettle): ScheduleInstallation {
+  return writeRendered(renderSchedule(options), beforeWriting);
 }
 
 /** The entries of the job's `EnvironmentVariables` dictionary, one key and its string each. */

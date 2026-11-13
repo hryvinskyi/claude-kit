@@ -7,13 +7,23 @@
 # the program the schedule started it. The command reads the optional
 # credentials itself; see the package README for where they live.
 #
-# Both absolute paths below are written when this file is installed, because a
+# The absolute paths below are written when this file is installed, because a
 # scheduled job starts with neither a checkout's directory nor a person's search
 # path, and each is single-quoted so that no character of it is read by the shell. A package manager moves its binaries on every upgrade, so a vanished
 # Node falls back to whatever the search path in the job description finds;
 # re-run the install command to pin the new one exactly.
 NODE='{{NODE}}'
 COMMAND='{{COMMAND}}'
+LOG='{{LOG}}'
+
+# The scheduler appends everything a pass prints to LOG, and nothing else ever
+# trims it. Past LOG_CAP bytes it is moved to LOG.1, replacing the one moved
+# there before. The scheduler opened LOG before this ran, so this pass's own
+# output still lands in LOG.1; the next pass starts a new LOG.
+LOG_CAP={{LOGCAP}}
+if [ -f "$LOG" ] && [ "$(($(wc -c < "$LOG")))" -gt "$LOG_CAP" ]; then
+  mv -f "$LOG" "$LOG.1"
+fi
 
 [ -x "$NODE" ] || NODE="$(command -v node)"
 BOARD_QUEUE_NODE="$NODE"
