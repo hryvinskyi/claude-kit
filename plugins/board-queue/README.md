@@ -617,6 +617,7 @@ board-queue audit [--json]
 board-queue brief --repo example-org/example-repo
 board-queue install-launchd   # macOS
 board-queue install-systemd   # Linux
+board-queue schedule-names    # the names those two give this install's job; writes nothing
 board-queue help
 ```
 
@@ -668,7 +669,6 @@ cp ~/src/claude-kit/plugins/board-queue/config.example.json ~/.config/board-queu
                                                              # name the boards, their repositories, the fields
 board-queue install-launchd                                  # macOS; install-systemd on Linux
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.board-queue.plist
-launchctl kickstart -k gui/$(id -u)/com.user.board-queue
 ```
 
 The plugin starts the MCP server itself (`.mcp.json`, as `plugin:board-queue:board-queue`; its tools are
@@ -685,21 +685,56 @@ config.json`, is read from there once, copied to the current one, and a line on 
 moved and the old file can go.
 
 `install-launchd` writes the job description and the small launcher it runs
-(`board-queue-tick.sh` in the state directory); `install-systemd` writes a one-shot
-`board-queue.service` and a `board-queue.timer` under `${XDG_CONFIG_HOME:-~/.config}/systemd/user/` and the
-same launcher, and prints `systemctl --user daemon-reload` and `systemctl --user enable --now
-board-queue.timer`. Every path is absolute and baked in — a scheduled job starts with neither a checkout's
-directory nor a person's search path — and the launcher runs the pass through `~/.local/bin/board-queue`,
-so it keeps working when the plugin moves. Both commands refuse while that command is not installed, and
-print what to run without running it. The launcher also sets `BOARD_QUEUE_SCHEDULED=1`,
+(`board-queue-tick.sh` in the state directory); `install-systemd` writes a one-shot service and its timer
+under `${XDG_CONFIG_HOME:-~/.config}/systemd/user/` and the same launcher. The job's names are
+`com.user.board-queue` and `board-queue.service`/`board-queue.timer` for an install at the default places,
+and names of their own otherwise (*Two installs on one machine*, below); `board-queue schedule-names` prints
+them, with the launcher's path, as `label=`, `plist=`, `service=`, `timer=` and `launcher=` lines,
+without writing anything. Every path is absolute
+and baked in — a scheduled job starts with no checkout's directory — and the launcher runs the pass through
+`~/.local/bin/board-queue`, so it keeps working when the plugin moves. Both commands refuse while that
+command is not installed, and print what to run without running it: `launchctl bootstrap` (the job's
+`RunAtLoad` runs a pass at once) or `systemctl --user daemon-reload` and `enable --now` for a job that is
+not loaded yet. A job that is loaded already reads a changed description only when it is loaded again:
+`launchctl bootout`, a wait of up to 30 seconds until `launchctl print` no longer finds the label (launchd
+finishes the bootout after the command returns and refuses an early `bootstrap`), and then `bootstrap` on macOS — `kickstart -k`
+restarts it with the description it read before — and `systemctl --user daemon-reload` and `restart` of the timer on Linux. Every path in a printed
+command is single-quoted, so a home with a space or a quote in it is pasted as it is. The launcher also sets
+`BOARD_QUEUE_SCHEDULED=1`,
 and `tick` refuses to run without it: the per-pass cap only spreads the writes over five-minute windows
 if nobody runs passes back to back, and a session that empties the queue by hand is spending the
 allowance every other session shares. A person operating the schedule sets the variable by hand
 (`BOARD_QUEUE_SCHEDULED=1 board-queue tick`); a session reads `status` and waits. Run it again whenever an
 upgrade moves the Node binary; until then the launcher falls back to whichever `node` the job's own path
 finds. The job runs every 300 seconds and appends to `launchd.log` in the state directory. `launchctl print
-gui/$(id -u)/com.user.board-queue` shows what the system thinks of it; `launchctl bootout` removes it
-(`systemctl --user status board-queue.timer` and `disable --now` on Linux).
+gui/$(id -u)/<label>` shows what the system thinks of it; `launchctl bootout` removes it
+(`systemctl --user status <timer>` and `disable --now` on Linux). Both install commands print the
+exact commands that stop and remove the job they wrote.
+
+**What the job is handed.** A scheduler starts a job with a bare environment, so the install writes into the
+job description (the plist's `EnvironmentVariables`, the service's `Environment=`) every variable that tells
+a pass where to read from, as it is set when the install runs: `BOARD_QUEUE_CONFIG`, `BOARD_QUEUE_STATE_DIR`,
+`BOARD_QUEUE_ENV`, `BOARD_QUEUE_IDENTITY`, `XDG_CONFIG_HOME` (when absolute), `DIBS_CONFIG_DIR`,
+`GH_CONFIG_DIR`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` (and the older
+`GITHUB_APP_PRIVATE_KEY` while it names a file), and the `_FILE` twin of the variable the configuration names
+for the coordination server's token. A relative path is resolved against the directory the install ran in.
+The job's `PATH` is the install's own search path — its absolute directories that exist, each once — and
+then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, so the `gh` a pass falls back to is found
+wherever the person's shell found it. A token never goes into a job description: `GH_TOKEN`, `GITHUB_TOKEN`
+and the token variable itself are left out, and a variable that should name a key's or a token's file — the
+two key variables, the `_FILE` variable the configuration names for the token, and any carried path whose
+name says `KEY` or `TOKEN` — is carried only when it names a regular file; a key's text, base64 or not, is refused by the variable's name, never repeated. The install
+reads the configuration first and refuses when there is none. Run the install again after changing any of
+these.
+
+**Two installs on one machine.** An install whose configuration and state directory are the default ones
+of its own environment (`${XDG_CONFIG_HOME:-~/.config}/board-queue/config.json`, `~/.claude/state/board-queue`)
+keeps the plain names. Any other pair
+gets names of its own, derived from the two paths: `com.user.board-queue.<12 hex digits>` on macOS,
+`board-queue-<12 hex digits>.service` and `.timer` on Linux. Running the same install again replaces its own
+job; an install for another configuration or queue adds a second job instead of overwriting the first. When
+an install under a derived name finds a job under the default name, it says so: if that job was written
+earlier for the same configuration and queue, remove it with the default name's commands, or both run passes.
 
 ### One queue per person
 

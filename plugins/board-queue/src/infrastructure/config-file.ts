@@ -37,9 +37,12 @@ function configHome(env: Env): string {
 
 export function configPath(env: Env = process.env): string {
   const configured = env[CONFIG_VAR]?.trim();
-  return configured === undefined || configured === ''
-    ? path.join(configHome(env), 'board-queue', 'config.json')
-    : configured;
+  return configured === undefined || configured === '' ? defaultConfigPath(env) : configured;
+}
+
+/** Where the configuration is read from when the environment names no file: under its configuration home. */
+export function defaultConfigPath(env: Env = process.env): string {
+  return path.join(configHome(env), 'board-queue', 'config.json');
 }
 
 /**

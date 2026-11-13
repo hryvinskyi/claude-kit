@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { GitHubGraphqlBoard } from '../../src/infrastructure/github-graphql-board.ts';
 import { GitHubHttp } from '../../src/infrastructure/github-http.ts';
-import { IssueNotFound, TransientFailure } from '../../src/domain/errors.ts';
+import { IssueNotFound, RefusedByRule, TransientFailure } from '../../src/domain/errors.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import type { FieldCatalog } from '../../src/domain/catalog.ts';
 import { FakeFetch, budgetHeaders, type ScriptedResponse } from '../fakes/fake-fetch.ts';
@@ -30,6 +30,7 @@ const CATALOG_ANSWER = {
             },
             null,
           ],
+          pageInfo: { hasNextPage: false, endCursor: null },
         },
       },
     },
@@ -41,6 +42,7 @@ function itemNode(id: string, repo: string, number: number, status: string): unk
     id,
     content: { number, repository: { nameWithOwner: repo } },
     fieldValues: {
+      pageInfo: { hasNextPage: false },
       nodes: [
         {},
         { name: status, field: { name: 'Status' } },
@@ -110,7 +112,7 @@ describe('GitHubGraphqlBoard catalog', () => {
     assert.deepEqual(catalog.fields[0]?.options, []);
     assert.equal(store.writes, 1);
     assert.equal(fetcher.calls[0]?.operationName, 'BoardCatalog');
-    assert.deepEqual(fetcher.calls[0]?.variables, { owner: 'example-org', number: 7 });
+    assert.deepEqual(fetcher.calls[0]?.variables, { owner: 'example-org', number: 7, cursor: null });
     assert.match(fetcher.calls[0]?.query ?? '', /owner: organization\(login: \$owner\)/);
     assert.equal((await store.get())?.fetchedAt.getTime(), clock.now().getTime());
   });
@@ -148,6 +150,40 @@ describe('GitHubGraphqlBoard catalog', () => {
     const { gateway, fetcher } = board([{ headers: HEADERS, body: CATALOG_ANSWER }], store);
     await gateway.catalog();
     assert.equal(fetcher.calls.length, 1);
+  });
+
+  it('reads every field of a board whose fields run past one page', async () => {
+    const page = (nodes: readonly unknown[], hasNextPage: boolean, endCursor: string | null): unknown => ({
+      data: { owner: { projectV2: { id: 'PVT_board', title: 'Delivery', fields: { nodes, pageInfo: { hasNextPage, endCursor } } } } },
+    });
+    const { gateway, fetcher, store } = board([
+      { headers: HEADERS, body: page([{ id: 'F_title', name: 'Title', dataType: 'TITLE' }], true, 'fields-1') },
+      {
+        headers: HEADERS,
+        body: page([{
+          id: 'F_severity',
+          name: 'Severity',
+          dataType: 'SINGLE_SELECT',
+          options: [{ id: 'o_s1', name: 'S1' }],
+        }], false, null),
+      },
+    ]);
+
+    const catalog = await gateway.catalog();
+
+    assert.deepEqual(catalog.fields.map((field) => field.name), ['Title', 'Severity']);
+    assert.deepEqual(fetcher.calls.map((call) => call.variables['cursor']), [null, 'fields-1']);
+    assert.equal(store.writes, 1, 'the vocabulary is kept once, whole');
+  });
+
+  it('refuses a field page that promises another without saying where it starts', async () => {
+    const { gateway, store } = board([{
+      headers: HEADERS,
+      body: { data: { owner: { projectV2: { id: 'PVT_board', fields: { nodes: [], pageInfo: { hasNextPage: true, endCursor: null } } } } } },
+    }]);
+
+    await assert.rejects(() => gateway.catalog(), TransientFailure);
+    assert.equal(store.writes, 0);
   });
 
   it('fetches again when asked to, however young the kept vocabulary is', async () => {
@@ -286,7 +322,7 @@ describe('GitHubGraphqlBoard listing', () => {
               issueDependenciesSummary: { totalBlockedBy: 2 },
               subIssuesSummary: { total: 0 },
             },
-            fieldValues: { nodes: [] },
+            fieldValues: { pageInfo: { hasNextPage: false }, nodes: [] },
           }] } } },
         },
       },
@@ -330,6 +366,22 @@ describe('GitHubGraphqlBoard listing', () => {
     }]);
 
     await assert.rejects(() => gateway.snapshot(), TransientFailure);
+  });
+
+  it('refuses a walk with a row whose values run past one page, rather than reading part of it', async () => {
+    const crowded = {
+      id: 'PVTI_crowded',
+      content: { number: 12, repository: { nameWithOwner: 'example-org/first-repo' } },
+      fieldValues: { pageInfo: { hasNextPage: true }, nodes: [{ name: 'Todo', field: { name: 'Status' } }] },
+    };
+    const { gateway, fetcher } = board([{ headers: HEADERS, body: snapshotPage([crowded], false, null) }]);
+
+    await assert.rejects(() => gateway.snapshot(), (error: unknown) => {
+      assert.ok(error instanceof RefusedByRule);
+      assert.match(error.describe(), /PVTI_crowded/);
+      return true;
+    });
+    assert.equal(fetcher.calls.length, 1, 'one walk, not a request per row');
   });
 
   it('answers which of several issues are on the board from one walk', async () => {
@@ -436,6 +488,17 @@ describe('GitHubGraphqlBoard writes', () => {
     assert.equal(item.ref.toString(), 'example-org/first-repo#12');
     assert.equal(item.values['Status'], 'In progress');
     assert.deepEqual(fetcher.calls[0]?.variables, { itemId: 'PVTI_one' });
+  });
+
+  it('refuses to read back a row whose values run past one page', async () => {
+    const node = {
+      id: 'PVTI_one',
+      content: { number: 12, repository: { nameWithOwner: 'example-org/first-repo' } },
+      fieldValues: { pageInfo: { hasNextPage: true }, nodes: [] },
+    };
+    const { gateway } = board([{ headers: HEADERS, body: { data: { node } } }]);
+
+    await assert.rejects(() => gateway.readItemById('PVTI_one'), RefusedByRule);
   });
 
   it('writes one option on one field of one row', async () => {

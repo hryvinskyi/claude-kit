@@ -21,8 +21,7 @@
     <string>{{WORKDIR}}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>PATH</key>
-        <string>{{PATH}}</string>
+{{ENVIRONMENT}}
     </dict>
 </dict>
 </plist>

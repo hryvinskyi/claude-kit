@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { BoardGateway, CatalogStore, Clock } from '../application/ports.ts';
 import { boardNameOf, type BoardIdentity, type BoardOwnerType } from '../domain/board-directory.ts';
 import type { BoardSnapshot, CatalogField, FieldCatalog, IssueFacts, ReadItemResult } from '../domain/catalog.ts';
-import { IssueNotFound, TransientFailure } from '../domain/errors.ts';
+import { IssueNotFound, RefusedByRule, TransientFailure } from '../domain/errors.ts';
 import { IssueRef } from '../domain/issue-ref.ts';
 import { RateBudget } from '../domain/rate-budget.ts';
 import { decodeWire, type GitHubHttp, type GraphqlError } from './github-http.ts';
@@ -16,8 +16,22 @@ const OWNER_ROOT: Record<BoardOwnerType, string> = {
 const DEFAULT_SNAPSHOT_TTL_SEC = 60;
 const ITEM_PAGE_SIZE = 100;
 
+/**
+ * The largest page a connection answers. A field page or a row's values page
+ * costs the same points at this size as at any smaller one — the cost follows
+ * how many pages are asked for, not how long each is — so nothing is saved by
+ * asking for less, and what a shorter page left out would read as missing.
+ */
+const FULL_PAGE = 100;
+
+/**
+ * A row's values, a whole page of them. They are read inside the walk of the
+ * rows, which a second page per row would turn into a request per row; a row
+ * whose values run past the page is refused instead (`valuesOf`).
+ */
 const FIELD_VALUES = `
-  fieldValues(first: 20) {
+  fieldValues(first: ${String(FULL_PAGE)}) {
+    pageInfo { hasNextPage }
     nodes {
       ... on ProjectV2ItemFieldSingleSelectValue {
         name
@@ -57,12 +71,13 @@ const WORK_SELECTION = `
 ${FIELD_VALUES}`;
 
 const catalogQuery = (root: string): string => `
-query BoardCatalog($owner: String!, $number: Int!) {
+query BoardCatalog($owner: String!, $number: Int!, $cursor: String) {
   owner: ${root}(login: $owner) {
     projectV2(number: $number) {
       id
       title
-      fields(first: 30) {
+      fields(first: ${String(FULL_PAGE)}, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           ... on ProjectV2FieldCommon { id name dataType }
           ... on ProjectV2SingleSelectField { options { id name } }
@@ -120,6 +135,11 @@ query BudgetProbe {
   rateLimit { remaining limit used resetAt cost }
 }`;
 
+const PageInfo = z.object({
+  hasNextPage: z.boolean(),
+  endCursor: z.string().nullable().optional(),
+});
+
 const CatalogPayload = z.object({
   owner: z
     .object({
@@ -129,6 +149,7 @@ const CatalogPayload = z.object({
           title: z.string().nullable().optional(),
           fields: z
             .object({
+              pageInfo: PageInfo,
               nodes: z
                 .array(
                   z
@@ -155,7 +176,10 @@ const ItemNode = z.object({
   id: z.string(),
   content: z.unknown().optional(),
   fieldValues: z
-    .object({ nodes: z.array(z.unknown()).nullable().optional() })
+    .object({
+      pageInfo: z.object({ hasNextPage: z.boolean() }),
+      nodes: z.array(z.unknown()).nullable().optional(),
+    })
     .nullable()
     .optional(),
 });
@@ -188,10 +212,7 @@ const SnapshotPayload = z.object({
       projectV2: z
         .object({
           items: z.object({
-            pageInfo: z.object({
-              hasNextPage: z.boolean(),
-              endCursor: z.string().nullable().optional(),
-            }),
+            pageInfo: PageInfo,
             nodes: z.array(ItemNode.nullable()).nullable().optional(),
           }),
         })
@@ -275,32 +296,38 @@ export class GitHubGraphqlBoard implements BoardGateway {
       }
     }
     const subject = 'the board catalog';
-    const payload = decodeWire(
-      CatalogPayload,
-      await this.http.graphql(
-        catalogQuery(OWNER_ROOT[this.board.ownerType]),
-        { owner: this.board.owner, number: this.board.number },
-        subject,
-      ),
-      subject,
-    );
-    const project = payload.owner?.projectV2 ?? null;
-    if (project === null) {
-      throw new TransientFailure(`${subject} answered no project for ${this.boardName()}`);
-    }
+    const query = catalogQuery(OWNER_ROOT[this.board.ownerType]);
     const fields: CatalogField[] = [];
-    for (const node of project.fields?.nodes ?? []) {
-      if (node === null) {
-        continue;
+    let projectId: string | null = null;
+    let cursor: string | null = null;
+    for (;;) {
+      const payload: z.infer<typeof CatalogPayload> = decodeWire(
+        CatalogPayload,
+        await this.http.graphql(query, { owner: this.board.owner, number: this.board.number, cursor }, subject),
+        subject,
+      );
+      const project = payload.owner?.projectV2 ?? null;
+      if (project === null) {
+        throw new TransientFailure(`${subject} answered no project for ${this.boardName()}`);
       }
-      fields.push({
-        id: node.id,
-        name: node.name,
-        dataType: node.dataType,
-        options: (node.options ?? []).map((option) => ({ id: option.id, name: option.name })),
-      });
+      projectId = project.id;
+      for (const node of project.fields?.nodes ?? []) {
+        if (node === null) {
+          continue;
+        }
+        fields.push({
+          id: node.id,
+          name: node.name,
+          dataType: node.dataType,
+          options: (node.options ?? []).map((option) => ({ id: option.id, name: option.name })),
+        });
+      }
+      cursor = nextCursor(project.fields?.pageInfo ?? null, subject);
+      if (cursor === null) {
+        break;
+      }
     }
-    const catalog: FieldCatalog = { projectId: project.id, fields };
+    const catalog: FieldCatalog = { projectId, fields };
     await this.catalogStore.put(catalog, this.clock.now());
     return catalog;
   }
@@ -354,15 +381,10 @@ export class GitHubGraphqlBoard implements BoardGateway {
           items.push(item);
         }
       }
-      if (!project.items.pageInfo.hasNextPage) {
+      cursor = nextCursor(project.items.pageInfo, subject);
+      if (cursor === null) {
         break;
       }
-      const next = project.items.pageInfo.endCursor ?? null;
-      if (next === null) {
-        // A page that claims a successor but names no cursor would loop forever.
-        throw new TransientFailure(`${subject} promised another page without saying where it starts`);
-      }
-      cursor = next;
     }
     return { fetchedAt: this.clock.now(), items, unreadable, cost };
   }
@@ -545,6 +567,22 @@ function isUnreadableRow(error: GraphqlError): boolean {
     && path[at + 3] === 'content';
 }
 
+/**
+ * Where the next page of a connection starts, or nothing when this page was the
+ * last. A page that claims a successor but names no cursor would loop forever, so
+ * it is refused.
+ */
+function nextCursor(pageInfo: z.infer<typeof PageInfo> | null, subject: string): string | null {
+  if (pageInfo === null || !pageInfo.hasNextPage) {
+    return null;
+  }
+  const next = pageInfo.endCursor ?? null;
+  if (next === null) {
+    throw new TransientFailure(`${subject} promised another page without saying where it starts`);
+  }
+  return next;
+}
+
 /** The board carries several repositories whose numbers collide; both must agree. */
 function matchIn(snapshot: BoardSnapshot, ref: IssueRef): ReadItemResult | null {
   return snapshot.items.find((item) => item.ref.equals(ref)) ?? null;
@@ -556,6 +594,33 @@ function toReadItem(node: z.infer<typeof ItemNode>): ReadItemResult | null {
   if (!content.success) {
     return null;
   }
+  const item: ReadItemResult = {
+    itemId: node.id,
+    ref: IssueRef.of(content.data.repository.nameWithOwner, content.data.number),
+    values: valuesOf(node),
+  };
+  const facts = factsOf(content.data);
+  if (facts !== null) {
+    item.issue = facts;
+  }
+  return item;
+}
+
+/**
+ * The row's single-select values by field name.
+ *
+ * A row whose values run past one page is refused rather than read in part: a
+ * value left on the next page would read as unset, and a value this queue wrote
+ * would then fail its read-back or be written again. A project holds fewer
+ * fields than a page carries, so this answers only a board that outgrew that.
+ */
+function valuesOf(node: z.infer<typeof ItemNode>): Record<string, string> {
+  if (node.fieldValues?.pageInfo.hasNextPage === true) {
+    throw new RefusedByRule(
+      `the board row ${node.id} holds more field values than one page of ${String(FULL_PAGE)} carries; `
+      + 'reading part of them would hide a value this queue writes',
+    );
+  }
   const values: Record<string, string> = {};
   for (const raw of node.fieldValues?.nodes ?? []) {
     const value = SingleSelectValue.safeParse(raw);
@@ -563,16 +628,7 @@ function toReadItem(node: z.infer<typeof ItemNode>): ReadItemResult | null {
       values[value.data.field.name] = value.data.name;
     }
   }
-  const item: ReadItemResult = {
-    itemId: node.id,
-    ref: IssueRef.of(content.data.repository.nameWithOwner, content.data.number),
-    values,
-  };
-  const facts = factsOf(content.data);
-  if (facts !== null) {
-    item.issue = facts;
-  }
-  return item;
+  return values;
 }
 
 /** The issue's own facts, when the row answered every one of them. */

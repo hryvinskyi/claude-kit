@@ -1,16 +1,33 @@
 import path from 'node:path';
 import { RefusedByRule } from '../domain/errors.ts';
-import { SEARCH_PATH, render, templateNamed, write, writeLauncher } from './schedule-files.ts';
-import type { Launcher, ScheduleOptions } from './schedule-files.ts';
+import type { CarriedVariable } from './schedule-environment.ts';
+import { earlierJob, jobEnvironment, render, shellWord, templateNamed, write, writeLauncher } from './schedule-files.ts';
+import type { JobOptions, Launcher } from './schedule-files.ts';
 
-/** The name the scheduler knows this job by, and the name every command below names. */
+/** The name the scheduler knows the job of an install at the default places by. */
 export const SCHEDULE_LABEL = 'com.user.board-queue';
 
-export type ScheduleInstallation = Launcher & {
-  label: string;
+/** What the scheduler knows an install's job by, and where its description is. */
+export type LaunchdJobNames = {
+  /** The name the scheduler knows this job by, and the name every command below names. */
+  readonly label: string;
   /** The job description the scheduler reads. */
-  plistPath: string;
+  readonly plistPath: string;
 };
+
+export type ScheduleInstallation = Launcher & LaunchdJobNames & {
+  /** A job under the default name this one stands beside, for a person to look at; null when there is none. */
+  earlierJobPath: string | null;
+};
+
+/**
+ * The names of an install's job: the default label, or the default label with
+ * the install's own name after it, and the description named after the label.
+ */
+export function launchdJobNames(home: string, instance: string | null): LaunchdJobNames {
+  const label = instance === null ? SCHEDULE_LABEL : `${SCHEDULE_LABEL}.${instance}`;
+  return { label, plistPath: path.join(home, 'Library', 'LaunchAgents', `${label}.plist`) };
+}
 
 /**
  * Writes the macOS job description and the launcher it runs, and answers what
@@ -21,12 +38,12 @@ export type ScheduleInstallation = Launcher & {
  * decision somebody took, and the commands are the same ones they would use to
  * look at it later.
  */
-export function installSchedule(options: ScheduleOptions): ScheduleInstallation {
+export function installSchedule(options: JobOptions): ScheduleInstallation {
   const launcher = writeLauncher(options);
   const installation: ScheduleInstallation = {
     ...launcher,
-    label: SCHEDULE_LABEL,
-    plistPath: path.join(options.home, 'Library', 'LaunchAgents', `${SCHEDULE_LABEL}.plist`),
+    ...launchdJobNames(options.home, options.instance),
+    earlierJobPath: earlierJob(options.instance, launchdJobNames(options.home, null).plistPath),
   };
   write(installation.plistPath, render(templateNamed('com.user.board-queue.plist.template'), {
     LABEL: xmlText(installation.label),
@@ -34,9 +51,16 @@ export function installSchedule(options: ScheduleOptions): ScheduleInstallation 
     INTERVAL: xmlText(String(installation.intervalSec)),
     LOG: xmlText(installation.logPath),
     WORKDIR: xmlText(installation.workDir),
-    PATH: xmlText(SEARCH_PATH),
+    ENVIRONMENT: plistEnvironment(jobEnvironment(options)),
   }));
   return installation;
+}
+
+/** The entries of the job's `EnvironmentVariables` dictionary, one key and its string each. */
+function plistEnvironment(variables: readonly CarriedVariable[]): string {
+  return variables
+    .map(([name, value]) => `        <key>${xmlText(name)}</key>\n        <string>${xmlText(value)}</string>`)
+    .join('\n');
 }
 
 /** The characters XML 1.0 does not allow in a document at all, escaped or not. */
@@ -63,13 +87,44 @@ function xmlText(value: string): string {
 }
 
 /**
- * The commands that start the job, in the order they are run: the first
- * registers it, the second runs it once now instead of waiting out the interval.
- * The second is also what re-reads a description that changed.
+ * The command that starts a job that is not loaded: it registers the
+ * description, and the description's `RunAtLoad` runs a pass at once instead of
+ * waiting out the interval.
  */
-export function loadCommands(installation: ScheduleInstallation): string[] {
+export function loadCommands(installation: LaunchdJobNames): string[] {
+  return [`launchctl bootstrap gui/$(id -u) ${shellWord(installation.plistPath)}`];
+}
+
+/** How many one-second waits a reload gives launchd to finish a bootout. */
+const WAIT_TRIES = 30;
+
+/**
+ * The commands that make a job loaded under this label read its description
+ * again, in the order they are run. launchd reads a description only when the
+ * job is bootstrapped, so the job is unloaded and registered again; restarting
+ * it (`kickstart -k`) would run it with the description it read before.
+ * launchd finishes unloading after `bootout` returns and refuses a `bootstrap`
+ * of the label until then, so the second command waits for the label to go:
+ * at most `WAIT_TRIES` seconds, so a job a failed `bootout` left loaded still
+ * reaches the `bootstrap`, whose refusal then says what is wrong.
+ */
+export function reloadCommands(installation: LaunchdJobNames): string[] {
   return [
-    `launchctl bootstrap gui/$(id -u) ${installation.plistPath}`,
-    `launchctl kickstart -k gui/$(id -u)/${installation.label}`,
+    `launchctl bootout gui/$(id -u)/${installation.label}`,
+    `tries=0; while [ "$tries" -lt ${String(WAIT_TRIES)} ] && launchctl print "gui/$(id -u)/${installation.label}" `
+    + '>/dev/null 2>&1; do sleep 1; tries=$((tries + 1)); done',
+    ...loadCommands(installation),
+  ];
+}
+
+
+/**
+ * The commands that stop the job and remove its description, in the order they
+ * are run. They name this install's label, so another install's job stays.
+ */
+export function removeCommands(installation: LaunchdJobNames): string[] {
+  return [
+    `launchctl bootout gui/$(id -u)/${installation.label}`,
+    `rm ${shellWord(installation.plistPath)}`,
   ];
 }

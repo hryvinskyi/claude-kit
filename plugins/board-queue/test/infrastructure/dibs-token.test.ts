@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { ConfigSchema } from '../../src/domain/config.ts';
 import { RefusedByRule } from '../../src/domain/errors.ts';
-import { dibsToken } from '../../src/infrastructure/dibs-token.ts';
+import { dibsToken, dibsTokenFileVariables } from '../../src/infrastructure/dibs-token.ts';
 import { syncConfig, syncOf } from '../fixtures/sync.ts';
 
 const TOKEN = 'dibs_tokentokentokentokentokentokentoken';
@@ -52,5 +52,15 @@ describe('the coordination server\'s token, from the source the configuration na
     const read = dibsToken(withToken({ from: 'dibs-login' }), { DIBS_CONFIG_DIR: '/nowhere' });
 
     assert.throws(read, RefusedByRule);
+  });
+});
+
+describe('the variables that name a file the coordination server\'s token is read from', () => {
+  it('is the _FILE twin of the variable an env source names, and never that variable', () => {
+    assert.deepEqual(dibsTokenFileVariables(withToken({ from: 'env', env: 'DIBS_LAPTOP_TOKEN' })), ['DIBS_LAPTOP_TOKEN_FILE']);
+  });
+
+  it('is none for a stored login, whose place the dibs tool\'s own variables name', () => {
+    assert.deepEqual(dibsTokenFileVariables(withToken({ from: 'dibs-login' })), []);
   });
 });

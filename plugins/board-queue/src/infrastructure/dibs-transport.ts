@@ -154,6 +154,11 @@ function causeOf(cause: unknown): string {
   return 'the reason was not stated';
 }
 
+/** The variable naming the file a token is read from, beside the one that holds it. */
+export function tokenFileVariable(name: string): string {
+  return `${name}_FILE`;
+}
+
 /**
  * The integration's token, from the environment variable the configuration
  * names, or from the file that variable's `_FILE` twin names — the form a
@@ -166,7 +171,7 @@ function causeOf(cause: unknown): string {
  * call sends, and its value is never repeated anywhere.
  */
 export function tokenFromEnvironment(env: Readonly<Record<string, string | undefined>>, name: string): () => string {
-  const fileVariable = `${name}_FILE`;
+  const fileVariable = tokenFileVariable(name);
   return () => {
     const value = (env[name] ?? '').trim();
     const file = (env[fileVariable] ?? '').trim();

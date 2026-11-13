@@ -19,10 +19,7 @@ const OWNER_ONLY_DIR = 0o700;
  * process on the machine could otherwise read.
  */
 export function stateDir(): string {
-  const configured = process.env[STATE_DIR_VAR]?.trim();
-  const dir = configured === undefined || configured === ''
-    ? path.join(os.homedir(), '.claude', 'state', 'board-queue')
-    : configured;
+  const dir = stateDirNamedBy(process.env, os.homedir());
   fs.mkdirSync(dir, { recursive: true, mode: OWNER_ONLY_DIR });
   // A directory that already existed keeps the mode it was created with, and the
   // one this system made before this rule existed was the umask's. Narrowing it
@@ -34,6 +31,20 @@ export function stateDir(): string {
     // Left as it is; the files inside still ask for owner-only permissions.
   }
   return dir;
+}
+
+/**
+ * The state directory an environment names, as it is written there, or the
+ * default one under `home`; nothing is created.
+ */
+export function stateDirNamedBy(env: Readonly<Record<string, string | undefined>>, home: string): string {
+  const configured = env[STATE_DIR_VAR]?.trim();
+  return configured === undefined || configured === '' ? defaultStateDir(home) : configured;
+}
+
+/** Where the state lives when nothing names another place. */
+export function defaultStateDir(home: string): string {
+  return path.join(home, '.claude', 'state', 'board-queue');
 }
 
 /**

@@ -1,7 +1,7 @@
 import type { DibsTokenSource, DibsTokenSourceName, SyncConfig } from '../domain/sync-config.ts';
 import { tokenFromDibsLogin } from './dibs-login.ts';
 import type { DibsLoginDeps } from './dibs-login.ts';
-import { tokenFromEnvironment } from './dibs-transport.ts';
+import { tokenFileVariable, tokenFromEnvironment } from './dibs-transport.ts';
 
 /** What every source of the token may read: the environment, and where the dibs tool keeps its login. */
 export type DibsTokenContext = {
@@ -23,6 +23,17 @@ const READERS: { readonly [K in DibsTokenSourceName]: TokenReader<K> } = {
   'dibs-login': (_source, context) => tokenFromDibsLogin(context),
 };
 
+/** Which variables, per source, name a file the token is read from. */
+const FILE_VARIABLES: { readonly [K in DibsTokenSourceName]: (source: DibsTokenSource<K>) => string[] } = {
+  env: (source) => [tokenFileVariable(source.env)],
+  'dibs-login': () => [],
+};
+
+function fileVariablesOf<K extends DibsTokenSourceName>(source: DibsTokenSource<K>): string[] {
+  const variables: (source: DibsTokenSource<K>) => string[] = FILE_VARIABLES[source.from];
+  return variables(source);
+}
+
 function readerOf<K extends DibsTokenSourceName>(source: DibsTokenSource<K>, context: DibsTokenContext): () => string {
   const read: TokenReader<K> = READERS[source.from];
   return read(source, context);
@@ -39,4 +50,13 @@ export function dibsToken(
   where: Pick<DibsTokenContext, 'platform' | 'home'> = {},
 ): () => string {
   return readerOf(sync.token, { env, server: sync.server, project: sync.project, ...where });
+}
+
+/**
+ * The variables that name a file the configured token is read from: what a
+ * scheduled pass may be handed so that it reads the token where this process
+ * would. Never the variable that holds the token itself.
+ */
+export function dibsTokenFileVariables(sync: SyncConfig): string[] {
+  return fileVariablesOf(sync.token);
 }

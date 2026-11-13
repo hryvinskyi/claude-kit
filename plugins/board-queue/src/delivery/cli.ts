@@ -7,8 +7,9 @@ import type { EnqueueRequest } from '../application/enqueue-action.ts';
 import type { ActionFilter } from '../application/ports.ts';
 import type { ActionState } from '../domain/action.ts';
 import { RefusedByRule } from '../domain/errors.ts';
-import { loadConfig } from '../infrastructure/config-file.ts';
-import { stateDir } from '../infrastructure/paths.ts';
+import { configPath, defaultConfigPath, loadConfig } from '../infrastructure/config-file.ts';
+import { dibsTokenFileVariables } from '../infrastructure/dibs-token.ts';
+import { defaultStateDir, stateDir, stateDirNamedBy } from '../infrastructure/paths.ts';
 import { auditLines } from './audit-text.ts';
 import { buildContainer } from './container.ts';
 import type { Container } from './container.ts';
@@ -28,9 +29,25 @@ import { runsAsTheService } from './local-identity.ts';
 import { DECLINES, declineOf, declineReasonOf } from '../application/service-duty.ts';
 import type { Decline } from '../application/service-duty.ts';
 import { checkServiceCredentials } from '../infrastructure/service-credentials.ts';
-import { installSchedule, loadCommands } from './launchd-install.ts';
+import {
+  installSchedule,
+  launchdJobNames,
+  loadCommands,
+  reloadCommands,
+  removeCommands as unloadCommands,
+} from './launchd-install.ts';
 import { BRIEF_STATES, briefLines, briefOf } from './repository-brief.ts';
-import { enableCommands, installSystemdUnits } from './systemd-install.ts';
+import { carriedEnvironment, installSearchPath } from './schedule-environment.ts';
+import { launcherPathIn } from './schedule-files.ts';
+import type { JobOptions } from './schedule-files.ts';
+import { scheduleInstance } from './schedule-instance.ts';
+import {
+  enableCommands,
+  installSystemdUnits,
+  reloadCommands as reloadUnitCommands,
+  removeCommands as disableCommands,
+  systemdUnitNames,
+} from './systemd-install.ts';
 
 /**
  * The queue on a command line: for a person looking at it, and for the scripts
@@ -384,16 +401,96 @@ function commandShim(context: CommandContext): string {
   return path.join(context.home, '.local', 'bin', 'board-queue');
 }
 
+/**
+ * What either scheduler's job is written from, as this install finds it.
+ *
+ * The configuration is read first: a job for a configuration this install
+ * cannot read would fail every pass, and the configuration names the variable
+ * whose file holds the coordination server's token. The places the pass reads
+ * from are carried into the job as they are set now, and they decide the job's
+ * name, so a second install for another configuration or queue gets a job of
+ * its own.
+ */
+function jobOptions(context: CommandContext): JobOptions {
+  const env = process.env;
+  const sync = loadConfig(env).dibs;
+  const state = path.resolve(context.cwd, stateDir());
+  return {
+    home: context.home,
+    nodePath: context.nodePath,
+    stateDir: state,
+    commandPath: commandShim(context),
+    environment: carriedEnvironment(env, context.cwd, sync === undefined ? [] : dibsTokenFileVariables(sync)),
+    searchPath: installSearchPath(env['PATH']),
+    instance: instanceAt(context, env, state),
+  };
+}
+
+/**
+ * What sets the job of an install with this environment apart, from the
+ * configuration and the state directory it names. Its default places are the
+ * ones this same environment gives when it names neither — the configuration
+ * under its own configuration home — so an install at its default places keeps
+ * the plain name whichever configuration home it has.
+ */
+function instanceAt(context: CommandContext, env: NodeJS.ProcessEnv, state: string): string | null {
+  return scheduleInstance(
+    { configPath: path.resolve(context.cwd, configPath(env)), stateDir: state },
+    { configPath: defaultConfigPath(env), stateDir: defaultStateDir(context.home) },
+  );
+}
+
+/** Commands to run, one to a line, set in from the sentence that introduces them. */
+function indented(context: CommandContext, commands: readonly string[]): void {
+  for (const line of commands) {
+    context.out(`  ${line}`);
+  }
+}
+
+/** The lines that say how to take the job away again, and what else may be running beside it. */
+function removalLines(context: CommandContext, commands: readonly string[], earlierJobPath: string | null): void {
+  context.out('to stop it and remove it:');
+  indented(context, commands);
+  if (earlierJobPath !== null) {
+    context.out(`a job under the default name is also at ${earlierJobPath}; if an earlier install for this same `
+      + 'configuration and queue wrote it, stop and remove it, or both will run passes');
+  }
+}
+
+/** One `name=value` line per name, so that a script reads each with a prefix match. */
+function nameLines(context: CommandContext, names: readonly (readonly [string, string])[]): void {
+  for (const [name, value] of names) {
+    if (/[\r\n]/.test(value)) {
+      throw new RefusedByRule(`the ${name} of this install's job holds a line break, which a line of its own cannot carry`);
+    }
+    context.out(`${name}=${value}`);
+  }
+}
+
+const scheduleNames: Command = {
+  usage: 'schedule-names',
+  summary: 'print the names install-launchd and install-systemd give this install\'s job; it writes nothing',
+  run: async (context) => {
+    const env = process.env;
+    const state = path.resolve(context.cwd, stateDirNamedBy(env, context.home));
+    const instance = instanceAt(context, env, state);
+    const job = launchdJobNames(context.home, instance);
+    const units = systemdUnitNames(context.home, context.configHome, instance);
+    nameLines(context, [
+      ['label', job.label],
+      ['plist', job.plistPath],
+      ['service', units.servicePath],
+      ['timer', units.timerPath],
+      ['launcher', launcherPathIn(state)],
+    ]);
+  },
+};
+
 const installLaunchd: Command = {
   usage: 'install-launchd',
-  summary: 'write the macOS scheduler files and print the two commands that start them',
+  summary: 'write the macOS scheduler files and print the commands that start them',
   run: async (context) => {
-    const installation = installSchedule({
-      home: context.home,
-      nodePath: context.nodePath,
-      stateDir: stateDir(),
-      commandPath: commandShim(context),
-    });
+    const installation = installSchedule(jobOptions(context));
     context.out(`wrote ${installation.plistPath}`);
     context.out(`wrote ${installation.launcherPath}`);
     context.out(`it runs ${installation.commandPath} with ${installation.nodePath} `
@@ -401,24 +498,19 @@ const installLaunchd: Command = {
     context.out(`and writes to ${installation.logPath}`);
     context.out('run install-launchd again whenever an upgrade moves that Node binary; until then the '
       + 'launcher falls back to whichever node the scheduled job finds on its own search path');
-    context.out('nothing is loaded yet; to start it:');
-    for (const line of loadCommands(installation)) {
-      context.out(`  ${line}`);
-    }
+    context.out('this command loads nothing; to start the job:');
+    indented(context, loadCommands(installation));
+    context.out('if it is loaded already, to make it read this description:');
+    indented(context, reloadCommands(installation));
+    removalLines(context, unloadCommands(installation), installation.earlierJobPath);
   },
 };
 
 const installSystemd: Command = {
   usage: 'install-systemd',
-  summary: 'write the Linux user units and print the two commands that start them',
+  summary: 'write the Linux user units and print the commands that start them',
   run: async (context) => {
-    const installation = installSystemdUnits({
-      home: context.home,
-      nodePath: context.nodePath,
-      stateDir: stateDir(),
-      commandPath: commandShim(context),
-      configHome: context.configHome,
-    });
+    const installation = installSystemdUnits({ ...jobOptions(context), configHome: context.configHome });
     context.out(`wrote ${installation.servicePath}`);
     context.out(`wrote ${installation.timerPath}`);
     context.out(`wrote ${installation.launcherPath}`);
@@ -427,10 +519,11 @@ const installSystemd: Command = {
     context.out(`and writes to ${installation.logPath}`);
     context.out('run install-systemd again whenever an upgrade moves that Node binary; until then the '
       + 'launcher falls back to whichever node the service finds on its own search path');
-    context.out('nothing is enabled yet; to start it:');
-    for (const line of enableCommands()) {
-      context.out(`  ${line}`);
-    }
+    context.out('this command enables nothing; to start the timer:');
+    indented(context, enableCommands(installation));
+    context.out('if it is enabled already, to make it run these units:');
+    indented(context, reloadUnitCommands(installation));
+    removalLines(context, disableCommands(installation), installation.earlierJobPath);
   },
 };
 
@@ -464,6 +557,7 @@ export const commands: Record<string, Command> = {
   brief,
   'install-launchd': installLaunchd,
   'install-systemd': installSystemd,
+  'schedule-names': scheduleNames,
   help,
 };
 

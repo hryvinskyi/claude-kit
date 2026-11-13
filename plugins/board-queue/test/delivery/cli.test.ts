@@ -1,17 +1,29 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { z } from 'zod';
 import { buildContainer } from '../../src/delivery/container.ts';
+import { SEARCH_PATH } from '../../src/delivery/schedule-files.ts';
 import type { Container } from '../../src/delivery/container.ts';
 import { Action } from '../../src/domain/action.ts';
 import { OptionNotFound } from '../../src/domain/errors.ts';
 import { IssueRef } from '../../src/domain/issue-ref.ts';
 import type { Config } from '../../src/domain/config.ts';
 import { THIRD, testConfig, twoBoardConfig } from '../fixtures/config.ts';
+import { syncConfig } from '../fixtures/sync.ts';
 
 const PACKAGE = join(import.meta.dirname, '..', '..');
 const ENTRY = join(PACKAGE, 'bin', 'board-queue.ts');
@@ -524,9 +536,15 @@ describe('the queue on a command line', () => {
     await workspace(async (space) => {
       const home = join(space.directory, 'home');
       const command = fakeCommand(home);
+      const tools = join(space.directory, 'tools');
+      mkdirSync(tools);
 
-      const installed = await space.run(['install-launchd'], { home });
-      const plistPath = join(home, 'Library', 'LaunchAgents', 'com.user.board-queue.plist');
+      const installed = await space.run(['install-launchd'], {
+        home,
+        env: { ...NOTHING_CARRIED, PATH: `${tools}:tools:${join(space.directory, 'gone')}:${tools}:/usr/bin:/bin` },
+      });
+      const plistPath = written(installed.out, '.plist');
+      const label = /\/(com\.user\.board-queue\.[0-9a-f]{12})\.plist$/.exec(plistPath)?.[1] ?? '';
       const launcherPath = join(space.stateDir, 'board-queue-tick.sh');
       const plist = readFileSync(plistPath, 'utf8');
       const launcher = readFileSync(launcherPath, 'utf8');
@@ -534,11 +552,18 @@ describe('the queue on a command line', () => {
 
       assert.equal(installed.code, 0, installed.err);
       assert.equal(lint.status, 0, lint.stdout + lint.stderr);
-      assert.match(plist, /<string>com\.user\.board-queue<\/string>/);
+      // A workspace keeps its configuration and its queue somewhere of its own, so
+      // its job is named apart from the one an install at the default places has.
+      assert.equal(dirname(plistPath), join(home, 'Library', 'LaunchAgents'));
+      assert.notEqual(label, '');
+      assert.match(plist, new RegExp(`<string>${label}</string>`));
       assert.match(plist, /<integer>300<\/integer>/);
       assert.match(plist, new RegExp(`<string>${launcherPath}</string>`));
       assert.match(plist, new RegExp(`<string>${join(space.stateDir, 'launchd.log')}</string>`));
-      assert.match(plist, /\/opt\/homebrew\/bin:/);
+      // The job looks where the install found its commands first: a GitHub
+      // command line tool outside the fixed directories is found all the same.
+      const fixed = SEARCH_PATH.split(':').filter((directory) => directory !== '/usr/bin' && directory !== '/bin');
+      assert.ok(plist.includes(`<string>${[tools, '/usr/bin', '/bin', ...fixed].join(':')}</string>`), plist);
       // Everything a schedule is given has to be absolute: it starts with none of
       // the surroundings that make a relative path mean anything.
       for (const path of plist.matchAll(/<string>([^<]+)<\/string>/g)) {
@@ -546,8 +571,10 @@ describe('the queue on a command line', () => {
         assert.ok(value.startsWith('/') || value.startsWith('com.user.'), `${value} is not absolute`);
       }
       assertLauncherRunsThroughTheCommand(launcher, launcherPath, command);
-      assert.match(installed.out, new RegExp(`launchctl bootstrap gui/\\$\\(id -u\\) ${plistPath}`));
-      assert.match(installed.out, /launchctl kickstart -k gui\/\$\(id -u\)\/com\.user\.board-queue/);
+      assert.ok(lines(installed.out).includes(`  launchctl bootstrap gui/$(id -u) '${plistPath}'`), installed.out);
+      assert.ok(lines(installed.out).includes(`  launchctl bootout gui/$(id -u)/${label}`));
+      assert.ok(lines(installed.out).includes(`  rm '${plistPath}'`), installed.out);
+      assert.doesNotMatch(installed.out, /kickstart/);
     });
   });
 
@@ -556,10 +583,14 @@ describe('the queue on a command line', () => {
       const home = join(space.directory, 'home');
       const command = fakeCommand(home);
 
-      const installed = await space.run(['install-systemd'], { home, env: { XDG_CONFIG_HOME: '' } });
+      const installed = await space.run(['install-systemd'], { home, env: NOTHING_CARRIED });
       const unitDir = join(home, '.config', 'systemd', 'user');
-      const service = readFileSync(join(unitDir, 'board-queue.service'), 'utf8');
-      const timer = readFileSync(join(unitDir, 'board-queue.timer'), 'utf8');
+      const servicePath = written(installed.out, '.service');
+      const timerPath = written(installed.out, '.timer');
+      const serviceUnit = servicePath.slice(unitDir.length + 1);
+      const timerUnit = timerPath.slice(unitDir.length + 1);
+      const service = readFileSync(servicePath, 'utf8');
+      const timer = readFileSync(timerPath, 'utf8');
       const launcherPath = join(space.stateDir, 'board-queue-tick.sh');
 
       assert.equal(installed.code, 0, installed.err);
@@ -568,12 +599,17 @@ describe('the queue on a command line', () => {
       assert.match(service, new RegExp(`^WorkingDirectory=${space.stateDir}$`, 'm'));
       assert.match(service, new RegExp(`^StandardOutput=append:${join(space.stateDir, 'launchd.log')}$`, 'm'));
       assert.match(timer, /^OnUnitActiveSec=300s$/m);
-      assert.match(timer, /^Unit=board-queue\.service$/m);
+      assert.match(serviceUnit, /^board-queue-[0-9a-f]{12}\.service$/);
+      assert.equal(timerUnit, serviceUnit.replace(/\.service$/, '.timer'));
+      assert.ok(lines(timer).includes(`Unit=${serviceUnit}`));
       assert.match(timer, /^WantedBy=timers\.target$/m);
       assert.doesNotMatch(service + timer, /\{\{/);
       assertLauncherRunsThroughTheCommand(readFileSync(launcherPath, 'utf8'), launcherPath, command);
       assert.match(installed.out, /systemctl --user daemon-reload/);
-      assert.match(installed.out, /systemctl --user enable --now board-queue\.timer/);
+      assert.ok(lines(installed.out).includes(`  systemctl --user enable --now ${timerUnit}`));
+      assert.ok(lines(installed.out).includes(`  systemctl --user disable --now ${timerUnit}`));
+      assert.ok(lines(installed.out).includes(`  systemctl --user restart ${timerUnit}`), installed.out);
+      assert.ok(lines(installed.out).includes(`  rm '${servicePath}' '${timerPath}'`), installed.out);
     });
   });
 
@@ -583,10 +619,10 @@ describe('the queue on a command line', () => {
       fakeCommand(home);
       const configHome = join(space.directory, 'xdg');
 
-      const installed = await space.run(['install-systemd'], { home, env: { XDG_CONFIG_HOME: configHome } });
+      const installed = await space.run(['install-systemd'], { home, env: { ...NOTHING_CARRIED, XDG_CONFIG_HOME: configHome } });
 
       assert.equal(installed.code, 0, installed.err);
-      assert.ok(existsSync(join(configHome, 'systemd', 'user', 'board-queue.timer')));
+      assert.equal(dirname(written(installed.out, '.timer')), join(configHome, 'systemd', 'user'));
     });
   });
 
@@ -599,7 +635,172 @@ describe('the queue on a command line', () => {
 
       assert.equal(installed.code, 1);
       assert.match(installed.err, /no board-queue command at .*\.local\/bin\/board-queue/);
-      assert.equal(existsSync(join(home, 'Library', 'LaunchAgents', 'com.user.board-queue.plist')), false);
+      assert.equal(existsSync(join(home, 'Library', 'LaunchAgents')), false);
+    });
+  });
+
+  it('keeps the name earlier installs gave the job when the configuration and the queue are in their default places', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const config = join(home, '.config', 'board-queue', 'config.json');
+      mkdirSync(dirname(config), { recursive: true });
+      writeFileSync(config, readFileSync(space.configPath, 'utf8'), 'utf8');
+
+      const installed = await space.run(['install-launchd'], {
+        home,
+        env: { ...NOTHING_CARRIED, BOARD_QUEUE_CONFIG: '', BOARD_QUEUE_STATE_DIR: '' },
+      });
+
+      assert.equal(installed.code, 0, installed.err);
+      assert.equal(written(installed.out, '.plist'), join(home, 'Library', 'LaunchAgents', 'com.user.board-queue.plist'));
+      assert.ok(lines(installed.out).includes('  launchctl bootout gui/$(id -u)/com.user.board-queue'));
+    });
+  });
+
+  it('gives an install for another configuration a job of its own, and the same install the same job', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const second = join(space.directory, 'second.json');
+      writeFileSync(second, readFileSync(space.configPath, 'utf8'), 'utf8');
+
+      const first = await space.run(['install-launchd'], { home, env: NOTHING_CARRIED });
+      const other = await space.run(['install-launchd'], { home, env: { ...NOTHING_CARRIED, BOARD_QUEUE_CONFIG: second } });
+      const again = await space.run(['install-launchd'], { home, env: NOTHING_CARRIED });
+
+      assert.equal(first.code + other.code + again.code, 0, first.err + other.err + again.err);
+      assert.notEqual(written(other.out, '.plist'), written(first.out, '.plist'));
+      assert.equal(written(again.out, '.plist'), written(first.out, '.plist'));
+      assert.equal(readdirSync(join(home, 'Library', 'LaunchAgents')).length, 2);
+    });
+  });
+
+  it('hands the job the places the install read from, and never a token', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const configHome = join(space.directory, 'xdg');
+      const tokenFile = join(space.directory, 'dibs-token');
+      const token = 'ghp_' + 'abcdefghijklmnopqrstuvwxyz0123456789';
+      writeFileSync(tokenFile, token, { encoding: 'utf8', mode: 0o600 });
+
+      const installed = await space.run(['install-systemd'], {
+        home,
+        env: {
+          ...NOTHING_CARRIED,
+          XDG_CONFIG_HOME: configHome,
+          GH_TOKEN: token,
+          DIBS_TEST_TOKEN: token,
+          DIBS_TEST_TOKEN_FILE: tokenFile,
+        },
+      });
+      const environment = lines(readFileSync(written(installed.out, '.service'), 'utf8'))
+        .find((line) => line.startsWith('Environment=')) ?? '';
+
+      assert.equal(installed.code, 0, installed.err);
+      assert.ok(environment.includes(`"BOARD_QUEUE_CONFIG=${space.configPath}"`), environment);
+      assert.ok(environment.includes(`"BOARD_QUEUE_STATE_DIR=${space.stateDir}"`), environment);
+      assert.ok(environment.includes(`"XDG_CONFIG_HOME=${configHome}"`), environment);
+      assert.ok(environment.includes(`"DIBS_TEST_TOKEN_FILE=${tokenFile}"`), environment);
+      assert.equal(environment.includes(token), false, 'a token went into a schedule file');
+    }, syncConfig);
+  });
+
+  it('refuses to write a schedule for a configuration it cannot read', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+
+      const installed = await space.run(['install-launchd'], {
+        home,
+        env: { ...NOTHING_CARRIED, BOARD_QUEUE_CONFIG: join(space.directory, 'nowhere.json') },
+      });
+
+      assert.equal(installed.code, 1);
+      assert.match(installed.err, /no configuration at/);
+      assert.equal(existsSync(join(home, 'Library', 'LaunchAgents')), false);
+    });
+  });
+
+  it('refuses a key carried as its text rather than its file, writing nothing and never repeating it', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const key = 'LS0tLS1CRUdJTiBSU0Eg' + 'UFJJVkFURSBLRVktLS0tLQ';
+
+      const installed = await space.run(['install-launchd'], { home, env: { ...NOTHING_CARRIED, GITHUB_APP_PRIVATE_KEY: key } });
+
+      assert.equal(installed.code, 1);
+      assert.match(installed.err, /GITHUB_APP_PRIVATE_KEY/);
+      assert.equal((installed.out + installed.err).includes(key), false, 'the refusal repeated the key');
+      assert.equal(existsSync(join(home, 'Library', 'LaunchAgents')), false);
+    });
+  });
+
+  it('keeps the plain name for a configuration at the default place of the configuration home the environment names', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const configHome = join(space.directory, 'xdg');
+      const config = join(configHome, 'board-queue', 'config.json');
+      mkdirSync(dirname(config), { recursive: true });
+      writeFileSync(config, readFileSync(space.configPath, 'utf8'), 'utf8');
+      const env = { ...NOTHING_CARRIED, XDG_CONFIG_HOME: configHome, BOARD_QUEUE_CONFIG: '', BOARD_QUEUE_STATE_DIR: '' };
+
+      const launchd = await space.run(['install-launchd'], { home, env });
+      const systemd = await space.run(['install-systemd'], { home, env });
+
+      assert.equal(launchd.code + systemd.code, 0, launchd.err + systemd.err);
+      assert.equal(written(launchd.out, '.plist'), join(home, 'Library', 'LaunchAgents', 'com.user.board-queue.plist'));
+      assert.equal(written(systemd.out, '.timer'), join(configHome, 'systemd', 'user', 'board-queue.timer'));
+    });
+  });
+
+  it('names the job and the units as the install does, and writes nothing to say so', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+      fakeCommand(home);
+      const configHome = join(space.directory, 'xdg');
+      const stateDir = join(space.directory, 'not yet made');
+      const env = { ...NOTHING_CARRIED, XDG_CONFIG_HOME: configHome, BOARD_QUEUE_STATE_DIR: stateDir };
+
+      const named = await space.run(['schedule-names'], { home, env });
+      const madeNothing = !existsSync(stateDir) && !existsSync(join(home, 'Library')) && !existsSync(configHome);
+      const launchd = await space.run(['install-launchd'], { home, env });
+      const systemd = await space.run(['install-systemd'], { home, env });
+
+      assert.equal(named.code, 0, named.err);
+      assert.ok(madeNothing, 'schedule-names wrote something');
+      const plist = written(launchd.out, '.plist');
+      assert.deepEqual(lines(named.out), [
+        `label=${/\/([^/]+)\.plist$/.exec(plist)?.[1] ?? ''}`,
+        `plist=${plist}`,
+        `service=${written(systemd.out, '.service')}`,
+        `timer=${written(systemd.out, '.timer')}`,
+        `launcher=${written(launchd.out, '.sh')}`,
+      ]);
+      assert.match(named.out, /^label=com\.user\.board-queue\.[0-9a-f]{12}$/m);
+    });
+  });
+
+  it('names the plain job for an install at the default places', async () => {
+    await workspace(async (space) => {
+      const home = join(space.directory, 'home');
+
+      const named = await space.run(['schedule-names'], {
+        home,
+        env: { ...NOTHING_CARRIED, BOARD_QUEUE_CONFIG: '', BOARD_QUEUE_STATE_DIR: '' },
+      });
+
+      assert.equal(named.code, 0, named.err);
+      assert.deepEqual(lines(named.out), [
+        'label=com.user.board-queue',
+        `plist=${join(home, 'Library', 'LaunchAgents', 'com.user.board-queue.plist')}`,
+        `service=${join(home, '.config', 'systemd', 'user', 'board-queue.service')}`,
+        `timer=${join(home, '.config', 'systemd', 'user', 'board-queue.timer')}`,
+        `launcher=${join(home, '.claude', 'state', 'board-queue', 'board-queue-tick.sh')}`,
+      ]);
     });
   });
 
@@ -607,7 +808,7 @@ describe('the queue on a command line', () => {
     await workspace(async (space) => {
       const home = join(space.directory, 'home');
       const command = fakeCommand(home);
-      await space.run(['install-launchd'], { home });
+      await space.run(['install-launchd'], { home, env: NOTHING_CARRIED });
 
       const ran = spawnSync('/bin/sh', [join(space.stateDir, 'board-queue-tick.sh')], {
         encoding: 'utf8',
@@ -620,6 +821,32 @@ describe('the queue on a command line', () => {
     });
   });
 });
+
+/**
+ * Every variable an install hands its job, emptied, so that none of this
+ * machine's own reaches a job a test writes. The workspace names its own
+ * configuration and queue.
+ */
+const NOTHING_CARRIED: Readonly<Record<string, string>> = {
+  BOARD_QUEUE_ENV: '',
+  BOARD_QUEUE_IDENTITY: '',
+  XDG_CONFIG_HOME: '',
+  DIBS_CONFIG_DIR: '',
+  GH_CONFIG_DIR: '',
+  GITHUB_APP_ID: '',
+  GITHUB_APP_INSTALLATION_ID: '',
+  GITHUB_APP_PRIVATE_KEY_PATH: '',
+  GITHUB_APP_PRIVATE_KEY: '',
+};
+
+/** The file an install says it wrote whose name ends so. */
+function written(out: string, ending: string): string {
+  const paths = lines(out)
+    .filter((line) => line.startsWith('wrote ') && line.endsWith(ending))
+    .map((line) => line.slice('wrote '.length));
+  assert.equal(paths.length, 1, `the install names no single ${ending} file:\n${out}`);
+  return paths[0] ?? '';
+}
 
 /**
  * Stands in for the installed `board-queue` command: it records what it was asked

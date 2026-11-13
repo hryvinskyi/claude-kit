@@ -1,6 +1,7 @@
-import { accessSync, chmodSync, constants, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { RefusedByRule } from '../domain/errors.ts';
+import type { CarriedVariable } from './schedule-environment.ts';
 
 /** Five minutes: often enough that a filed action feels prompt, seldom enough to cost nothing. */
 export const INTERVAL_SEC = 300;
@@ -10,6 +11,7 @@ export const INTERVAL_SEC = 300;
  * installed by a package manager — and the credential this system falls back to
  * comes from the GitHub command line tool, which lives in exactly such a place.
  * A tick that cannot find it would read as a login problem rather than a path one.
+ * The job looks in the install's own search path first and in these after it.
  */
 export const SEARCH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
 
@@ -18,6 +20,11 @@ export const SCHEDULER_LOG = 'launchd.log';
 
 /** The launcher's name in the state directory. */
 const LAUNCHER = 'board-queue-tick.sh';
+
+/** Where the launcher every scheduler runs is written, in a state directory. */
+export function launcherPathIn(stateDir: string): string {
+  return path.join(stateDir, LAUNCHER);
+}
 
 export type ScheduleOptions = {
   /** The home directory the scheduler's own files are written under. */
@@ -32,6 +39,47 @@ export type ScheduleOptions = {
    */
   commandPath: string;
 };
+
+/** What a scheduler's job description is written from: the launcher's options and what is particular to this install. */
+export type JobOptions = ScheduleOptions & {
+  /**
+   * The variables, as this install found them, that tell the pass where its
+   * configuration, queue and credentials are; the job starts the pass with them.
+   */
+  environment: readonly CarriedVariable[];
+  /**
+   * The absolute directories of the install's own search path that exist, each
+   * once: where the person's commands were found, which the job looks in first.
+   */
+  searchPath: readonly string[];
+  /** What sets this install's job apart from another install's; null for the default locations. */
+  instance: string | null;
+};
+
+/**
+ * Everything a job description sets in the pass's environment: the search path
+ * — the install's own directories, then the fixed ones it lacks — and then what
+ * the install carried.
+ */
+export function jobEnvironment(options: JobOptions): CarriedVariable[] {
+  const searchPath = [...options.searchPath];
+  for (const directory of SEARCH_PATH.split(':')) {
+    if (!searchPath.includes(directory)) {
+      searchPath.push(directory);
+    }
+  }
+  return [['PATH', searchPath.join(':')], ...options.environment];
+}
+
+/**
+ * The job file under the default name, when this install writes one under
+ * another name and that file is there. It may be another install's at the
+ * default places, or one written for these same places under the default name;
+ * only a person can tell which, so this points at it and touches nothing.
+ */
+export function earlierJob(instance: string | null, defaultJobPath: string): string | null {
+  return instance !== null && existsSync(defaultJobPath) ? defaultJobPath : null;
+}
 
 /** What every scheduler's job is made of, whichever scheduler starts it. */
 export type Launcher = {
@@ -67,7 +115,7 @@ export function writeLauncher(options: ScheduleOptions): Launcher {
     );
   }
   const launcher: Launcher = {
-    launcherPath: path.join(options.stateDir, LAUNCHER),
+    launcherPath: launcherPathIn(options.stateDir),
     nodePath: options.nodePath,
     commandPath: options.commandPath,
     logPath: path.join(options.stateDir, SCHEDULER_LOG),
@@ -91,6 +139,11 @@ export function writeLauncher(options: ScheduleOptions): Launcher {
  */
 function insideSingleQuotes(value: string): string {
   return value.replaceAll('\'', '\'\\\'\'');
+}
+
+/** A value as one single-quoted shell word, which a shell reads back as the value and runs none of. */
+export function shellWord(value: string): string {
+  return `'${insideSingleQuotes(value)}'`;
 }
 
 /** This package's own directory, from this file's place inside it. */
