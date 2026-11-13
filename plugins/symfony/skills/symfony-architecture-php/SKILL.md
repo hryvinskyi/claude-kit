@@ -275,8 +275,9 @@ Two rules for reading the results:
 a typed interface per concept, one method per object it creates. Symfony ships no generator for it:
 **discover the project's mechanism** (its docs name it; typically a compiler pass that writes the
 implementing class and registers it as the service behind the interface). If the project has none,
-that is a plan decision, not a licence to hand-write `new`. When a project builds one, what makes it
-hold up:
+the first task of the plan that creates an object builds it: a compiler pass that generates the
+implementation of every factory interface, with tests that compile the real container, before any
+task injects a factory. Never a hand-written `new`. What makes the generator hold up:
 - **Discovery through the packages' own scan.** Symfony's resource loader registers every scanned
   interface as an abstract `.abstract.<FQCN>` definition tagged `container.excluded`. A pass reading
   those finds the factory interfaces of the enabled packages without naming a module. An interface in
@@ -385,7 +386,7 @@ Each object has a named source: the command is mapped by the framework (`#[MapRe
 
 ### No `new`, in Symfony's vocabulary
 
-- **Factories:** Symfony ships no generator; use the compile-time mechanism the project's docs name (§10). If the project has none, that is a plan decision, not a licence to hand-write `new`.
+- **Factories:** Symfony ships no generator; use the compile-time mechanism the project's docs name (§10). If the project has none, the first task of the plan that creates an object builds that compiler pass (§10), before any task injects a factory. Never a hand-written `new`.
 - **The composition root** is `new Kernel(...)` in the front controller or in `bin/console`.
 - **The names in the core's example** (`solid.md` §DIP *No `new`*): `TranslatableText` is `Symfony\Component\Translation\TranslatableMessage`, `TranslatableTextInterface` is `Symfony\Contracts\Translation\TranslatableInterface`, `TranslatableTextFactoryInterface` is a `TranslatableMessageFactoryInterface`, and `flash()` is `AbstractController::addFlash()` (or `getFlashBag()->add()`). The typical offender is a controller building `new TranslatableMessage('catalog.x.saved', [], 'catalog')`, typing a helper on `TranslatableMessage`, and writing the `addFlash` side channel. In any touched file, `addFlash(`/`->add('success'` is a finding.
 - **Contracts to type on:** `TranslatableInterface` (not `TranslatableMessage`), `TranslatorInterface`, `EventDispatcherInterface`, `HttpClientInterface`.
@@ -436,7 +437,7 @@ Read with the core skill's `references/implementer-checklist.md`.
 
 - Inner code names no Doctrine class, no `Symfony\Component\HttpFoundation` `Request`/`Response`, no Messenger bus or `#[AsMessageHandler]`, and no container; the only exceptions are the carve-outs of §9's framework-leak recipe.
 - Wiring is a `services.yaml` alias or autowiring by type, plus tags. A class that is built but never wired ships nothing: check the registration exists and is exercised by a test that resolves it through the real container.
-- Factories: Symfony ships no generator; find the project's compile-time one in its docs (§10). If the project has none, stop and return the question. The composition root is `new Kernel(...)` in the front controller or `bin/console`.
+- Factories: Symfony ships no generator; find the project's compile-time one in its docs (§10). If the project has none, an earlier task of the plan builds it; when no task does, stop and return that gap: the plan is missing its generator task. The composition root is `new Kernel(...)` in the front controller or `bin/console`.
 - Type on the contract: `TranslatableInterface`, not `TranslatableMessage`; `TranslatorInterface`; `EventDispatcherInterface` — including a private helper in a controller.
 - `addFlash()` / `getFlashBag()->add()` is the free-string side channel; reach it through the project's typed port, or stop and return the question.
 - Minimum self-check for a Symfony controller you touched:

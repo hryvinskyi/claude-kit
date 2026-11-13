@@ -233,7 +233,9 @@ implementation; or, where the framework generates factories of its own shape (im
 interface of yours, taking an untyped argument array), a thin adapter implements the interface by
 delegating to the generated factory, with no `new` and no computation of its own. Which one applies is
 the framework's: the stack skill names the mechanism, or the project's own docs do. If the project has
-none, that is a plan decision, not a licence to hand-write `new`.
+none, the first task of the plan that creates an object builds the generator, with its own tests,
+before any task injects a factory; the stack skill says what makes one hold up. Never a hand-written
+`new`.
 **A factory method only creates**: one object per method, from its arguments, no computation. Whatever
 computes those arguments is a service or the value itself.
 **Exempt:** `throw new …Exception`, attribute metadata (`#[Assert\All([new Assert\NotBlank()])]`),

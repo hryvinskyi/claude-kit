@@ -31,8 +31,9 @@ project with a stack plugin, read its stack skill's *Implementer checklist on th
   implementation, or, where the framework generates factories of its own shape, a thin adapter
   delegates to the generated one with no `new` and no computation of its own. Which one applies is
   the framework's: the stack skill names the mechanism, or the project's docs do.
-  If the project has none, stop and return the question: it is a plan decision, not a licence to
-  hand-write `new`. `throw new …Exception`, attribute metadata, tests and the composition root are
+  If the project has none, the plan's first task that creates an object builds the generator. A task
+  that needs a factory when no generator exists and no earlier task of the plan builds one stops and
+  returns that gap: the plan is missing its generator task. Never a hand-written `new`. `throw new …Exception`, attribute metadata, tests and the composition root are
   exempt. The composition root is the one place that builds the container, before any exists (the
   front controller or console entry point that boots the kernel), not wiring code in general.
 - A factory method only creates: one object per method, from its arguments, no computation.
