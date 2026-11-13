@@ -678,6 +678,54 @@ class MeasureTests(unittest.TestCase):
         self.assertEqual(len(found), 1, found)
         self.assertIn("`scripts/old-tool.py` does not exist", found[0])
 
+    def paths_while_the_history_walk_ends(self, code: int, *spans: str) -> list[str]:
+        """The hard findings of a runbook citing each span, while git's walk for retired top-level names ends with `code`."""
+        self.write("scripts/old-tool.py", "print('x')\n")
+        git(self.root, "add", "scripts")
+        git(self.root, "commit", "-q", "-m", "a tool")
+        git(self.root, "rm", "-q", "-r", "scripts")
+        git(self.root, "commit", "-q", "-m", "the tool goes")
+        self.write(".claude/kb/Modules/crm.md", self.NOTE.replace(" and answers `text/plain`", ""))
+        self.write(".claude/kb/Runbooks/Paths.md", "## Steps\n\n" + "\n\n".join(f"See `{s}`." for s in spans) + "\n")
+        real = vaultlib.git_out
+
+        def name_walk_ends(root: Path, *args: str, timeout: int = 180) -> tuple[int, str]:
+            return (code, "") if "log" in args and "--name-only" in args else real(root, *args, timeout=timeout)
+
+        with unittest.mock.patch.object(vaultlib, "git_out", name_walk_ends):
+            return self.messages(vc.measure(self.vault, write=False), "HARD")
+
+    def test_a_history_walk_that_times_out_leaves_the_paths_unchecked_and_says_so(self) -> None:
+        hard = self.paths_while_the_history_walk_ends(vaultlib.TIMED_OUT, "scripts/old-tool.py", "text/plain",
+                                                      "packages/crm/src/Gone.php")
+
+        self.assertFalse(any("scripts/old-tool.py" in m or "text/plain" in m for m in hard), hard)
+        self.assertTrue(any("`packages/crm/src/Gone.php` does not exist" in m for m in hard), hard)
+        self.assertTrue(any(m.startswith("Modules/crm.md") and "`src/Missing.php` does not exist" in m
+                            for m in hard), hard)
+        unchecked = [m for m in hard if "the project's history" in m]
+        self.assertEqual(len(unchecked), 1, hard)
+        self.assertTrue(unchecked[0].startswith(f"{self.vault.rel}: "), unchecked)
+        self.assertIn("did not finish in time", unchecked[0])
+        self.assertIn("2 cited path(s)", unchecked[0])
+        self.assertIn("2 top-level name(s)", unchecked[0])
+
+    def test_a_history_walk_that_fails_names_gits_exit_code(self) -> None:
+        hard = self.paths_while_the_history_walk_ends(128, "scripts/old-tool.py")
+
+        self.assertFalse(any("`scripts/old-tool.py` does not exist" in m for m in hard), hard)
+        unchecked = [m for m in hard if "the project's history" in m]
+        self.assertEqual(len(unchecked), 1, hard)
+        self.assertIn("failed (128)", unchecked[0])
+        self.assertIn("1 cited path(s)", unchecked[0])
+
+    def test_a_history_walk_that_ends_is_no_finding_when_no_path_needed_it(self) -> None:
+        hard = self.paths_while_the_history_walk_ends(vaultlib.TIMED_OUT, "packages/crm/src/Gone.php",
+                                                      "Modules/crm.md")
+
+        self.assertFalse(any("the project's history" in m for m in hard), hard)
+        self.assertTrue(any("`packages/crm/src/Gone.php` does not exist" in m for m in hard), hard)
+
     def test_a_path_cited_in_the_wrong_case_is_hard_and_names_the_spelling(self) -> None:
         found = self.paths_note("packages/crm/src/service/ContactReader.php",
                                 "Packages/crm/src/Service/ContactReader.php",

@@ -463,6 +463,11 @@ class CodeSearchUnfinished(RuntimeError):
         self.code = code
 
 
+def unfinished_reason(code: int) -> str:
+    """Why a git search that ended with `code` answered nothing, in the words a finding uses."""
+    return "did not finish in time" if code == vaultlib.TIMED_OUT else f"failed ({code})"
+
+
 class Repo:
     """Git and file-system reads against one project root."""
 
@@ -530,19 +535,26 @@ class Repo:
             raise CodeSearchUnfinished(code)
         return {token.casefold() for token in out.split()}
 
-    def ever_held(self, entries: set[str], refs: list[str]) -> set[str]:
-        """Those top-level `entries` that some commit reachable from `refs` held; a history git cannot read holds none."""
+    def ever_held(self, entries: set[str], refs: list[str]) -> tuple[set[str], dict[str, int]]:
+        """Which top-level `entries` some commit reachable from `refs` held.
+
+        @return (the entries held, entry → git's exit code for each entry whose history was not read);
+                an entry left unread is neither held nor never held.
+        """
         if not entries or not refs:
-            return set()
+            return set(), {}
         held: set[str] = set()
+        unread: dict[str, int] = {}
         ordered = sorted(entries)
         for start in range(0, len(ordered), HISTORY_BATCH):
             batch = ordered[start:start + HISTORY_BATCH]
             code, out = self.git("--literal-pathspecs", "log", "-z", "--format=", "--name-only", "--no-renames",
                                  *refs, "--", *batch)
-            if code == 0:
-                held.update(path.strip("\n").split("/", 1)[0] for path in out.split("\0") if path.strip("\n"))
-        return held & entries
+            if code != 0:
+                unread.update((entry, code) for entry in batch)
+                continue
+            held.update(path.strip("\n").split("/", 1)[0] for path in out.split("\0") if path.strip("\n"))
+        return held & entries, unread
 
     def vendor_stems(self) -> set[str]:
         stems: set[str] = set()
@@ -976,7 +988,12 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
     absent = {path.split("/", 1)[0] for c in living.values() for path in c.paths} - {".", ".."}
     absent = {first for first in absent if first.casefold() not in folded_root}
     refs = [ref for ref in dict.fromkeys(["HEAD", reference]) if ref and repo.commit_of(ref)]
-    existed = frozenset(repo.ever_held(absent, refs))
+    held, history_unread = repo.ever_held(absent, refs)
+    existed = frozenset(held)
+    # A first segment whose history was not read may have been held: a citation that only that history
+    # makes a claim about the tree stays unchecked this run, never graded either way.
+    maybe_existed = existed | frozenset(history_unread)
+    unchecked_paths: dict[str, int] = {}  # first segment → its citations left unchecked
     unseen_members: list[tuple[str, str, str, str]] = []  # (note, cited path, file, member)
 
     index = repo.php_index()
@@ -1008,7 +1025,7 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
                 removed |= {n for n in on_reference if n.casefold() in found}
     except CodeSearchUnfinished as unfinished:
         # One honest finding instead of one false one per name: the names stay unchecked, not gone.
-        reason = "did not finish in time" if unfinished.code == vaultlib.TIMED_OUT else f"failed ({unfinished.code})"
+        reason = unfinished_reason(unfinished.code)
         report.findings.append(Finding(
             "HARD", vault.rel, f"the search of the code for {len(missing)} cited name(s) {reason}, so none of them "
                                "was checked — keep large untracked trees out of it (.git/info/exclude) and run again"))
@@ -1025,8 +1042,13 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
                 "SOFT", rel, f"`{name}` is gone from this branch while the default branch still has it — correct "
                              f"the prose if this branch removes it, or strike it through: ~~`{name}`~~", removed=True))
         for cited_path in sorted(living[rel].paths):
-            homes = homes_of(cited_path, bases[rel], root_entries, in_any_case, existed, in_vault)
+            homes = homes_of(cited_path, bases[rel], root_entries, in_any_case, maybe_existed, in_vault)
             if not homes:
+                continue
+            first = cited_path.split("/", 1)[0]
+            if first in history_unread and not homes_of(cited_path, bases[rel], root_entries, in_any_case,
+                                                         existed, in_vault):
+                unchecked_paths[first] = unchecked_paths.get(first, 0) + 1
                 continue
             resolved = resolve_path(cited_path, bases[rel], here)
             if resolved is not None:
@@ -1049,6 +1071,15 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
                 "HARD", rel, f"`{cited_path}` does not exist{hint} — correct the prose, "
                              f"or strike it through as history"))
 
+    if unchecked_paths:
+        # One honest finding instead of a silence: these paths were not checked, not found to name nothing.
+        reasons = ", ".join(unfinished_reason(code)
+                            for code in sorted({history_unread[first] for first in unchecked_paths}))
+        report.findings.append(Finding(
+            "HARD", vault.rel, f"the search of the project's history for {len(unchecked_paths)} top-level name(s) "
+                               f"the notes cite in paths {reasons}, so none of the "
+                               f"{sum(unchecked_paths.values())} cited path(s) under them was checked — run again"))
+
     # A member the cited file does not name may be inherited, so it is gone only when no code names it.
     if unseen_members:
         wanted = {member for *_, member in unseen_members}
@@ -1056,8 +1087,7 @@ def measure(vault: vaultlib.Vault, write: bool, restamp: Optional[set[str]] = No
             named = repo.words_in_code(wanted)
             named |= repo.words_in_vendor({member for member in wanted if member.casefold() not in named})
         except CodeSearchUnfinished as unfinished:
-            reason = ("did not finish in time" if unfinished.code == vaultlib.TIMED_OUT
-                      else f"failed ({unfinished.code})")
+            reason = unfinished_reason(unfinished.code)
             report.findings.append(Finding(
                 "HARD", vault.rel, f"the search of the code for {len(wanted)} cited member(s) {reason}, so none of "
                                    "them was checked — keep large untracked trees out of it (.git/info/exclude) and "
