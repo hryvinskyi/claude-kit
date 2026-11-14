@@ -4,8 +4,9 @@ systemone endpoint on this machine; the secret filter is also run form by form o
 
 What is pinned: nothing is sent while no endpoint is set, a kind left out is never asked, a plain-HTTP
 endpoint off this machine is refused, the key travels only in the request header and never reaches
-the output, the size of a change follows from its yes answers with L winning, an uncertain answer is
-named rather than guessed, the rules check reads only the review file's "Always check" items, keeps
+the output, the size of a change follows from its yes answers with L winning, the domain model and a
+cache in front of a port are asked as L and a rename that alters no logic as no logic, an uncertain
+answer is named rather than guessed, the rules check reads only the review file's "Always check" items, keeps
 credential-shaped files out of what it sends, includes only a Markdown file beside the review file and
 names every include it refuses, splits a large diff and counts a violation in any part, the done check
 reports a contradicted claim, a refusal from the endpoint exits with its status, a run stops sending at its
@@ -560,6 +561,57 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(sized["level"], "M")
         self.assertEqual(sized["could_be"], "L")
         self.assertEqual(sized["uncertain"], ["state"])
+
+    def test_a_yes_on_the_domain_model_makes_the_change_large(self) -> None:
+        sized = self.size_with({"domain": 0.95, "logic": 0.95})
+
+        self.assertEqual(sized["level"], "L")
+        self.assertEqual(sized["answers"]["domain"]["raises_to"], "L")
+
+    def test_a_value_object_a_state_machine_and_a_cache_in_front_of_a_port_are_large(self) -> None:
+        for case in ("a value object", "a state machine", "a cache in front of a port"):
+            with self.subTest(case=case):
+                self.endpoint.requests.clear()
+                self.endpoint.answer = lambda qid, question, state, case=case: noul(
+                    0.95 if case in question["instructions"] else 0.02)
+
+                done = self.run_decide("size", "--state", self.file("state.md", "The change adds %s." % case))
+
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertEqual(json.loads(done.stdout)["level"], "L")
+
+    # The rule the logic question states for a rename and a move; a model that cannot find it in the question
+    # cannot tell whether a 50-line rename is logic.
+    MOVE_RULE = ("A rename that alters no logic answers no, whatever its size, and so does a move that keeps the code "
+                 "under the same discovery configuration (autoload root, the container's resource glob, a mapping, "
+                 "route or template directory); a move out of it changes what the framework finds and answers yes.")
+
+    def logic_reads_the_move_rule(self, when_stated: float) -> None:
+        """A model that answers the logic question `when_stated` when it states the whole rename and move rule,
+        and is unsure otherwise; every other question it answers no."""
+        self.endpoint.answer = lambda qid, question, state: noul(
+            0.02 if qid != "logic" else when_stated if self.MOVE_RULE in question["instructions"] else 0.5)
+
+    def test_a_rename_that_alters_no_logic_is_small(self) -> None:
+        self.logic_reads_the_move_rule(0.02)
+
+        done = self.run_decide("size", "--state", self.file("state.md", "Rename a class across 50 lines."))
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sized = json.loads(done.stdout)
+        self.assertEqual(sized["level"], "S")
+        self.assertEqual(sized["uncertain"], [])
+
+    def test_a_move_out_of_its_discovery_configuration_is_medium(self) -> None:
+        self.logic_reads_the_move_rule(0.95)
+
+        done = self.run_decide("size", "--state", self.file(
+            "state.md", "Move a class into a directory the container's resource glob excludes."))
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sized = json.loads(done.stdout)
+        self.assertEqual(sized["level"], "M")
+        self.assertEqual(sized["answers"]["logic"]["answer"], "yes")
 
     # -- rules ------------------------------------------------------------------------------------------
 

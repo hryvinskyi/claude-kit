@@ -1064,6 +1064,29 @@ describe('DrainQueue and the issues', () => {
     assert.equal((await tick.stored('c-1')).blockedReason, 'issue-not-found');
   });
 
+  it('blocks a comment, a close and an assignment filed on a pull request\'s number, writing nothing', async () => {
+    const pulls = [12, 13, 14].map((number) => ({ ref: IssueRef.of(FIRST, number), pullRequest: true }));
+    const tick = tickFixture({ issues: pulls });
+    await tick.file({ id: 'c-1', kind: 'issue.comment', payload: { repo: FIRST, issue: 12, body: 'the fix is live' } });
+    await tick.file({ id: 'c-2', kind: 'issue.close', payload: { repo: FIRST, issue: 13, reason: 'completed' } });
+    await tick.file({ id: 'c-3', kind: 'issue.assignees', payload: { repo: FIRST, issue: 14, add: ['alice'] } });
+
+    const report = await tick.drain.run();
+
+    assert.equal(report.blocked, 3);
+    assert.equal(report.done, 0);
+    for (const [id, number] of [['c-1', 12], ['c-2', 13], ['c-3', 14]] as const) {
+      const action = await tick.stored(id);
+      assert.equal(action.state, 'blocked');
+      assert.equal(action.attempts, 1, 'a refusal is never tried again');
+      assert.equal(action.blockedReason, 'refused-by-rule');
+      assert.match(action.lastError ?? '', new RegExp(`#${String(number)} is a pull request, not an issue`));
+    }
+    assert.deepEqual(tick.issues.calls, ['get', 'get', 'get']);
+    assert.equal(tick.issues.posted.length, 0);
+    assert.equal(tick.issues.closed.length, 0);
+  });
+
   it('leaves one pacing gap between two actions and none after the last', async () => {
     const tick = tickFixture({ issues: [{ ref: twelve }, { ref: thirteen }] });
     await tick.file({ id: 'c-1', kind: 'issue.comment', payload: { repo: FIRST, issue: 12, body: 'one' } });

@@ -30,16 +30,32 @@ that registered name loads.
    names one. Do NOT read the answer key into the agent's prompt — it is for scoring only.
 2. **Copy the fixture** into the session scratchpad (fresh copy every run — agents edit
    files; never run on the original, never reuse a dirty copy).
-3. **Run the agent AS REGISTERED**, headless, from inside the copy:
+3. **Load the engineering standards from the clone.** An answer key may score a rule the
+   standards state (PHPStan level 10 for the code a plan writes, for one), so the run loads them
+   itself and never relies on the runner's own user `CLAUDE.md`. Write a memory file that holds
+   the text of the clone's standards and of the standards file of every stack plugin the run
+   enables, in a directory of its own in the session scratchpad (`<memory>`), not in the copy:
    ```
-   cd <copy> && CLAUDE_NO_JOURNAL_NUDGE=1 claude -p --agent <registered name> \
+   mkdir -p <memory> && cat <kit>/standards/CLAUDE.standards.md \
+     <kit>/plugins/<stack>/standards/CLAUDE.standards.<stack>.md … > <memory>/CLAUDE.md
+   ```
+   The text itself, not `@` import lines: a headless session does not expand an import of a file
+   outside its working directories, and the run would go on without the standards.
+4. **Run the agent AS REGISTERED**, headless, from inside the copy:
+   ```
+   cd <copy> && CLAUDE_NO_JOURNAL_NUDGE=1 CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 \
+     claude -p --agent <registered name> --setting-sources project,local --add-dir <memory> \
+     --plugin-dir <kit>/plugins/<name> … \
      --dangerously-skip-permissions --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
      < <evals dir>/<agent>/prompt-<NN>.md > <copy>/../<agent>-report.md
    ```
+   `--setting-sources project,local` keeps every user-scope skill, agent, hook and memory out of
+   the nested session, so the run measures the clone and not the runner's machine; the standards
+   reach it only through `--add-dir <memory>`, which loads `<memory>/CLAUDE.md` because
+   `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` is set. The run record says so.
    `--agent` loads the definition file as it is on disk right now, with its own `tools:` and
-   `model:`. A plugin agent is found only while its plugin is enabled in the nested session: it is
-   when the plugin is installed at user scope; to evaluate a working copy that is not installed,
-   add `--plugin-dir <kit>/plugins/<name>` for that plugin, for every plugin it depends on (the
+   `model:`. With user settings left out, a plugin is enabled only through `--plugin-dir`: add one
+   `--plugin-dir <kit>/plugins/<name>` for the agent's plugin, for every plugin it depends on (the
    pipeline agents load `architecture`'s skills), for `guards`, and for the fixture's own plugin
    when that is a stack plugin. A stack fixture scores the gate's demand for both the core skill
    and the stack skill, so a run without `guards` or without the stack plugin measures something
@@ -55,7 +71,7 @@ that registered name loads.
    nested session's Stop hook cannot pollute the report. Permissions are skipped because the
    run is confined to the scratch copy; fixtures must never reach outside it. Independent
    evals can run in parallel (background Bash).
-4. **Score** when it returns: read the report and the produced artifacts (for
+5. **Score** when it returns: read the report and the produced artifacts (for
    devils-advocate: `.claude/plans/*/_devils_advocate.md` in the copy plus its plan edits;
    for an implementer: `diff -rq` of the fixture against the copy) and compare against the
    answer key. `<evals>` in the key or a scorer is the fixture's evals directory. When the key
@@ -65,10 +81,10 @@ that registered name loads.
    - severity accuracy per the key
    - apply-check: Critical/Important findings actually `[APPLIED]` to the plan files
    - noise: findings outside the seeded set — judge real vs hallucinated
-5. **Report the scorecard**: `N/M found`, misses by id with the plan line that should have
+6. **Report the scorecard**: `N/M found`, misses by id with the plan line that should have
    triggered them, severity deltas, false-positive count. On regressions (a previously
    caught flaw now missed), say so explicitly against the last recorded run.
-6. **Record the run**: append one line — date, the definition file's content hash
+7. **Record the run**: append one line — date, the definition file's content hash
    (`git hash-object <definition file> | cut -c1-7`; it identifies the exact text that was
    tested even before it is committed), fixture, score, misses — to
    `<kit>/plugins/<plugin>/evals/<agent>/runs.log`, the log beside the fixture (create it if

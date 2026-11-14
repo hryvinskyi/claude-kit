@@ -136,7 +136,7 @@ rowValueError: function (row) {
 
 ## Detection recipes — candidates, not findings
 
-ripgrep over the module (`app/code/<Vendor>/<Module>`) or theme; `-g '*.phtml'`, `-g '*.js'`, `-g '*.xml'` per row.
+ripgrep over the module (`app/code/<Vendor>/<Module>`) or theme; `-g '*.phtml'`, `-g '*.js'`, `-g '*.xml'` per row. A row that names a folder takes one glob holding the folder and the extension, `-g '**/web/js/**/*.js'`, in place of `-g '*.js'`: two positive `-g` globs join with OR and widen the search instead of narrowing it.
 
 | Smell | Search | Cleared when |
 |---|---|---|
@@ -151,9 +151,9 @@ ripgrep over the module (`app/code/<Vendor>/<Module>`) or theme; `-g '*.phtml'`,
 | Another module's asset | `render(Script\|Style)\('(\w+_\w+)::` where the prefix is not the module itself | the module declares that dependency |
 | Optimizer vocabulary in a feature module | `data-deferjs\|data-ignore-extreme-lazy-load\|data-pagespeed-ignore-merge\|data-cookieconsent` in `*.phtml` | the project's single intent-to-attributes place |
 | Page cache disabled | `cacheable="false"` in layout XML | a genuinely private page (customer account, checkout) |
-| Globals from module JS | `window\.\w+\s*=` in `view/*/web/js/**` | one documented namespace from one entry point |
+| Globals from module JS | `window\.\w+\s*=` with `-g '**/web/js/**/*.js'` | one documented namespace from one entry point |
 | Mixins | `mixins` in `requirejs-config.js` | each mixin calls `_super()` and keeps the contract — read them |
-| XSS sinks | `innerHTML\|\.html\(` in `view/*/web/js/**` | server-escaped HTML only |
+| XSS sinks | `innerHTML\|\.html\(` with `-g '**/web/js/**/*.js'` | server-escaped HTML only |
 
 ## Magento frontend review checklist
 - [ ] The area's delivery mechanism was followed; no new mechanism introduced.

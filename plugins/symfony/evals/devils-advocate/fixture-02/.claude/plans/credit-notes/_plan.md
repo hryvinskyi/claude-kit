@@ -37,37 +37,47 @@
 
 | # | Task | Depends on |
 |---|------|------------|
-| 1 | Migration: `billing_credit_note`, `billing_refund_instruction`, `billing_invoice.credited_minor` | — |
+| 1 | Migration: `billing_credit_note`, `billing_refund_instruction`, `billing_invoice.credited_minor` + `credited_currency` | — |
 | 2 | `Invoice::credit()` + `InvoiceRepositoryInterface::getForUpdate()` | 1 |
 | 3 | `CreditNote` and `RefundInstruction` entities + `CreditNoteRepositoryInterface` | 1, 2 |
 | 4 | `RefundMethodInterface` strategies + `RefundMethodRegistry` | 3 |
 | 5 | `CreditNoteIssuer` use case | 2, 3, 4 |
 | 6 | `POST /api/invoices/{id}/credit-notes` + `InvoiceVoter::CREDIT` | 5 |
-| 7 | Admin UI: button, form, banners; strings in `en` and `de` | 6 |
+| 7 | Admin UI: invoice detail screen, server-rendered credit-note form, banners; strings in `en` and `de` | 6 |
 
 ## Task 1 — migration
 
 `packages/billing/src/Migrations/Version20260801100000.php`, hand-written, following
 `Version20260401090000.php`.
 
-- `up()`: `ALTER TABLE billing_invoice ADD credited_minor BIGINT NOT NULL DEFAULT 0`;
+- `up()`: `ALTER TABLE billing_invoice RENAME COLUMN currency TO total_currency`;
+  `ALTER TABLE billing_invoice ADD credited_minor BIGINT NOT NULL DEFAULT 0, ADD credited_currency
+  CHAR(3)`; `UPDATE billing_invoice SET credited_currency = total_currency`; `ALTER TABLE
+  billing_invoice ALTER credited_currency SET NOT NULL, ADD CONSTRAINT chk_invoice_credited_currency
+  CHECK (credited_currency = total_currency)`;
   `CREATE TABLE billing_credit_note (id UUID PRIMARY KEY, invoice_id UUID NOT NULL
   REFERENCES billing_invoice(id), amount_minor BIGINT NOT NULL CHECK (amount_minor > 0),
-  currency CHAR(3) NOT NULL, reason VARCHAR(500) NOT NULL, idempotency_key VARCHAR(64) NOT
+  amount_currency CHAR(3) NOT NULL, reason VARCHAR(500) NOT NULL, idempotency_key VARCHAR(64) NOT
   NULL, issued_at TIMESTAMPTZ NOT NULL, UNIQUE (invoice_id, idempotency_key))`;
   `CREATE INDEX idx_credit_note_invoice ON billing_credit_note (invoice_id)`;
   `CREATE TABLE billing_refund_instruction (id UUID PRIMARY KEY, credit_note_id UUID NOT
   NULL UNIQUE REFERENCES billing_credit_note(id), payment_method VARCHAR(16) NOT NULL,
-  amount_minor BIGINT NOT NULL, currency CHAR(3) NOT NULL, created_at TIMESTAMPTZ NOT NULL)`.
-- `down()`: drops the two tables, then the column — the exact reverse.
+  amount_minor BIGINT NOT NULL, amount_currency CHAR(3) NOT NULL, created_at TIMESTAMPTZ NOT NULL)`.
+- `down()`: drops the two tables, then the constraint and the two columns, then renames
+  `total_currency` back to `currency` — the exact reverse.
 - Integration test: migrate up, down, up against real Postgres, asserting the columns,
-  constraints and indexes through `information_schema`. The mapping ↔ schema check belongs
-  to Task 3, where the last of the mappings exists.
+  constraints and indexes through `information_schema`. Task 3 validates the mapping alone
+  (`--skip-sync`); what pins each mapped column to this schema is the save-and-load round-trip
+  tests of Tasks 2 and 3 against real Postgres.
 
 ## Task 2 — the invariant lives in `Invoice`
 
-- `Invoice` gains `private Money $credited` (mapped to `credited_minor` + the invoice
-  currency; starts at zero) and two methods:
+- `Invoice` has no Doctrine mapping today, and this task writes it, as attributes: `Money` is an
+  `#[ORM\Embeddable]` with columns `minor` and `currency`; `Invoice` embeds `total` with
+  `columnPrefix: 'total_'` (`total_minor`, `total_currency`, the columns Task 1 leaves) and
+  `credited` with `columnPrefix: 'credited_'`. Each `Money` owns its own currency column; the
+  check constraint of Task 1 keeps the two equal.
+- `Invoice` gains `private Money $credited` (starts at zero) and two methods:
   - `remainingCreditable(): Money` — `total` minus `credited`.
   - `credit(Money $amount): void` — throws `CreditExceedsRemaining` (new, `Api/`) when
     `$amount` is greater than `remainingCreditable()`, and `InvalidArgumentException` from
@@ -76,11 +86,17 @@
 - `InvoiceRepositoryInterface` gains one method. It does not exist today; this task adds
   it to the interface and to `DoctrineInvoiceRepository`:
   `public function getForUpdate(string $id): Invoice;` — `@throws InvoiceNotFound`; loads
-  with `LockMode::PESSIMISTIC_WRITE`; must be called inside a transaction.
+  with `LockMode::PESSIMISTIC_WRITE`; must be called inside a transaction. When the request has
+  already loaded the invoice (the endpoint's voter check does), the locked read does not
+  overwrite the managed instance, so `getForUpdate()` refreshes it under the lock
+  (`EntityManagerInterface::refresh($invoice, LockMode::PESSIMISTIC_WRITE)`): the state checked
+  is always the state read under the lock.
 - Unit: `InvoiceTest` — credit within remaining, credit equal to remaining, exceeds,
   zero, currency mismatch, two credits accumulate. Integration:
   `DoctrineInvoiceRepositoryTest` — `get`, `save`, `getForUpdate` round-trip against
-  Postgres, and `getForUpdate` on an unknown id throws `InvoiceNotFound`.
+  Postgres, `getForUpdate` on an unknown id throws `InvoiceNotFound`, and `getForUpdate` after
+  `get` in the same request returns the `credited` amount another connection committed in
+  between.
 
 ## Task 3 — `CreditNote`, `RefundInstruction`, repository port
 
@@ -91,14 +107,19 @@
 - `Entity/RefundInstruction.php`: named constructor
   `RefundInstruction::owe(string $id, string $creditNoteId, PaymentMethod $method, Money
   $amount, \DateTimeImmutable $createdAt): self`. No setters.
+- Both entities embed their `Money $amount` with `columnPrefix: 'amount_'` (`amount_minor`,
+  `amount_currency`, as Task 1 names them).
 - `Api/CreditNoteRepositoryInterface.php`:
   - `public function save(CreditNote $note, RefundInstruction $instruction): void;`
   - `public function findByIdempotencyKey(string $invoiceId, string $key): ?CreditNote;`
 - `Repository/DoctrineCreditNoteRepository.php` implements it; aliased in
   `Resources/config/services.yaml` next to the existing invoice alias.
-- Unit: both entities' constructors. Integration: Doctrine's schema validation passes for
-  the module (Tasks 1 and 2 are in by now); save + find round-trip; a second save
-  with the same `(invoice_id, idempotency_key)` fails on the unique index.
+- Unit: both entities' constructors. Integration: Doctrine's mapping validation passes for
+  the module (`doctrine:schema:validate --skip-sync`; Tasks 1 and 2 are in by now). The
+  schema comparison is left out on purpose: `CreditNote` and `RefundInstruction` reference by
+  id, so the mapping knows nothing of the two foreign keys Task 1 creates, and Task 1's test is
+  what asserts them. Save + find round-trip; a second save with the same
+  `(invoice_id, idempotency_key)` fails on the unique index.
 
 ## Task 4 — refund strategies, resolved from a registry
 
@@ -170,11 +191,22 @@ invoice with amounts that only fit once: exactly one succeeds, the other gets
 
 ## Task 7 — admin UI and strings
 
-- The invoice detail screen gets an **Issue credit note** button (hidden without
-  `CREDIT`), a form (amount prefilled with the remaining creditable amount, reason), a
-  success banner, and an error banner per `409` / `422` / `400` response. While the
-  request is in flight the button is disabled. When nothing remains to credit the button
-  is replaced by a muted note.
+- The package has no invoice detail screen and no asset pipeline today. This task adds the
+  screen, server-rendered and working without JavaScript: `Controller/Admin/InvoiceDetailController.php`
+  (`GET /admin/invoices/{id}`) renders `Resources/views/admin/invoice/detail.html.twig`. It calls
+  `denyAccessUnlessGranted('VIEW', $invoice)`: this task adds `InvoiceVoter::VIEW`, granted to
+  `ROLE_BILLING_ADMIN` and `ROLE_BILLING_VIEWER`.
+- The screen gets an **Issue credit note** form (hidden without `CREDIT`): amount prefilled
+  with the remaining creditable amount, reason, a CSRF token, and an idempotency key (a UUID
+  drawn when the form is rendered, in a hidden field). It posts to
+  `Controller/Admin/IssueCreditNoteController.php` (`POST /admin/invoices/{id}/credit-notes`),
+  translate-and-delegate only: it checks the token and `CREDIT`, builds the same
+  `IssueCreditNote` from the form fields and the key, calls `CreditNoteIssuer::issue()`, and
+  redirects back to the screen with a banner. Resubmitting the same form sends the same key, so
+  a double click is answered, not repeated.
+- Banners: a success banner, and an error banner per outcome (`CreditExceedsRemaining`,
+  `NothingToCredit`, an invalid form). When nothing remains to credit the form is replaced by a
+  muted note.
 - The banner names the refund route with the label that already exists per method. The
   lookup is a value→value map, no behavior hangs on it:
   `match ($method) { PaymentMethod::Card => 'invoice.payment_method.card',
@@ -185,17 +217,21 @@ invoice with amounts that only fit once: exactly one succeeds, the other gets
   `credit_note.reason`, `credit_note.amount`, `credit_note.error.exceeds_remaining`,
   `credit_note.error.nothing_to_credit`, `credit_note.error.invalid`,
   `credit_note.nothing_remaining`.
-- The invoice header is re-rendered from the `201` body; the invoice number shown in it is
-  the one the server returns and is never altered client-side.
+- The screen shows `invoice.title`, the invoice number as stored, and the form; it has no
+  other label than `invoice.title` (already in both locales) and the `credit_note.*` strings
+  above. Nothing in this task changes the number.
 - Unit: the label map covers every `PaymentMethod` case. Integration: the screen renders
-  the button for an admin and not for a viewer; `TranslationParityTest` stays green.
+  the form for an admin and not for a viewer; a user with neither billing role gets `403`
+  on `GET /admin/invoices/{id}`; a submission issues one note and shows the
+  success banner; resubmitting the same form leaves one note; a submission over the remaining
+  amount shows the exceeds banner; `TranslationParityTest` stays green.
 
 ## Dependency rule check
 
 - `CreditNoteIssuer` → `InvoiceRepositoryInterface`, `CreditNoteRepositoryInterface`,
   `RefundMethodRegistry`, `ClockInterface`: interfaces owned by `Api/` or PSR. Inward.
 - Entities import nothing from Doctrine or Symfony beyond mapping attributes.
-- The controller depends on the issuer and the voter; nothing depends on the controller.
+- The controllers depend on the issuer and the voter; nothing depends on a controller.
 
 ## Logged for later (outside this plan)
 

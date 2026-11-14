@@ -33,9 +33,8 @@ project with a stack plugin, read its stack skill's *Implementer checklist on th
   the framework's: the stack skill names the mechanism, or the project's docs do.
   If the project has none, the plan's first task that creates an object builds the generator. A task
   that needs a factory when no generator exists and no earlier task of the plan builds one stops and
-  returns that gap: the plan is missing its generator task. Never a hand-written `new`. `throw new …Exception`, attribute metadata, tests and the composition root are
-  exempt. The composition root is the one place that builds the container, before any exists (the
-  front controller or console entry point that boots the kernel), not wiring code in general.
+  returns that gap: the plan is missing its generator task. Never a hand-written `new`.
+  Exempt: `throw new …Exception`; attribute metadata (`#[…(new …)]`), because an attribute argument must be a constant expression, where a nested object can only be written with `new`, and reflection reads it as metadata rather than the caller running it; tests; the composition root — the code that runs before a container exists and builds it (the front controller or console entry point, and the bootstrap they call to build the container), and no other wiring code; `(object) []` as an empty JSON object, and as nothing else.
 - A factory method only creates: one object per method, from its arguments, no computation.
 - A static named constructor (`Foo::of(...)` doing `new self(...)`) is not an alternative: it is
   the same `new`, and nothing can substitute for it. Don't write one; plan a factory.
@@ -98,8 +97,8 @@ project with a stack plugin, read its stack skill's *Implementer checklist on th
 
 ## Self-check before reporting
 
-- `git diff -U0 | grep -nEi '^\+.*(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)'`
-  — any hit on an added line is a defect: restate the rule, do not cite the plan.
+- `{ git diff -U0 HEAD -- . ':!.claude/plans' | grep -nEi '^\+.*(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)'; git ls-files -z --others --exclude-standard -- . ':!.claude/plans' | xargs -0 grep -nEi -e '(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)' -- /dev/null; }`
+  — the changed lines, staged or not, and every line of a new file; any hit is a defect: restate the rule, do not cite the plan.
 - Every new class is registered where its kind is discovered; every port has exactly the
   implementations the plan names.
 - Run the detection recipes of `solid.md` and the stack skill over **every file you
@@ -107,8 +106,7 @@ project with a stack plugin, read its stack skill's *Implementer checklist on th
   Minimum, for any controller you touched:
   `rg -nP '(?<!throw )\bnew\s+(?!class\b)[\w\\]+\s*\(|::of\(|getMessage\(\)' <non-test files>`,
   plus the stack skill's additions for its framework's side channel and concrete types.
-  Every `new` hit is a defect, other than `throw new`, attribute metadata, tests and the composition root; a hand-written
-  factory's `new` included.
+  Every `new` hit is a defect, a hand-written factory's `new` included. Exempt: `throw new …Exception`; attribute metadata (`#[…(new …)]`), because an attribute argument must be a constant expression, where a nested object can only be written with `new`, and reflection reads it as metadata rather than the caller running it; tests; the composition root — the code that runs before a container exists and builds it (the front controller or console entry point, and the bootstrap they call to build the container), and no other wiring code; `(object) []` as an empty JSON object, and as nothing else.
   An unexplained hit is a defect, not a note for later.
 
 ## When the checklist and your task text disagree

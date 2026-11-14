@@ -30,6 +30,13 @@ const FIRST = 'example-org/first-repo';
 const FILED = new Date('2026-01-10T09:00:00.000Z');
 const twelve = IssueRef.of(FIRST, 12);
 
+/** The refusal a kind ends with on a number that names a pull request. */
+function refusesAPullRequest(error: unknown): boolean {
+  return error instanceof RefusedByRule
+    && error.category === 'refused-by-rule'
+    && /example-org\/first-repo#12 is a pull request, not an issue/.test(error.describe());
+}
+
 type Stage = {
   ctx: ExecutionContext;
   board: FakeBoardGateway;
@@ -74,6 +81,18 @@ describe('the comment kind', () => {
     assert.equal(it_.issues.posted.length, 1);
     assert.equal(it_.issues.posted[0]?.body, `the fix is live${marker('a-1')}`);
     assert.match(result.summary, /issuecomment-/);
+    assert.deepEqual(it_.issues.calls, ['get', 'listComments', 'comment']);
+  });
+
+  it('refuses a pull request\'s number before it looks for or posts anything', async () => {
+    const it_ = stage({ issues: [{ ref: twelve, pullRequest: true }] });
+
+    await assert.rejects(
+      () => new CommentKind().execute({ repo: FIRST, issue: 12, body: 'the fix is live' }, it_.ctx),
+      refusesAPullRequest,
+    );
+    assert.equal(it_.issues.posted.length, 0);
+    assert.deepEqual(it_.issues.calls, ['get']);
   });
 
   it('adopts what an earlier run already posted and writes nothing', async () => {
@@ -125,7 +144,38 @@ describe('the close kind', () => {
     assert.match(result.summary, /closed as completed/);
     // The comment and the close are two writes, and they are paced apart.
     assert.deepEqual(it_.sleeper.slept, [1500]);
-    assert.deepEqual(it_.issues.calls, ['listComments', 'comment', 'get', 'close', 'get']);
+    assert.deepEqual(it_.issues.calls, ['get', 'listComments', 'comment', 'close', 'get']);
+  });
+
+  it('refuses a pull request\'s number before it comments or closes', async () => {
+    const it_ = stage({ issues: [{ ref: twelve, pullRequest: true }] });
+
+    await assert.rejects(
+      () => new CloseKind().execute(
+        { repo: FIRST, issue: 12, reason: 'completed', comment: 'shipped in 1.4.2' },
+        it_.ctx,
+      ),
+      refusesAPullRequest,
+    );
+    assert.equal(it_.issues.posted.length, 0);
+    assert.equal(it_.issues.closed.length, 0);
+    assert.equal(it_.issues.stateOf(twelve), 'open');
+    assert.deepEqual(it_.issues.calls, ['get']);
+  });
+
+  it('still leaves the evidence on an issue that is already closed', async () => {
+    const it_ = stage({ issues: [{ ref: twelve, state: 'closed' }] });
+
+    const result = await new CloseKind().execute(
+      { repo: FIRST, issue: 12, reason: 'completed', comment: 'shipped in 1.4.2' },
+      it_.ctx,
+    );
+
+    assert.equal(it_.issues.posted.length, 1);
+    assert.equal(it_.issues.closed.length, 0);
+    assert.deepEqual(it_.issues.calls, ['get', 'listComments', 'comment']);
+    assert.match(result.summary, /commented/);
+    assert.match(result.summary, /already closed/);
   });
 
   it('leaves an issue that is already closed alone, and needs no second look at it', async () => {
@@ -462,7 +512,7 @@ describe('the assignees kind', () => {
     const result = await kind.execute({ repo: FIRST, issue: 12, add: ['alice'], remove: ['carol'] }, it_.ctx);
 
     assert.deepEqual(it_.issues.assigneesOf(twelve), ['alice']);
-    assert.deepEqual(it_.issues.calls, ['addAssignees', 'removeAssignees', 'get']);
+    assert.deepEqual(it_.issues.calls, ['get', 'addAssignees', 'removeAssignees', 'get']);
     assert.deepEqual(it_.sleeper.slept, [1500], 'the two writes are paced');
     assert.match(result.summary, /assigned to alice/);
   });
@@ -472,7 +522,18 @@ describe('the assignees kind', () => {
 
     await kind.execute({ repo: FIRST, issue: 12, remove: ['carol'] }, it_.ctx);
 
-    assert.deepEqual(it_.issues.calls, ['removeAssignees', 'get']);
+    assert.deepEqual(it_.issues.calls, ['get', 'removeAssignees', 'get']);
+  });
+
+  it('refuses a pull request\'s number before it assigns or unassigns anybody', async () => {
+    const it_ = stage({ issues: [{ ref: twelve, pullRequest: true, assignees: ['carol'] }] });
+
+    await assert.rejects(
+      () => kind.execute({ repo: FIRST, issue: 12, add: ['alice'], remove: ['carol'] }, it_.ctx),
+      refusesAPullRequest,
+    );
+    assert.deepEqual(it_.issues.assigneesOf(twelve), ['carol']);
+    assert.deepEqual(it_.issues.calls, ['get']);
   });
 
   it('reports a login GitHub would not assign instead of reading as done', async () => {

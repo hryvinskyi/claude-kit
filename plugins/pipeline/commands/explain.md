@@ -23,7 +23,7 @@ Mode, when not given: a route, command, class or file → **quick**; a directory
 
 - The project's `CLAUDE.md`/`AGENTS.md` and the docs it points to for this area — they say what the layers are called here.
 - On a project a stack plugin covers, its PHP architecture skill (the Skill tool lists the installed ones): its *Finding things* section says how to list that framework's routes, commands, listeners and pools, which is where the trace below starts and branches.
-- The vault (`find-vault`, which the kit's vault tooling puts on `PATH`): the module's note, and any decision record touching the area. A decision explains *why* the code is shaped this way, which the code cannot. Treat a note as a lead and check it against the code; when they disagree, the code wins and the disagreement is worth one line in the answer.
+- The vault, when the project has one: `find-vault` (the `vault` plugin puts it on `PATH`), or with no `find-vault` the directory the `Knowledge-base directory:` line in `CLAUDE.md`/`AGENTS.md` names. A directory that does not exist, no declaration, or exit 1 means no vault: skip this source and create nothing. From the vault: the module's note, and any decision record touching the area. A decision explains *why* the code is shaped this way, which the code cannot. Treat a note as a lead and check it against the code; when they disagree, the code wins and the disagreement is worth one line in the answer.
 
 ## 3. Trace
 

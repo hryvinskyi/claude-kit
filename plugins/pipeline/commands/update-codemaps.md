@@ -9,7 +9,7 @@ Analyze the codebase structure and update the architecture documentation in `cod
 
 **One knowledge system per project.** If the project keeps a knowledge vault with
 structural maps (declared in `CLAUDE.md`/`AGENTS.md`; e.g. `<vault>/Maps/`), update those
-via the vault's own tooling (`/wiki-sync`) instead of creating a parallel `codemaps/` —
+via the vault's own tooling (`/vault:wiki-sync`) instead of creating a parallel `codemaps/` —
 two independently rotting systems are worse than one. Only proceed below when the project
 has no vault-based maps.
 

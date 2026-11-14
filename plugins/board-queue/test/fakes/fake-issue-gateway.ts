@@ -2,6 +2,7 @@ import type {
   IssueCloseReason,
   IssueCommentView,
   IssueGateway,
+  IssueReading,
   IssueState,
   IssueSummary,
 } from '../../src/application/ports.ts';
@@ -26,6 +27,8 @@ export type SeededIssue = {
   title?: string;
   comments?: readonly SeededComment[];
   assignees?: readonly string[];
+  /** True for a number that names a pull request, which the issue endpoints answer for as well. */
+  pullRequest?: boolean;
 };
 
 export type SeededComment = {
@@ -39,6 +42,7 @@ type HeldIssue = {
   title: string;
   comments: IssueCommentView[];
   assignees: string[];
+  pullRequest: boolean;
 };
 
 /**
@@ -78,6 +82,7 @@ export class FakeIssueGateway implements IssueGateway {
       title: issue.title ?? `issue ${String(issue.ref.number)}`,
       comments: (issue.comments ?? []).map((comment) => this.#toView(issue.ref, comment.body, comment.createdAt)),
       assignees: [...(issue.assignees ?? [])],
+      pullRequest: issue.pullRequest ?? false,
     });
     return this;
   }
@@ -138,7 +143,7 @@ export class FakeIssueGateway implements IssueGateway {
     return Promise.resolve();
   }
 
-  get(ref: IssueRef): Promise<IssueSummary> {
+  get(ref: IssueRef): Promise<IssueReading> {
     this.#answer('get');
     const issue = this.#require(ref);
     return Promise.resolve({
@@ -147,6 +152,7 @@ export class FakeIssueGateway implements IssueGateway {
       title: issue.title,
       url: issue.ref.url(),
       assignees: [...issue.assignees],
+      isPullRequest: issue.pullRequest,
     });
   }
 
@@ -174,6 +180,7 @@ export class FakeIssueGateway implements IssueGateway {
 
   #of(repo: string, state: IssueState): IssueSummary[] {
     return [...this.#issues.values()]
+      .filter((issue) => !issue.pullRequest)
       .filter((issue) => issue.ref.repoFullName().toLowerCase() === repo.toLowerCase() && issue.state === state)
       .map((issue) => ({
         number: issue.ref.number,

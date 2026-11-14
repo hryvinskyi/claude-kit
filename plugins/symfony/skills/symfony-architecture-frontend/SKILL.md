@@ -41,20 +41,23 @@ export default class extends Controller {
   static values = { endpoint: String, csrf: String, invalid: String, failed: String };   // wording arrives translated
   static targets = ['input', 'message'];
 
-  #requests = new AbortController();
+  #requests;
 
-  disconnect() { this.#requests.abort(); }
+  connect() { this.#requests = new AbortController(); }       // one per connection: Stimulus reuses this instance on reconnect
+
+  disconnect() { this.#requests.abort(); }                    // an aborted controller never resets, so the next connect() makes a new one
 
   async apply(event) {
     event.preventDefault();
     const code = parseCouponCode(this.inputTarget.value);
     if (!code.ok) { this.messageTarget.textContent = this.invalidValue; return; }
 
+    const { signal } = this.#requests;                            // this connection's signal, kept past a reconnect
     try {
-      const totals = await couponClient(this.endpointValue, this.csrfValue).apply(code.value, this.#requests.signal);
+      const totals = await couponClient(this.endpointValue, this.csrfValue).apply(code.value, signal);
       this.dispatch('applied', { detail: { totals } });            // listeners own what happens next
     } catch (error) {
-      if (!this.#requests.signal.aborted) this.messageTarget.textContent = this.failedValue;
+      if (!signal.aborted) this.messageTarget.textContent = this.failedValue;
     }
   }
 }
@@ -114,16 +117,16 @@ When a feature needs a real client-side application (an editor, a canvas, a cons
 
 ## Detection recipes — candidates, not findings
 
-ripgrep over the package's `assets/` (or `src/Resources/assets/`) and templates.
+ripgrep over the package's `assets/` (or `src/Resources/assets/`) and templates. A row's folder and extensions go in one glob, `-g '**/controllers/**/*.{js,mjs,ts,mts}'`: a second positive `-g` joins with OR and widens the search instead of narrowing it.
 
 | Smell | Search | Cleared when |
 |---|---|---|
-| Network in a controller | `fetch\(` in `**/controllers/**` | the §2 conditions hold: own endpoint, values, deadline, abort on disconnect, parsed, mapped wording |
-| Selector outside the element | `document\.querySelector\|document\.getElementById` in `**/controllers/**` | a page-level singleton the controller documents (a toast region) |
+| Network in a controller | `fetch\(` with `-g '**/controllers/**/*.{js,mjs,ts,mts}'` | the §2 conditions hold: own endpoint, values, deadline, abort on disconnect, parsed, mapped wording |
+| Selector outside the element | `document\.querySelector\|document\.getElementById` with `-g '**/controllers/**/*.{js,mjs,ts,mts}'` | a page-level singleton the controller documents (a toast region) |
 | Reaching into controllers | `getControllerForElementAndIdentifier` | never in feature code |
-| No teardown | controllers with `addEventListener\|setInterval\|setTimeout\|observe\(` and no `disconnect()` | the resource is scoped to `this.element` and dies with it |
-| Hard-coded wording | `textContent\s*=\s*['"\`][A-Z]\|alert\(\|confirm\(` in `**/controllers/**` | never — values from Twig |
-| XSS sinks | `innerHTML\|insertAdjacentHTML` in `**/controllers/**` | server-escaped HTML the controller fetched from the project's own endpoint |
+| No teardown | `rg -l 'addEventListener\|setInterval\|setTimeout\|observe\(' -- /dev/null $(rg --files-without-match 'disconnect\(' -g '**/controllers/**/*.{js,mjs,ts,mts}' -- <radius>)`: controllers that start something and have no `disconnect()` | the resource is scoped to `this.element` and dies with it |
+| Hard-coded wording | `textContent\s*=\s*['"\`][A-Z]\|alert\(\|confirm\(` with `-g '**/controllers/**/*.{js,mjs,ts,mts}'` | never — values from Twig |
+| XSS sinks | `innerHTML\|insertAdjacentHTML` with `-g '**/controllers/**/*.{js,mjs,ts,mts}'` | server-escaped HTML the controller fetched from the project's own endpoint |
 | Inline handlers | `\bon(click\|change\|submit\|input\|load)=` in `*.twig` | never |
 | Inline scripts without nonce | `<script(?![^>]*nonce)` in `*.twig` (`-P`) | a JSON data block (`type="application/json"`) |
 | Registration in the wrong package | `controller_paths\|asset_mapper` config naming another package's directory | the shell package's documented global manifest |

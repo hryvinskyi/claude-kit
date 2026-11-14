@@ -144,11 +144,11 @@ In a server-rendered application, React usually runs as an **island**: a bundle 
 
 ## Detection recipes — candidates, not findings
 
-ripgrep with `-g '*.{tsx,jsx,ts,js}'` plus the exclusions of `solid.md`.
+ripgrep with `-g '*.{tsx,jsx,ts,js}'` plus the exclusions of `solid.md`. A row that names folders takes one glob holding the folders and the extensions in place of that one: two positive `-g` globs join with OR. Over a list of files no `-g` glob applies at all: pass directories, or filter the list by the row's folders and extensions first (`solid.md` §Detection recipes).
 
 | Smell | Search | Cleared when |
 |---|---|---|
-| Fetch in a component | `fetch\(\|axios\.` in `**/{components,ui,pages,routes}/**` | never — through the port or the data layer |
+| Fetch in a component | `fetch\(\|axios\.` with `-g '**/{components,ui,pages,routes}/**/*.{tsx,jsx,ts,js}'` | never — through the port or the data layer |
 | Effect as a data layer | files with `useEffect\(` and `fetch\(\|\.get\(` | a subscription, or a fetch with abort and stale guard where no data layer exists |
 | Derived state stored | `useState\(props\.\|useEffect\(\(\) => \{\s*set\w+\(` (`-P`, `-U`) | the state is a deliberate initial value, named `initial…` |
 | Suppressed hook rules | `eslint-disable.*react-hooks` | never |

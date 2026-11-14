@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import type { IssueCloseReason, IssueCommentView, IssueGateway, IssueSummary } from '../application/ports.ts';
+import type {
+  IssueCloseReason,
+  IssueCommentView,
+  IssueGateway,
+  IssueReading,
+  IssueSummary,
+} from '../application/ports.ts';
 import { TransientFailure } from '../domain/errors.ts';
 import type { IssueRef } from '../domain/issue-ref.ts';
 import type { RateBudget } from '../domain/rate-budget.ts';
@@ -32,7 +38,10 @@ const CommentPayload = z.object({
   created_at: z.string(),
 });
 
-/** The listing endpoint answers issues and pull requests alike; only one is ours. */
+/**
+ * The issue endpoints answer for issues and pull requests alike, and only a pull
+ * request carries this key.
+ */
 const PullRequestMarker = z.object({ pull_request: z.object({}).passthrough() });
 
 export class GitHubRestIssues implements IssueGateway {
@@ -64,10 +73,13 @@ export class GitHubRestIssues implements IssueGateway {
     await this.http.rest('DELETE', `${issuePath(ref)}/assignees`, { assignees: [...logins] }, subject, ABOUT_AN_ISSUE);
   }
 
-  async get(ref: IssueRef): Promise<IssueSummary> {
+  async get(ref: IssueRef): Promise<IssueReading> {
     const subject = ref.toString();
     const result = await this.http.rest('GET', issuePath(ref), undefined, subject, ABOUT_AN_ISSUE);
-    return toSummary(decodeWire(IssuePayload, result.data, subject));
+    return {
+      ...toSummary(decodeWire(IssuePayload, result.data, subject)),
+      isPullRequest: isPullRequest(result.data),
+    };
   }
 
   async listComments(ref: IssueRef, since: Date | null): Promise<IssueCommentView[]> {
@@ -114,7 +126,7 @@ export class GitHubRestIssues implements IssueGateway {
   private async listIssues(repo: string, query: URLSearchParams, subject: string): Promise<IssueSummary[]> {
     const rows = await this.collect(`/repos/${repo}/issues?${query.toString()}`, subject);
     return rows
-      .filter((row) => !PullRequestMarker.safeParse(row).success)
+      .filter((row) => !isPullRequest(row))
       .map((row) => toSummary(decodeWire(IssuePayload, row, subject)));
   }
 
@@ -134,6 +146,10 @@ export class GitHubRestIssues implements IssueGateway {
     }
     return rows;
   }
+}
+
+function isPullRequest(row: unknown): boolean {
+  return PullRequestMarker.safeParse(row).success;
 }
 
 function issuePath(ref: IssueRef): string {

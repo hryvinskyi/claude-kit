@@ -59,7 +59,8 @@ Evals are a maintainer tool: they run from the kit's source clone, never from th
 
 Here, in the pipeline plugin:
 
-- `wiki-updater/fixture-01` + `expected-01.md` — vault project ("acme-notes") with a real
+- `wiki-updater/fixture-01` + `expected-01.md` — for the `vault` plugin's agent, run as
+  `vault:wiki-updater`: a vault project ("acme-notes") with a real
   sync script (`scripts/kb-sync.py`), a stale managed block, empty prose, and an orphan
   note. Tests: sync-not-hand-edit, prose outside markers grounded in code, orphan
   reported-not-deleted, idempotence re-run, working-memory layer untouched.

@@ -81,9 +81,9 @@ too.
 
 ## Self-check before reporting
 
-- `git diff -U0 | grep -nEi '^\+.*(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)'`
-  — any hit on an added line is a defect: restate the rule, do not cite the plan.
-- `git diff -U0 | grep -nE '^\+.*(eslint-disable|@ts-(ignore|expect-error|nocheck)|: any\b|as unknown as|console\.log)'`
+- `{ git diff -U0 HEAD -- . ':!.claude/plans' | grep -nEi '^\+.*(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)'; git ls-files -z --others --exclude-standard -- . ':!.claude/plans' | xargs -0 grep -nEi -e '(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)' -- /dev/null; }`
+  — the changed lines, staged or not, and every line of a new file; any hit is a defect: restate the rule, do not cite the plan.
+- `{ git diff -U0 HEAD -- . ':!.claude/plans' | grep -nE '^\+.*(eslint-disable|@ts-(ignore|expect-error|nocheck)|: any\b|as unknown as|console\.log)'; git ls-files -z --others --exclude-standard -- . ':!.claude/plans' | xargs -0 grep -nE -e '(eslint-disable|@ts-(ignore|expect-error|nocheck)|: any\b|as unknown as|console\.log)' -- /dev/null; }`
   — any hit in source is a defect to fix, not to explain.
 - Every new controller, entry, registry entry and route is registered where its kind is
   discovered, and a test exercises it through that registration.

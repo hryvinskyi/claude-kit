@@ -19,7 +19,7 @@ Don't extract trivia (typos, simple syntax errors) or one-time issues (a specifi
 ## Routing — where does each pattern belong?
 
 - **Reusable across projects** → a global skill (format below). Check `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/` and the plugin skills this session lists first — extend an existing skill instead of duplicating.
-- **Specific to this project** → NOT a global skill. Record it where the project keeps knowledge: its knowledge vault (`/decision` for choices, a module note for module facts) or its `CLAUDE.md`/`.claude/docs/`, per the project's conventions.
+- **Specific to this project** → NOT a global skill. Record it where the project keeps knowledge: its knowledge vault (`/vault:decision` for choices, a module note for module facts) or its `CLAUDE.md`/`.claude/docs/`, per the project's conventions.
 
 ## Global skill format
 

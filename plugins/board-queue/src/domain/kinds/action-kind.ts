@@ -1,5 +1,5 @@
 import type { z } from 'zod';
-import type { BoardGateway, Clock, IssueGateway, Sleeper } from '../../application/ports.ts';
+import type { BoardGateway, Clock, IssueGateway, Sleeper } from '../ports.ts';
 import type { FieldReading } from '../catalog.ts';
 import type { IssueRef } from '../issue-ref.ts';
 

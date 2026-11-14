@@ -71,7 +71,7 @@ Why: it is DIP at the call site. A `new`, or a static call that makes one, binds
 
 An aggregate has no container, so a factory reaches it as a method argument — `place()` receives `$events`, `total()` receives `$money`.
 
-Exempt: `throw new …Exception`, attribute metadata, tests, and the composition root (the one place that builds the container, before any exists: the front controller or console entry point that boots the kernel), not wiring code in general.
+Exempt: `throw new …Exception`; attribute metadata (`#[…(new …)]`), because an attribute argument must be a constant expression, where a nested object can only be written with `new`, and reflection reads it as metadata rather than the caller running it; tests; the composition root — the code that runs before a container exists and builds it (the front controller or console entry point, and the bootstrap they call to build the container), and no other wiring code; `(object) []` as an empty JSON object, and as nothing else.
 
 ### Value Object — immutable, equality by value, valid by construction
 No identity; two are equal iff their values are. Enforce invariants in the constructor so an invalid instance cannot exist; only the value's factory calls that constructor. PHP 8.2+ `readonly` classes are ideal.

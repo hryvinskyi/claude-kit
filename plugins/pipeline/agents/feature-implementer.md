@@ -100,8 +100,10 @@ documentation**.
   why a strategy set is closed, alternatives rejected during implementation, cross-task contracts.
   You must not edit the vault — put it under *For the vault* in your report and the orchestrator lands
   it before the plan is deleted.
-- **Self-check before reporting** (a hit on an added line is a defect — rewrite it, don't explain it):
-  `git diff -U0 | grep -nEi '^\+.*(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)'`
+- **Self-check before reporting** (a hit on an added line is a defect — rewrite it, don't explain it).
+  It reads tracked changes, staged or not, against `HEAD`, and every untracked file you created; the
+  plan directory is left out, since its own text holds these words:
+  `{ git diff -U0 HEAD -- . ':!.claude/plans' | grep -nEi '^\+.*(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)'; git ls-files -z --others --exclude-standard -- . ':!.claude/plans' | xargs -0 grep -nEi -e '(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)' -- /dev/null; }`
 
 ## Loop
 

@@ -61,7 +61,25 @@ describe('GitHubRestIssues writes', () => {
       title: 'issue 12',
       url: 'https://github.com/example-org/first-repo/issues/12',
       assignees: [],
+      isPullRequest: false,
     });
+  });
+
+  it('tells a pull request apart when its number is read through the issue address', async () => {
+    const { gateway, fetcher } = issues([{
+      headers: HEADERS,
+      body: issuePayload(12, 'open', {
+        html_url: 'https://github.com/example-org/first-repo/pull/12',
+        pull_request: { url: 'https://api.github.com/repos/example-org/first-repo/pulls/12' },
+      }),
+    }]);
+
+    const read = await gateway.get(REF);
+
+    assert.equal(read.isPullRequest, true);
+    assert.equal(fetcher.calls.length, 1);
+    assert.equal(fetcher.calls[0]?.method, 'GET');
+    assert.equal(fetcher.calls[0]?.url, 'https://api.github.com/repos/example-org/first-repo/issues/12');
   });
 
   it('reads who an issue is assigned to', async () => {

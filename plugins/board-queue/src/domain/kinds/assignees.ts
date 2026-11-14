@@ -3,6 +3,7 @@ import { ReadbackMismatch } from '../errors.ts';
 import { IssueRef } from '../issue-ref.ts';
 import type { ActionKind, ActionResult, ExecutionContext } from './action-kind.ts';
 import { IssueNumberSchema, RepoSchema } from './fields.ts';
+import { readIssueOnly } from './issue-only.ts';
 import { validatedReplay } from './replay.ts';
 
 /** A GitHub login: letters, digits and single hyphens, at most 39 characters. */
@@ -42,7 +43,8 @@ export type AssigneesPayload = z.infer<typeof shape>;
 
 const DESCRIBE = [
   'Change who an issue is assigned to. Name the repository as owner/name, the issue number, and the logins',
-  'to add and to remove; everybody else stays assigned. The change is confirmed by reading the issue back: a',
+  'to add and to remove; everybody else stays assigned. A number that names a pull request blocks the action',
+  'before anybody is assigned. The change is confirmed by reading the issue back: a',
   'login GitHub would not assign — somebody without access to the repository — blocks the action and says',
   'so, rather than reading as done. A later one merges into the last action on the issue that may still',
   'write to it (queued, held, running, failed or blocked) when that action is one of these and still waiting,',
@@ -100,13 +102,15 @@ export class AssigneesKind implements ActionKind {
   }
 
   /**
-   * The additions go first, then the removals, each only when there is something
-   * to send; the issue is read back once, and a login that is not where the
-   * request put it is reported with what the issue says instead.
+   * The issue is read first, so that a pull request's number is refused before
+   * anything is sent. The additions go next, then the removals, each only when
+   * there is something to send; the issue is read back once, and a login that is
+   * not where the request put it is reported with what the issue says instead.
    */
   async execute(payload: unknown, ctx: ExecutionContext): Promise<ActionResult> {
     const parsed = this.payloadSchema.parse(payload);
     const ref = IssueRef.of(parsed.repo, parsed.issue);
+    await readIssueOnly(ref, ctx);
     if (parsed.add.length > 0) {
       await ctx.issues.addAssignees(ref, parsed.add);
     }

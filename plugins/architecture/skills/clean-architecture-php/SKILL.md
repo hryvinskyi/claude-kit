@@ -253,9 +253,7 @@ Boundaries cost indirection. Add one only where the benefit is real. Before reco
      stack skill names the mechanism, or the project's docs do. If the project has none, the first
      task of the plan that creates an object builds the generator, with its own tests, before any
      task injects a factory; the stack skill says what makes one hold up. Never a hand-written `new`.
-   - Exempt: `throw new …Exception`, attribute metadata, tests, and the **composition root**: the one
-     place that builds the container, before any exists (the front controller or console entry point
-     that boots the kernel). It is not wiring code in general.
+   - Exempt: `throw new …Exception`; attribute metadata (`#[…(new …)]`), because an attribute argument must be a constant expression, where a nested object can only be written with `new`, and reflection reads it as metadata rather than the caller running it; tests; the composition root — the code that runs before a container exists and builds it (the front controller or console entry point, and the bootstrap they call to build the container), and no other wiring code; `(object) []` as an empty JSON object, and as nothing else.
    - A static named constructor doing `new self(...)` is the same violation behind a different spelling.
    - A factory method only creates: one object per method, no computation. An operation that yields a
      value (summing two amounts) lives on the value or on a service, which asks the factory for the
@@ -299,7 +297,7 @@ final class PlaceOrderHandler
 }
 ```
 
-**Never `new` a class.** Services come from the container, and new instances come from an injected `…FactoryInterface` whose implementation the build generates, or a thin adapter delegates to the factory the framework generates (the stack skill names how; where there is none, the plan's first task that creates an object builds the generator). Nothing a person writes says `new`, not even a factory. `throw new …Exception`, attribute metadata, tests and the composition root (the one place that builds the container, before any exists) are exempt.
+**Never `new` a class.** Services come from the container, and new instances come from an injected `…FactoryInterface` whose implementation the build generates, or a thin adapter delegates to the factory the framework generates (the stack skill names how; where there is none, the plan's first task that creates an object builds the generator). Nothing a person writes says `new`, not even a factory. Exempt: `throw new …Exception`; attribute metadata (`#[…(new …)]`), because an attribute argument must be a constant expression, where a nested object can only be written with `new`, and reflection reads it as metadata rather than the caller running it; tests; the composition root — the code that runs before a container exists and builds it (the front controller or console entry point, and the bootstrap they call to build the container), and no other wiring code; `(object) []` as an empty JSON object, and as nothing else.
 
 ## References
 - Robert C. Martin, *The Clean Architecture* — https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html

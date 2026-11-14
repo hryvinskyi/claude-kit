@@ -106,17 +106,23 @@ SIZE_QUESTIONS: Tuple[Tuple[str, str, str], ...] = (
                   "wiring between modules?"),
     ("state", "L", "Does the change touch persisted state or what a stored value means: an entity, a schema or "
                    "migration, a column, or a new flag, enum case, nullable or default that other code reads?"),
+    ("domain", "L", "Does the change create or change the domain model: an entity, a value object, an aggregate, "
+                    "a state machine, or an invariant one of them enforces?"),
     ("risky", "L", "Is the change on a security or otherwise risky path: authentication, sessions, permissions, "
                    "tenancy, money, personal data, uploads, execution of input, cryptography or tokens, outbound "
-                   "requests to a host taken from input, HTML or mail that prints user text, concurrency, retries "
-                   "or idempotency?"),
+                   "requests to a host taken from input, HTML or mail that prints user text, concurrency, retries, "
+                   "idempotency, or a cache in front of a port?"),
     ("modules", "L", "Does the change span more than one module or package?"),
     ("open", "M", "Does the request leave a design decision open: a choice between approaches, where the code goes, "
                   "or a rule nobody has stated yet?"),
     ("logic", "M", "Does the change add or alter program logic (a branch, a state, a query, a computation) beyond "
-                   "a small change of about thirty lines in at most three production files?"),
+                   "a small change of about thirty lines in at most three production files? A rename that alters "
+                   "no logic answers no, whatever its size, and so does a move that keeps the code under the same "
+                   "discovery configuration (autoload root, the container's resource glob, a mapping, route or "
+                   "template directory); a move out of it changes what the framework finds and answers yes."),
 )
-SIZE_RULE = "The level is the highest level among the questions answered yes, S when none is."
+SIZE_RULE = ("The level is the highest level among the questions answered yes, S when none is: L wins, so a change "
+             "is M or S only when every L question answers no.")
 
 RULE_CRITERIA = {
     "violates": "The diff contains a line that breaks this rule.",

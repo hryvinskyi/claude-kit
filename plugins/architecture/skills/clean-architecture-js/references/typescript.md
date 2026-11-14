@@ -141,7 +141,7 @@ Classic scripts and legacy modules that cannot enter a build still get checked: 
 
 ## Detection recipes — candidates, not findings
 
-ripgrep with `-g '*.{ts,tsx,mts,cts}'` plus the exclusions of `solid.md`; `tsconfig*.json` for the config row.
+ripgrep with `-g '*.{ts,tsx,mts,cts}'` plus the exclusions of `solid.md`; `tsconfig*.json` for the config row. A row that names folders takes one glob holding the folders and the extensions in place of that one: two positive `-g` globs join with OR. Over a list of files no `-g` glob applies at all: pass directories, or filter the list by the row's folders and extensions first (`solid.md` §Detection recipes).
 
 | Smell | Search | Cleared when |
 |---|---|---|
@@ -152,7 +152,7 @@ ripgrep with `-g '*.{ts,tsx,mts,cts}'` plus the exclusions of `solid.md`; `tscon
 | Suppressions | `@ts-(ignore\|expect-error\|nocheck)\|eslint-disable` | a type-level test asserting a compile error |
 | Non-erasable syntax | `^\s*(export )?(const )?enum \|^\s*(export )?namespace \|^\s*module \w+ \{\|import \w+ = require\|constructor\([^)]*(private\|public\|protected\|readonly) ` (`-P`) | the project neither strips types nor plans to — still prefer the erasable form in new code |
 | Loosened config | `"strict":\s*false\|"noImplicitAny":\s*false\|"checkJs":\s*false\|"skipLibCheck":\s*true` in `tsconfig*.json` changed by the diff | pre-existing and outside the change |
-| Type-only import across layers | `import type .* from '(\.\./)+(adapters\|ui\|infrastructure)` in domain/application | never — types are dependencies too |
+| Type-only import across layers | `import type .* from '(\.\./)+(adapters\|ui\|infrastructure)` with `-g '**/{domain,application}/**/*.{ts,tsx,mts,cts}'` | never — types are dependencies too |
 
 ## TypeScript review checklist
 - [ ] Touched code type-checks under `strict` (plus the project's stricter flags); nothing was loosened to get there; a type-check gate actually runs.

@@ -94,7 +94,7 @@ Only when it is designed: queued commands carry their idempotency keys, replay i
 
 ## Detection recipes — candidates, not findings
 
-ripgrep with the exclusions of `solid.md`. Most of these span several lines: a hit is where to read.
+ripgrep with the exclusions of `solid.md`. A row that names folders takes one glob holding the folders and the extensions: two positive `-g` globs join with OR. Over a list of files no `-g` glob applies at all: pass directories, or filter the list by the row's folders and extensions first (`solid.md` §Detection recipes). Most of these span several lines: a hit is where to read.
 
 | Smell | Search | Then check |
 |---|---|---|
@@ -105,7 +105,7 @@ ripgrep with the exclusions of `solid.md`. Most of these span several lines: a h
 | Stale responses | debounced search/filter handlers calling `fetch`/a client without aborting the previous request | abort or latest-id guard |
 | Incomplete cache keys | `queryKey:\s*\[` and storage keys | store, locale, currency, group/tenant, viewer present |
 | PII in storage | `localStorage\.setItem\|sessionStorage\.setItem\|indexedDB` | what is stored, its expiry, cleared on logout |
-| Raw errors shown | `error\.message\|err\.message\|e\.message` in components, controllers, templates | only logged, never rendered |
+| Raw errors shown | `\b(error\|err\|e)\.message` with `-g '**/{components,controllers,templates}/**/*.{js,mjs,cjs,jsx,ts,mts,cts,tsx}'` | only logged, never rendered |
 | Swallowed failures | `\.catch\(\(\) => \{\s*\}\)\|catch\s*\{\s*\}` | an explicit decision with a comment on why losing it is fine |
 
 ## Review checklist

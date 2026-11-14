@@ -7,6 +7,7 @@ import type {
   IssueCloseReason,
   IssueCommentView,
   IssueGateway,
+  IssueReading,
   IssueSummary,
   TickLease,
 } from './ports.ts';
@@ -125,7 +126,7 @@ class LeasedIssues implements IssueGateway {
     return this.#issues.removeAssignees(ref, logins);
   }
 
-  get(ref: IssueRef): Promise<IssueSummary> {
+  get(ref: IssueRef): Promise<IssueReading> {
     return this.#issues.get(ref);
   }
 

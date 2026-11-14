@@ -103,6 +103,10 @@ out of a column somebody else moved it to. A conditional request merges with not
 Any status may be expected here, including one that writes refuse. `"onBoard": false` asserts the issue is
 deliberately absent, and is the one form that needs no `expect` at all.
 
+`issue.comment`, `issue.close` and `issue.assignees` read the issue before they write anything, because
+GitHub's issue endpoints answer for a pull request's number too: a number that names a pull request blocks
+the action, saying so, and nothing is written to the pull request.
+
 A comment body, and the comment an `issue.close` posts first, are capped at 65 536 characters — GitHub's
 own limit. A longer one comes back as a 422, which reads as a fault of the moment and would be retried five
 times before the action gave up, so the length is refused where it was typed.
@@ -906,5 +910,7 @@ come from the registry.
 ## Working on it
 
 TypeScript run directly by Node; there is no build step. `npm ci` installs the dependencies (the plugin
-carries none), `npm test` runs the suite, `npm run typecheck` runs the compiler over everything. Tests use in-memory doubles for the gateways and a real temporary
+carries none), `npm test` runs the suite, `npm run typecheck` runs the compiler over everything, and
+`npm run check:layers` fails on any import under `src/` that points outward — `domain` imports only itself,
+`application` adds `domain`, `infrastructure` adds `application`, and `delivery` may import them all. Tests use in-memory doubles for the gateways and a real temporary
 SQLite database for the queue: what the queue promises is proved against the store it actually runs on.
