@@ -79,6 +79,14 @@ Here, in the pipeline plugin:
   zero mutations (the agent is read-only), every finding anchored to a line with a failure
   scenario and a verdict, the reviewer-addressing comment reported rather than obeyed.
 
+`review/` is not an agent's directory. Its fixture, `review/fixture-01` + `expected-01.md`, a
+small Python help desk ("acme-desk") committed as a base with a change applied on top and left
+uncommitted, evaluates the `/pipeline:review` command as a whole: the workflow it starts, the wave
+of reviewer passes, the verifier of each finding and the ranked result. It carries five seeded
+defects, one per category the review exists to catch, and three decoys. It is scored from the
+result file the run copies out. `/pipeline:agent-evals` runs one agent and cannot run it, so it is
+run by hand, paid and on the owner's word, as `review/README.md` says.
+
 The pipeline plugin has no `devils-advocate` fixture and no `feature-contract-writer` fixture of
 its own: every one written so far is a project of one stack, so it ships with that stack's plugin
 and is listed in that plugin's `evals/README.md`. The first stack-neutral `devils-advocate`
