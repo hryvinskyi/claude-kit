@@ -214,7 +214,7 @@ sections inline (every rule would load twice) or imports a standards file from a
 ```sh
 python3 -m unittest discover -s tests       # the installer, in a fake home with stand-ins for claude, npm and node
 python3 -m unittest discover -s bin/tests   # the command shims
-python3 -m unittest discover -s plugins/pipeline/tests   # pipeline-decide against a fake endpoint, the review report renderer, and the review workflow's node tests (needs node on PATH; fails without it)
+python3 -m unittest discover -s plugins/pipeline/tests   # pipeline-decide against a fake endpoint, eval_plugins against a fake kit, the review report renderer, and the review workflow's node tests (needs node on PATH; fails without it)
 plugins/vault/tests/tests.sh                # the vault plugin, its merge drivers and their wiring
 plugins/guards/hooks/tests.sh               # the guard hooks
 npm --prefix plugins/board-queue test       # the board queue (after npm ci)

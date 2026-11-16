@@ -45,7 +45,7 @@ that registered name loads.
    ```
    cd <copy> && CLAUDE_NO_JOURNAL_NUDGE=1 CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 \
      claude -p --agent <registered name> --setting-sources project,local --add-dir <memory> \
-     --plugin-dir <kit>/plugins/<name> … \
+     --session-id <uuid> --plugin-dir <plugin dir> … \
      --dangerously-skip-permissions --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
      < <evals dir>/<agent>/prompt-<NN>.md > <copy>/../<agent>-report.md
    ```
@@ -54,12 +54,23 @@ that registered name loads.
    reach it only through `--add-dir <memory>`, which loads `<memory>/CLAUDE.md` because
    `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` is set. The run record says so.
    `--agent` loads the definition file as it is on disk right now, with its own `tools:` and
-   `model:`. With user settings left out, a plugin is enabled only through `--plugin-dir`: add one
-   `--plugin-dir <kit>/plugins/<name>` for the agent's plugin, for every plugin it depends on (the
-   pipeline agents load `architecture`'s skills), for `guards`, and for the fixture's own plugin
-   when that is a stack plugin. A stack fixture scores the gate's demand for both the core skill
-   and the stack skill, so a run without `guards` or without the stack plugin measures something
-   else. When a model is given, add `--model <model>` — an agent its caller
+   `model:`. With user settings left out, a plugin is enabled only through `--plugin-dir`. The
+   plugins the run means to enable are the agent's plugin, `guards`, and the fixture's own plugin
+   when that is a stack plugin; the run passes those **and everything they depend on**, recursively
+   — the `dependencies` of each plugin's `.claude-plugin/plugin.json`, then theirs. Claude Code
+   drops a plugin whose dependency is not enabled, with no error: a stack plugin passed without
+   its own dependencies runs as if it were absent, and the report looks normal. The closure is
+   mechanical:
+   ```
+   python3 <kit>/plugins/pipeline/bin/eval_plugins.py closure --kit <kit> <agent's plugin> guards [<stack plugin>]
+   ```
+   prints one plugin directory per line, each dependency before what needs it; pass one
+   `--plugin-dir` per line, and nothing else. It exits 2 and names the plugin when a dependency is
+   not in the clone; the run does not start. A stack fixture scores the gate's demand for both the
+   core skill and the stack skill, so a run without `guards` or without the stack plugin measures
+   something else. `<uuid>` is a fresh `uuidgen` per run: the nested session writes its transcript
+   to `<uuid>.jsonl`, which step 5 reads, and a copy path used before already holds other
+   sessions' transcripts. When a model is given, add `--model <model>` — an agent its caller
    spawns on more than one model (`feature-implementer` runs on Opus and Sonnet under
    `/pipeline:feature`) is evaluated on each of them, and a pass on one says nothing about the other. Pasting the definition into a general subagent's prompt does not
    honor either (an early run recorded exactly that mismatch), so it is only the fallback:
@@ -71,7 +82,24 @@ that registered name loads.
    nested session's Stop hook cannot pollute the report. Permissions are skipped because the
    run is confined to the scratch copy; fixtures must never reach outside it. Independent
    evals can run in parallel (background Bash).
-5. **Score** when it returns: read the report and the produced artifacts (for
+5. **Check that the session loaded every plugin** before anything is scored:
+   ```
+   python3 <kit>/plugins/pipeline/bin/eval_plugins.py check --kit <kit> --copy <copy> --session <uuid> \
+     <agent's plugin> guards [<stack plugin>]
+   ```
+   It closes the plugins over their dependencies as step 4 did, reads the nested session's
+   transcript (`~/.claude/projects/<slug of the copy's real path>/<uuid>.jsonl`, or
+   `$CLAUDE_CONFIG_DIR/projects/…`; `--transcript <file>` names it directly), and compares the
+   names its `skill_listing` attachments listed with every skill and model-invocable command each
+   plugin ships. Exit 0 (`"verdict": "ok"`): go on. Exit 1 (`"verdict": "discard"`): a plugin's
+   skills are missing from the listing, or the transcript holds no listing — the run measured
+   another plugin set, so it is **discarded, never scored**: record it under step 8 as discarded,
+   with the plugins and skills the check names as missing, fix the invocation and run again.
+   Exit 2: the transcript is not where the check looked; find it before deciding anything. A plugin
+   that ships no skill and no command (`guards`) cannot be confirmed by the listing; the check
+   reports it `unverifiable`, and the run record says so. The subagent fallback of step 4 has no
+   nested session to check; its run record says the check did not run.
+6. **Score** a run the check kept: read the report and the produced artifacts (for
    devils-advocate: `.claude/plans/*/_devils_advocate.md` in the copy plus its plan edits;
    for an implementer: `diff -rq` of the fixture against the copy) and compare against the
    answer key. `<evals>` in the key or a scorer is the fixture's evals directory. When the key
@@ -81,14 +109,17 @@ that registered name loads.
    - severity accuracy per the key
    - apply-check: Critical/Important findings actually `[APPLIED]` to the plan files
    - noise: findings outside the seeded set — judge real vs hallucinated
-6. **Report the scorecard**: `N/M found`, misses by id with the plan line that should have
+7. **Report the scorecard**: `N/M found`, misses by id with the plan line that should have
    triggered them, severity deltas, false-positive count. On regressions (a previously
    caught flaw now missed), say so explicitly against the last recorded run.
-7. **Record the run**: append one line — date, the definition file's content hash
+8. **Record the run**: append one line — date, the definition file's content hash
    (`git hash-object <definition file> | cut -c1-7`; it identifies the exact text that was
    tested even before it is committed), fixture, score, misses — to
    `<kit>/plugins/<plugin>/evals/<agent>/runs.log`, the log beside the fixture (create it if
-   absent, with the header line the other logs carry), and name the model the run used. A copy
+   absent, with the header line the other logs carry), and name the model the run used. A
+   discarded run gets its line too, with `DISCARDED` in place of the score and the check's missing
+   plugins and skills in place of the misses, so the log shows that it ran and why it does not
+   count. A copy
    under a `plugins/cache/` directory is never written: an update replaces it.
 
 Never edit the fixture, the prompt, or the answer key to make a run pass. Improve the agent

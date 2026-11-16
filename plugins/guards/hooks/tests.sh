@@ -950,7 +950,8 @@ EOF" "$TMP/php" "$TMP/st/p-php.jsonl")" "$B"
 
 # ========== plan_skill_gate.py: evidence and scope; mcp_guard.py — begin ==========
 # The rubric counts only what reached the model: a successful Read result, the Skill tool's
-# base-directory announcement, a shell command whose output holds the file's text. Naming a
+# base-directory announcement, a slash command's announcement holding the skill's own text, a shell
+# command's or an MCP tool's output holding the file's text. Naming a
 # rubric file (ls, test -f, git log, wc, a failed Read, Grep) loads nothing, and only the caller's
 # own transcript counts: a subagent's for a subagent, the session's for the main thread.
 FX="$H/transcript_fixture.py"
@@ -1042,10 +1043,162 @@ evt "$EV/t/unknown.jsonl" "read=$SOLID" \
   'raw={"type":"user","isMeta":true,"sourceToolUseID":"toolu_k2","message":{"content":[{"type":"text","text":"Base directory for this skill: /k/skills/clean-architecture-php\n\n# Clean Architecture"}]}}'
 expect_exit "evidence: an announcement tied to a refused Skill call loads nothing" 2 \
   "$(gate Write "$EV/php" "$EV/t/unknown.jsonl" "$EVT")" "$P"
-evt "$EV/t/slash.jsonl" "read=$SOLID" \
-  'raw={"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Base directory for this skill: /k/skills/clean-architecture-php\n\n# Clean Architecture\n\nThe lenses."}]}}'
-expect_exit "evidence: a skill the person invoked, announced by the harness, counts" 0 \
+# a skill the person types as a slash command: the harness writes the command's tag, then announces the skill
+# with its text and no tool call. With no call to vouch for it, the text must be the announced SKILL.md's own.
+slash_cmd() { # skill -> the raw entry holding the command's tag
+  python3 -c 'import json, sys
+n = sys.argv[1]
+tag = "<command-message>%s</command-message>\n<command-name>/%s</command-name>\n<command-args>review the change</command-args>" % (n, n)
+print("raw=" + json.dumps({"type": "user", "message": {"role": "user", "content": tag}}))' "$1"
+}
+announce() { # base-dir body-file|- [str] -> the raw announcement, its text from body-file (- for text of no skill)
+  python3 -c 'import json, sys
+d, src = sys.argv[1], sys.argv[2]
+body = open(src).read() if src != "-" else "# Clean Architecture\n\nThe lenses."
+text = "Base directory for this skill: " + d + "\n\n" + body + "\n\nARGUMENTS: review the change"
+content = text if len(sys.argv) > 3 else [{"type": "text", "text": text}]
+print("raw=" + json.dumps({"type": "user", "isMeta": True, "message": {"role": "user", "content": content}}))' "$@"
+}
+SLASH="$(slash_cmd architecture:clean-architecture-php)"
+evt "$EV/t/slash.jsonl" "read=$SOLID" "$SLASH" "$(announce "$EVK" "$EVK/SKILL.md")"
+expect_exit "evidence: a skill the person invoked as a slash command, announced with its text, counts" 0 \
   "$(gate Write "$EV/php" "$EV/t/slash.jsonl" "$EVT")" "$P"
+evt "$EV/t/slash-str.jsonl" "read=$SOLID" "$SLASH" "$(announce "$EVK" "$EVK/SKILL.md" str)"
+expect_exit "evidence: a slash-command announcement written as one string counts" 0 \
+  "$(gate Write "$EV/php" "$EV/t/slash-str.jsonl" "$EVT")" "$P"
+evt "$EV/t/slash-tag.jsonl" "read=$SOLID" "$SLASH"
+expect_exit "evidence: a slash command's tag without the skill's text loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/slash-tag.jsonl" "$EVT")" "$P"
+evt "$EV/t/slash-other.jsonl" "read=$SOLID" "$SLASH" "$(announce "$EVK" -)"
+expect_exit "evidence: a slash-command announcement whose text is not the skill's own loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/slash-other.jsonl" "$EVT")" "$P"
+evt "$EV/t/slash-gone.jsonl" "read=$SOLID" "$SLASH" "$(announce /k/skills/clean-architecture-php "$EVK/SKILL.md")"
+expect_exit "evidence: a slash-command announcement of a directory with no SKILL.md on disk loads nothing" 2 \
+  "$(gate Write "$EV/php" "$EV/t/slash-gone.jsonl" "$EVT")" "$P"
+evt "$EV/t/mention.jsonl" "read=$SOLID" \
+  'raw={"type":"user","message":{"content":"check it against /architecture:clean-architecture-php first"}}' \
+  'raw={"type":"attachment","attachment":{"type":"skill_mention","skillName":"architecture:clean-architecture-php"}}'
+expect_exit "evidence: a skill named in a prompt loads nothing" 2 "$(gate Write "$EV/php" "$EV/t/mention.jsonl" "$EVT")" "$P"
+# an MCP tool that reads a file counts as a Read does: its arguments name the installed file and its result
+# holds a run of the file's own text. mcpr appends one call and its result to a transcript.
+mcpr() { # transcript tool input-json result [cwd]; result: file=<path>, json=<path> (the text inside a JSON
+  # object), files=<path>,<path> (each under its path), error=<path> (an error result holding it), text=<literal>
+  python3 -c 'import json, sys, uuid
+out, tool, args, spec = sys.argv[1:5]
+use_id = "toolu_mcp" + uuid.uuid4().hex
+kind, _, value = spec.partition("=")
+error = kind == "error"
+if kind in ("file", "error"):
+    result = open(value).read()
+elif kind == "json":
+    result = json.dumps({"status": open(value).read()})
+elif kind == "files":
+    result = "\n---\n".join(p + ":\n" + open(p).read() for p in value.split(","))
+else:
+    result = value
+use = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": use_id, "name": tool, "input": json.loads(args)}]}}
+if len(sys.argv) > 5:
+    use["cwd"] = sys.argv[5]
+item = {"type": "tool_result", "tool_use_id": use_id, "content": [{"type": "text", "text": result}]}
+if error:
+    item["is_error"] = True
+with open(out, "a") as fh:
+    fh.write(json.dumps(use) + "\n" + json.dumps({"type": "user", "message": {"content": [item]}}) + "\n")' "$@"
+}
+EVC="$CC/plugins/cache/ev"
+evt "$EV/t/mcp-ide.jsonl" skill
+mcpr "$EV/t/mcp-ide.jsonl" mcp__ide__get_file_text_by_path \
+  "{\"projectPath\":\"$EVC\",\"pathInProject\":\"architecture/1.0.0/skills/clean-architecture-php/references/solid.md\"}" "file=$SOLID"
+expect_exit "evidence: an IDE server's read of a reference by its project path shows its text" 0 \
+  "$(gate Write "$EV/php" "$EV/t/mcp-ide.jsonl" "$EVT")" "$P"
+evt "$EV/t/mcp-fs.jsonl" skill
+mcpr "$EV/t/mcp-fs.jsonl" mcp__filesystem__read_text_file "{\"path\":\"$SOLID\"}" "file=$SOLID"
+expect_exit "evidence: a filesystem server's read of a reference by its absolute path shows its text" 0 \
+  "$(gate Write "$EV/php" "$EV/t/mcp-fs.jsonl" "$EVT")" "$P"
+evt "$EV/t/mcp-many.jsonl"
+mcpr "$EV/t/mcp-many.jsonl" mcp__filesystem__read_multiple_files "{\"paths\":[\"$EVK/SKILL.md\",\"$SOLID\"]}" \
+  "files=$EVK/SKILL.md,$SOLID"
+expect_exit "evidence: SKILL.md and a reference shown by one MCP read of several files count" 0 \
+  "$(gate Write "$EV/php" "$EV/t/mcp-many.jsonl" "$EVT")" "$P"
+evt "$EV/t/mcp-json.jsonl" skill
+mcpr "$EV/t/mcp-json.jsonl" mcp__ide__get_file_text_by_path "{\"pathInProject\":\"$SOLID\"}" "json=$SOLID"
+expect_exit "evidence: a reference's text inside a JSON result counts" 0 \
+  "$(gate Write "$EV/php" "$EV/t/mcp-json.jsonl" "$EVT")" "$P"
+evt "$EV/t/mcp-rel.jsonl" skill
+mcpr "$EV/t/mcp-rel.jsonl" mcp__serena__read_file '{"relative_path":"clean-architecture-php/references/solid.md"}' \
+  "file=$SOLID" "$(dirname "$EVK")"
+expect_exit "evidence: an MCP read by a path relative to the call's cwd counts" 0 \
+  "$(gate Write "$EV/php" "$EV/t/mcp-rel.jsonl" "$EVT")" "$P"
+mkdir -p "$EV/mcp-copy/clean-architecture-php/references" && cp "$SOLID" "$EV/mcp-copy/clean-architecture-php/references/"
+n=0
+for shape in \
+  "mcp__filesystem__read_text_file|{\"path\":\"$SOLID\"}|text=Read 6 lines." \
+  "mcp__filesystem__read_text_file|{\"path\":\"$SOLID\",\"head\":1}|text=# references/solid.md" \
+  "mcp__filesystem__read_text_file|{\"path\":\"$SOLID\"}|error=$SOLID" \
+  "mcp__filesystem__read_text_file|{\"path\":\"$EVK/SKILL.md\"}|file=$SOLID" \
+  "mcp__github__get_file_contents|{\"owner\":\"o\",\"repo\":\"r\",\"path\":\"$SOLID\"}|file=$SOLID" \
+  "mcp__filesystem__read_text_file|{\"path\":\"$EV/mcp-copy/clean-architecture-php/references/solid.md\"}|file=$SOLID" \
+  "mcp__filesystem__list_directory|{\"path\":\"$EVK/references\"}|text=[FILE] solid.md" \
+  "mcp__serena__read_file|{\"relative_path\":\"clean-architecture-php/references/solid.md\"}|file=$SOLID"; do
+  n=$((n + 1))
+  evt "$EV/t/mcp-no$n.jsonl" skill
+  mcpr "$EV/t/mcp-no$n.jsonl" "${shape%%|*}" "$(echo "$shape" | cut -d'|' -f2)" "${shape##*|}"
+  expect_exit "evidence: an MCP call that does not show the installed reference it names loads nothing ($n)" 2 \
+    "$(gate Write "$EV/php" "$EV/t/mcp-no$n.jsonl" "$EVT")" "$P"
+done
+# plan mode writes the session's plan into the Claude config directory's plans/, which lies in no project and
+# holds every session's plans: the plan is judged by the project of the session's cwd and by its own text.
+# $HC is a config directory named .claude that is itself a node package, as a home directory's often is.
+HC="$TMP/home/.claude"
+mkdir -p "$HC/plans" "$TMP/home/work/shop/src/Order" "$TMP/home/work/app/src"
+echo '{}' > "$HC/package.json"
+echo '{}' > "$TMP/home/work/shop/composer.json"
+echo '{}' > "$TMP/home/work/app/package.json"
+for d in "$HC/skills/clean-architecture-php" "$HC/skills/clean-architecture-js"; do
+  mkrubric "$d" $RUBRIC_FILES  # unquoted: one argument per file name
+done
+printf '# Widget\n\nRewrite assets/widget.tsx as an island.\n' > "$HC/plans/another-session.md"
+hc_reads() { # transcript skill file... -> a transcript reading each file of the skill installed in $HC
+  local out="$1" skill="$2"; shift 2; : > "$out"
+  for f in "$@"; do
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s"}}]}}\n' \
+      "$HC/skills/$skill/$f" >> "$out"
+  done
+  logged "$out"
+}
+hc_reads "$TMP/hc-php.jsonl" clean-architecture-php SKILL.md references/solid.md references/ddd.md references/clean-architecture.md
+hc_reads "$TMP/hc-js.jsonl" clean-architecture-js SKILL.md references/javascript.md
+hc() { # name want transcript cwd plan content -> the gate run on a Write, $HC the Claude config directory
+  local json got
+  json=$(python3 -c 'import json, sys
+print(json.dumps({"tool_name": "Write", "cwd": sys.argv[2], "transcript_path": sys.argv[1],
+                  "tool_input": {"file_path": sys.argv[3], "content": sys.argv[4]}}))' "$3" "$4" "$5" "$6")
+  echo "$json" | CLAUDE_CONFIG_DIR="$HC" python3 "$P" >/dev/null 2>&1
+  got=$?
+  [ "$got" -eq "$2" ] && ok || ko "$1 (want exit $2, got $got)"
+}
+PHP_PLAN=$'# Order totals\n\nAdd a Money value object to the order module and use it in the total.\n'
+hc "session plan: judged by the cwd's PHP project, not by the config directory's package.json" 0 \
+  "$TMP/hc-php.jsonl" "$TMP/home/work/shop" "$HC/plans/quiet-river.md" "$PHP_PLAN"
+hc "session plan: the cwd's project is found from a directory below its root" 0 \
+  "$TMP/hc-php.jsonl" "$TMP/home/work/shop/src/Order" "$HC/plans/quiet-river.md" "$PHP_PLAN"
+hc "session plan: the cwd's PHP project needs the PHP rubric" 2 \
+  "$TMP/empty.jsonl" "$TMP/home/work/shop" "$HC/plans/quiet-river.md" "$PHP_PLAN"
+hc "session plan: a plan that names a .tsx file on a PHP project needs the JS rubric too" 2 \
+  "$TMP/hc-php.jsonl" "$TMP/home/work/shop" "$HC/plans/quiet-river.md" $'# Island\n\nMount assets/cart.tsx.\n'
+hc "session plan: the cwd's JS project needs the JS rubric" 2 \
+  "$TMP/hc-php.jsonl" "$TMP/home/work/app" "$HC/plans/quiet-river.md" $'# Cart\n\nSplit the cart store.\n'
+hc "session plan: the cwd's JS project with the JS rubric allowed" 0 \
+  "$TMP/hc-js.jsonl" "$TMP/home/work/app" "$HC/plans/quiet-river.md" $'# Cart\n\nSplit the cart store.\n'
+expect_exit "session plan: a plan in a config directory not named .claude is a plan too" 2 \
+  "$(gate Write "$TMP/php" "$TMP/empty.jsonl" "$CC/plans/quiet-river.md")" "$P"
+expect_exit "session plan: written through the shell, it meets the same gate" 2 \
+  "$(bash_json "printf '# Plan\n' > $CC/plans/quiet-river.md" "$TMP/php" "$TMP/empty.jsonl")" "$B"
+mkdir -p "$TMP/linked-config" "$TMP/plans-elsewhere"
+ln -s "$TMP/plans-elsewhere" "$TMP/linked-config/plans"
+echo "$(gate Write "$TMP/php" "$TMP/empty.jsonl" "$TMP/linked-config/plans/quiet-river.md")" \
+  | CLAUDE_CONFIG_DIR="$TMP/linked-config" python3 "$P" >/dev/null 2>&1
+[ $? -eq 2 ] && ok || ko "session plan: a config directory whose plans/ is a link elsewhere is still gated"
 evt "$EV/t/bare-announce.jsonl" "read=$SOLID" \
   'raw={"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Base directory for this skill: /k/skills/clean-architecture-php"}]}}'
 expect_exit "evidence: an announcement with no skill text after it loads nothing" 2 \

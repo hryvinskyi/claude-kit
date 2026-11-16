@@ -236,7 +236,7 @@ Keep controllers and Blocks humble and push logic into a **ViewModel** (`Argumen
 
 - Magento already forces capability-first modules (`Vendor/Ordering`, `Vendor/Billing`), each with its own `Api/ Model/ etc/`. That module boundary *is* your architectural boundary — respect it. One bounded context ≈ one module `Vendor_Module`, exposing only its `Api/` service contracts.
 - Every `module.xml` `<sequence>` entry is a package-level edge like a `composer.json` require, and points inward.
-- Magento core models bridges: `Magento_CatalogInventory`, `Magento_GroupedProduct` are bridges over `Catalog`+`Inventory`, `Catalog`+`Sales`.
+- Magento core has bridges: `Magento_CatalogAnalytics` connects `Catalog` and `Analytics`, `Magento_GroupedImportExport` connects `GroupedProduct` and `ImportExport`, and no module depends on either. A compound name does not make a bridge: `Magento_CatalogInventory` reads like `Catalog`+`Inventory`, but dozens of core modules require it, so it is a capability module on an inner ring (`onion-modules.md` rule 3: a bridge is a leaf). Count a module's dependents before calling it a bridge: `rg -l '"magento/module-catalog-inventory"' -g 'composer.json' vendor/magento app/code` lists the packages that require it (and its own `composer.json`).
 - Vocabulary is a dependency in `di.xml` too: it names only modules the module declares.
 - **Enforcement:** no Deptrac by default; rely on the `@api` annotation to mark stable contracts, depend only on other modules' `Api/`, and keep `composer.json` `require` honest so module dependencies are explicit and acyclic. `module.xml` `<sequence>` + `composer.json` mirror the same inward edges; no tool checks resource ownership, so grep for your module's config paths/table names in *other* modules' `etc/` during review.
 - **Outer rings contributing to an inner module:** `di.xml` array/pool arguments into an inner composite; `system.xml` sections shipped per module; extension attributes on inner DTOs; observers on inner events.
@@ -268,9 +268,20 @@ Keep controllers and Blocks humble and push logic into a **ViewModel** (`Argumen
 
 ### Integration patterns on Magento
 
-- **Outbox:** `queue_message` written through the publisher inside the same DB transaction behaves as an outbox with the `db` connection, and not with `amqp`.
-- **Dual-write recipe:** the transport for a message class is declared in `queue_topology.xml`.
-- **Consumer recipe:** the consumers to check for idempotency are the `ConsumerInterface` implementations.
+Magento declares its messaging in XML, keyed by **topic** rather than by message class, and none of it is visible from the PHP that publishes or handles a message:
+
+| File | Declares |
+|---|---|
+| `etc/communication.xml` | each `<topic>`, its request type, and optionally `<handler type="…" method="…"/>` |
+| `etc/queue_publisher.xml` | each topic's `<publisher>` and its `<connection name="db\|amqp\|stomp" exchange="…"/>` |
+| `etc/queue_topology.xml` | each `<exchange connection="…">` and the `<binding topic="…" destination="…"/>` that routes a topic to a queue |
+| `etc/queue_consumer.xml` | each `<consumer queue="…" connection="…" handler="Vendor\Module\Model\Handler::method"/>` |
+
+A `<publisher>` with no `<connection>` takes the deployment's default: `queue/default_connection` in `app/etc/env.php`, else `stomp` or `amqp` when `env.php` configures one, else `db`. The `queue` key of `env.php` can also re-point a publisher or a consumer to another connection, so the XML is the module's intent and `env.php` the deployment's answer.
+
+- **Outbox:** a message published inside the DB transaction is written to `queue_message` in the same commit, and so behaves as an outbox, only when the topic's connection is `db`; over `amqp` or `stomp` it is a dual write.
+- **Dual-write recipe:** for each `->publish(` the search finds, take its topic (the first argument), find that topic's `<publisher>` in `etc/queue_publisher.xml` across the installed modules, and read its `<connection name>` — none means the default above; then check `app/etc/env.php` for a `queue` override of that topic.
+- **Consumer recipe:** handlers are plain classes named in XML, not marked in PHP. Search `rg -n 'handler=' -g '**/etc/queue_consumer.xml'` and `rg -n '<handler ' -g '**/etc/communication.xml'` (a consumer with no `handler` attribute runs the handlers its queue's topics declare in `communication.xml`), then open each named `Class::method` and check it for idempotency. `Magento\Framework\MessageQueue\ConsumerInterface` is the consumer *loop* (`Consumer`, `BatchConsumer`), named by a `consumerInstance` attribute; read a custom one too, but searching for it finds no handler.
 - **A cache or resilience decorator** is wired by a `di.xml` `<preference>` for the port that points at the decorator, whose `<type>` argument injects the real implementation.
 
 ### The browser half
@@ -298,7 +309,7 @@ Where the pipeline commands' stack-neutral steps look on a Magento 2 project.
 
 - **A route** (`/pipeline:explain`): the module's `etc/<area>/routes.xml` for a storefront or admin route, `etc/webapi.xml` for a REST or SOAP one.
 - **A console command**: the class carrying the name, through its `configure()`, registered in the command list of a `di.xml`.
-- **Dynamic hops**: besides the listeners of each event, the plugins `di.xml` declares on each class on the path and the observers `events.xml` attaches to each event it dispatches.
+- **Dynamic hops**: besides the listeners of each event, the plugins `di.xml` declares on each class on the path and the observers `events.xml` attaches to each event it dispatches. A `->publish($topic, …)` continues in XML: the topic's binding in `etc/queue_topology.xml` names its queue, and the `etc/queue_consumer.xml` consumer of that queue names its handler (or `etc/communication.xml` does, when the consumer has no `handler` attribute) — §9 *Integration patterns on Magento*.
 - **The vendors present** (the sideways-naming review): `ls app/code vendor`. A module's declared dependencies are its `composer.json` require and its `etc/module.xml` `<sequence>`.
 - **Vault notes named for a module.** A note `Modules/Vendor_Module.md` cites paths inside `app/code/Vendor/Module/` once `vault-check` has this note-base rule, in `${XDG_CONFIG_HOME:-~/.config}/claude-kit/vault-check.conf` or the vault's git key `vault-check.noteBase`:
   `([A-Z][A-Za-z0-9]*)_([A-Z][A-Za-z0-9]*) app/code/{1}/{2}/`

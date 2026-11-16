@@ -134,3 +134,24 @@ outside billing, and names its only labels (`invoice.title` and the task's `cred
 Two of the calibration extras above went with these corrections and are no longer expected:
 `credited` sharing the currency column, and the header re-rendered from a `201` body that
 carries no number (the screen is server-rendered now and shows the stored number).
+
+## Fixture corrected (2026-11-16)
+
+The run of 2026-11-15 (C2 in `runs.log`) reported a real Critical: the integration tests of
+Tasks 3, 4 and 5 fetch services from the test container — the credit-note repository through
+`CreditNoteRepositoryInterface`'s alias, `RefundMethodRegistry`, `CreditNoteIssuer` — and those
+services are private with no consumer until Task 6's controller, so the container compile removes
+them and `static::getContainer()->get(...)` throws "removed or inlined". None of the three tests
+could pass when its task landed.
+
+Task 3 now appends a `when@test` block to the package's `services.yaml` whose own `_defaults`
+repeat `autowire` and `autoconfigure` and add `public: true`, over the prototype
+`Acme\Billing\: resource: '../../{Repository,Service}/'`. The block says why it is there and why
+it is narrower than the main glob (`Api/` holds exceptions and commands with string constructor
+arguments, which fail the compile once public). Nothing else in the plan changed.
+
+D2 is unaffected: Task 4 still plans no `services.yaml` edit, its wiring text is unchanged, and
+the tag still registers through the main block's glob over `Api/`. The test-visibility block
+belongs to Task 3, the first task whose test needs it, and Task 4's services fall under it
+without an edit. A run after this date that reports the removed services as still standing has
+misread the plan. R1–R5 are untouched.

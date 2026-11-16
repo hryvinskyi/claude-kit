@@ -138,9 +138,9 @@ ripgrep; add `-g '!**/tests/**'`; pass a pattern that starts with `->` as `-e '�
 
 | Smell | Search | Then check |
 |---|---|---|
-| Dual write | `->dispatch\(\|->publish\(` in `**/{Service,Handler,Application,UseCase}/**/*.php` | the transport for that message class (the framework's message routing configuration): same DB connection as the state change, or a network broker? |
+| Dual write | `->dispatch\(\|->publish\(` in `**/{Service,Handler,Application,UseCase}/**/*.php` | the transport for that message class or topic (the framework's message routing configuration): same DB connection as the state change, or a network broker? |
 | Network call inside a transaction | files matching both `beginTransaction\|->transactional\(` (plus the ORM's transaction wrapper, from the stack skill) and `->request\(\|->sendRequest\(\|curl_exec` — `rg -l A <radius> \| xargs grep -lE B` (`grep` on the right: where `rg` is a shell function, `xargs` cannot run it) | whether the call is inside the closure |
-| Consumer with no idempotency | every message consumer class — the framework's handler attribute or interface (the stack skill's row) | a claim on a unique key in the same transaction, or a naturally idempotent effect |
+| Consumer with no idempotency | every message consumer class — found by the framework's handler attribute or interface, or through the configuration file that names the handler class (the stack skill's row) | a claim on a unique key in the same transaction, or a naturally idempotent effect |
 | Outbound call with no timeout | `new \\?GuzzleHttp\\Client\|curl_init\|ClientInterface` (plus the framework's HTTP client, from the stack skill) | a timeout on the client or the request options; `CURLOPT_TIMEOUT` **and** `CURLOPT_CONNECTTIMEOUT` |
 | Retry in the wrong layer | `\bsleep\(\|usleep\(\|for \(\$attempt\|while \(\$(tries\|attempt\|retry)` in non-adapter folders | move to a decorator or the transport's retry configuration |
 | No failure destination | a transport configured with retries and no failure destination (the stack skill spells the keys) | where a message goes after the last retry |

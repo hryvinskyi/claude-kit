@@ -114,6 +114,36 @@
   - `public function findByIdempotencyKey(string $invoiceId, string $key): ?CreditNote;`
 - `Repository/DoctrineCreditNoteRepository.php` implements it; aliased in
   `Resources/config/services.yaml` next to the existing invoice alias.
+- Test visibility, in the same file. The package's services are private, and nothing consumes
+  this repository, Task 4's `RefundMethodRegistry` or Task 5's `CreditNoteIssuer` until Task 6's
+  controller, so the container compile removes them and `static::getContainer()->get(...)` in
+  the integration tests of Tasks 3, 4 and 5 throws "removed or inlined". This task appends:
+  ```yaml
+  when@test:
+      services:
+          _defaults:
+              autowire: true
+              autoconfigure: true
+              public: true
+
+          Acme\Billing\:
+              resource: '../../{Repository,Service}/'
+  ```
+  The loader reads `when@test` after the main block, as a block with `_defaults` of its own, so
+  it repeats `autowire` and `autoconfigure` (without the latter the strategies lose
+  `RefundMethodInterface`'s tag in the test environment and the pool is empty). Its prototype
+  registers the classes of `Repository/` and `Service/` again, public; a public service survives
+  the compile, and the test container resolves a private alias whose target survived, so the
+  aliases stay as they are. It names those two directories and not the main block's whole glob:
+  `Api/` holds exceptions and readonly commands whose string arguments cannot be autowired, which
+  is harmless while they are private and removed unused, and fails the compile once they are
+  public. The brace glob matches the directories that exist, so it loads while `Service/` does
+  not exist yet and picks up Tasks 4 and 5 without an edit; a plain `'../../Service/'` would fail
+  the load until Task 4 creates the directory. The prototype replaces what the main block defined
+  for each of its classes, so a service in those directories later configured by hand in this
+  file repeats that configuration under `when@test`. Outside the `test` environment nothing
+  changes. A loader honours `when@test` only when it knows the environment, as the kernel's
+  configuration loader does.
 - Unit: both entities' constructors. Integration: Doctrine's mapping validation passes for
   the module (`doctrine:schema:validate --skip-sync`; Tasks 1 and 2 are in by now). The
   schema comparison is left out on purpose: `CreditNote` and `RefundInstruction` reference by

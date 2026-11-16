@@ -9,7 +9,8 @@ the plan, or fixes the debt, from memory. This turns the instruction into a
 gate: a Write/Edit is denied unless THIS session's transcript already shows the
 rubric being loaded, when the target is
 
-  - a plan file under `.claude/plans/`,
+  - a plan file under `.claude/plans/`, or in the Claude config directory's
+    `plans/` (where plan mode writes the session's plan),
   - a PHP source file (`.php`, outside vendor/, var/, cache dirs and test
     directories) — rubric: the clean-architecture-php skill, or
   - a JavaScript/TypeScript source file (`.js .mjs .cjs .jsx .ts .mts .cts
@@ -22,17 +23,29 @@ Two core skills, one rule each, published by the `architecture` plugin as
 Only evidence that a rubric file's text reached the model counts as loading it:
 
   - the skill's base-directory announcement: the harness-written user entry
-    (`isMeta`) whose text starts "Base directory for this skill: <dir>" and
-    carries the skill's text after it. The Skill tool writes it right after
-    its launch result (`sourceToolUseID` names the call, which must not have
-    failed); a skill the person invokes writes it with no tool call. It stands
-    for the skill's SKILL.md.
+    (`isMeta`, its content text blocks or one string) whose text starts "Base
+    directory for this skill: <dir>" and carries the skill's text after it. It
+    stands for the skill's SKILL.md. The Skill tool writes it right after its
+    launch result (`sourceToolUseID` names the call, which must not have
+    failed). A skill the person invokes as a slash command writes it with no
+    tool call, after the entry holding the `<command-name>` tag; with no call
+    to vouch for it, it counts only when the text after the header holds a run
+    of `<dir>/SKILL.md`'s own text (below). The command tag alone loads nothing.
   - a successful Read of the file by its absolute path: the tool result paired
     with that Read's id, not an error, holding the file's text (below).
   - a Bash call naming the file whose output holds the file's text — so `cat`,
     `sed -n`, `head` and `tail` count, and `ls`, `test -f`, `wc`, `stat`,
     `git log` and a `cat … | wc` do not. `~`, `$HOME` and variables assigned
     on the same command line are expanded to find the file.
+  - an MCP tool call (`mcp__…`, whatever the server) whose arguments name the
+    file — a path key (`file_path`, `filePath`, `path`, `pathInProject`,
+    `relative_path`, `relativePath`, `file`, `filename`, `target_file`,
+    `targetFile`) or a list of paths (`paths`, `file_paths`, `filePaths`,
+    `files`), a relative one resolved against an absolute `projectPath` (or
+    `project_path`), else the call's cwd — and whose result, no error, holds
+    the file's text, as it is or as a string inside a JSON result. A call
+    naming a remote repository (`owner`, `repo`, `repository`, `branch`) names
+    no file on this disk and loads nothing.
 
 "The file's text" is a run of consecutive non-blank lines of the file as it is
 on disk now (five, or all of a shorter file), line numbers aside, that no
@@ -43,10 +56,11 @@ marketplace's install location, the marketplace clone this hook ships in, or a
 base directory the transcript announced. A copy elsewhere, a file that cannot
 be found, or a result showing a line or two proves nothing.
 
-A mention is not a load: a Grep, a failed or unanswered Read, a listing, or
-the denial's own relative path read back. SKILL.md may also be shown through
-references/implementer-checklist.md (agents whose tool list excludes Skill;
-the implementer's cut of the rubric). Files are recognised by their
+A mention is not a load: a Grep, a failed or unanswered Read or MCP read, a
+listing, a slash command's tag without the skill's text, a skill named in a
+prompt, or the denial's own relative path read back. SKILL.md may also be
+shown through references/implementer-checklist.md (agents whose tool list
+excludes Skill; the implementer's cut of the rubric). Files are recognised by their
 `<skill directory>/…` suffix, so a plugin cache (with its version segment), a
 marketplace clone, a `--plugin-dir` checkout and a user skill directory all
 count, and one skill never stands in for another.
@@ -66,7 +80,11 @@ gate also requires the references the target needs, each shown as above from
                (domain, model, entities, value-objects).
   A domain directory of several segments (Api/Data) matches whole directory
   names in a row, anywhere below the project root; a stack adds its own.
-  Plan file    each skill the plan needs: the PHP skill on a PHP project
+  Plan file    judged by the project it lies in; a plan in the Claude config
+               directory's `plans/` lies in no project, so it is judged by the
+               project of the session's cwd and by its own text alone (that
+               directory holds every session's plans).
+               Each skill the plan needs: the PHP skill on a PHP project
                (composer.json), with solid.md, ddd.md and clean-architecture.md
                (Plan mode's blast-radius audit runs against all three, whatever
                the plan turns out to touch); the JS skill on a JS project (package.json or
@@ -130,6 +148,9 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from debt_guard import config_dir
 
 RUBRIC_PLUGIN = "architecture"  # the plugin that publishes both core skills
 PHP_SKILL = "clean-architecture-php"
@@ -207,6 +228,14 @@ OUTPUT_LIMIT = 2_000_000  # characters of a command's output compared
 ASSIGNMENT = re.compile(r"(?:^|(?<=[\s;&|(]))([A-Za-z_]\w*)=(?:\"([^\"$`]*)\"|'([^']*)'|([^\s;&|()<>\"'`$]*))")
 VARIABLE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 TOKEN_BREAK = set(" \t\n\"'`;&|()<>=")
+# The arguments by which an MCP tool names the files it reads, whatever the server
+MCP_PATH_KEYS = ("file_path", "filePath", "path", "pathInProject", "relative_path", "relativePath", "file",
+                 "filename", "target_file", "targetFile")
+MCP_PATHS_KEYS = ("paths", "file_paths", "filePaths", "files")
+MCP_PROJECT_KEYS = ("projectPath", "project_path")
+MCP_REMOTE_KEYS = ("owner", "repo", "repository", "branch")  # a path in a remote repository, not on this disk
+MCP_PATH_LIMIT = 64  # paths of one call compared
+JSON_STRING_LIMIT = 64  # string values of a JSON result compared
 # Whose transcript a call is judged on
 AGENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 TOOL_USE_ID = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
@@ -466,10 +495,19 @@ def failed(item: dict, text: str) -> bool:
     return item.get("is_error") is True or text.lstrip().startswith("<tool_use_error>")
 
 
+def entry_texts(content) -> list:
+    """The texts of a user entry's content: the string itself, or its text blocks."""
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [str(item.get("text", "")) for item in content if isinstance(item, dict) and item.get("type") == "text"]
+    return []
+
+
 def announced_skill(text: str, skills) -> str:
     """The rubric skill a base-directory announcement brings in with its text, else "".
 
-    @param text A text block of a harness-written user entry.
+    @param text A text of a harness-written user entry.
     """
     if not text.startswith(ANNOUNCEMENT):
         return ""
@@ -477,6 +515,24 @@ def announced_skill(text: str, skills) -> str:
     directory = header[len(ANNOUNCEMENT):].strip().rstrip("/")
     skill = os.path.basename(directory)
     return skill if skill in skills and body.strip() else ""
+
+
+def announcement_directory(text: str) -> str:
+    """The base directory an announcement names."""
+    return text.partition("\n")[0][len(ANNOUNCEMENT):].strip()
+
+
+def carries_own_text(text: str, skill: str) -> bool:
+    """Report whether an announcement's text after its header holds a run of the announced SKILL.md.
+
+    A skill the person invokes has no tool call to vouch for its announcement, so the text itself
+    must be the skill's: the file at `<base directory>/SKILL.md`, compared as shows_text compares.
+    """
+    body = text.partition("\n")[2]
+    directory = announcement_directory(text)
+    if not os.path.isabs(directory):
+        return False
+    return shows_text(body, os.path.join(directory, "SKILL.md"), f"{skill}/SKILL.md")
 
 
 def rubric_suffix(path: str, rubric_file):
@@ -608,7 +664,7 @@ def installed_roots(announced) -> list:
     marketplace, the marketplace clone this hook ships in, and each skill base directory the
     transcript announced. A copy of a rubric file anywhere else proves nothing.
     """
-    config = os.path.realpath(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"))
+    config = config_dir()
     roots = {os.path.join(config, "skills"), os.path.join(config, "plugins")}
     try:
         with open(os.path.join(config, "plugins", "known_marketplaces.json"), encoding="utf-8") as fh:
@@ -636,9 +692,10 @@ def installed(path: str, roots) -> bool:
 def loaded_files(path: str, skills=SKILLS):
     """Collect the rubric files one transcript shows reaching the model.
 
-    A call counts by its result, matched by id: a Skill call's announcement, a Read's or a Bash
-    command's output holding a run of the installed file's own text. A call is only a claim
-    until then.
+    A call counts by its result, matched by id: a Skill call's announcement, a Read's, a Bash
+    command's or an MCP tool's output holding a run of the installed file's own text. A call is
+    only a claim until then. A skill the person invokes as a slash command counts by its
+    announcement alone, when that holds the skill's own text.
 
     @param path Path to a JSONL transcript.
     @param skills The skill directories the gate recognises.
@@ -649,7 +706,7 @@ def loaded_files(path: str, skills=SKILLS):
     shown = []  # (key, path): a file whose text a result held, kept once its place is known to be installed
     announced = set()  # base directories of the skills announced
     rubric_file = rubric_file_pattern(skills)
-    claims = {}  # tool_use id -> ("Skill", None) | ("Read", [(key, path)]) | ("Bash", [(key, path)])
+    claims = {}  # tool_use id -> ("Skill", None) | ("Read" | "Bash" | "MCP", [(key, path)])
     skill_calls = set()  # ids of Skill calls for a rubric skill that did not fail
     try:
         with open(path, encoding="utf-8", errors="ignore") as fh:
@@ -665,6 +722,14 @@ def loaded_files(path: str, skills=SKILLS):
                 if not isinstance(entry, dict) or entry.get("type") not in ("user", "assistant"):
                     continue
                 content = (entry.get("message") or {}).get("content")
+                if entry["type"] == "user" and entry.get("isMeta") is True:
+                    for text in entry_texts(content):
+                        skill = announced_skill(text, skills)
+                        source = entry.get("sourceToolUseID")
+                        if skill and (source in skill_calls if source is not None
+                                      else carries_own_text(text, skill)):
+                            found.add(f"{skill}/SKILL.md")
+                            announced.add(announcement_directory(text))
                 if not isinstance(content, list):
                     continue
                 for item in content:
@@ -679,13 +744,6 @@ def loaded_files(path: str, skills=SKILLS):
                         claim = claims.pop(item.get("tool_use_id"), None)
                         if claim is not None:
                             shown += proven(claim, item, item.get("tool_use_id"), skill_calls)
-                    elif kind == "text" and entry["type"] == "user" and entry.get("isMeta") is True:
-                        text = str(item.get("text", ""))
-                        skill = announced_skill(text, skills)
-                        source = entry.get("sourceToolUseID")
-                        if skill and (source is None or source in skill_calls):
-                            found.add(f"{skill}/SKILL.md")
-                            announced.add(text.partition("\n")[0][len(ANNOUNCEMENT):].strip())
     except OSError:
         return None  # unreadable — never block on what cannot be proven absent
     if shown:
@@ -708,7 +766,63 @@ def claim_of(item: dict, rubric_file, skills, cwd):
     if name == "Bash" and isinstance(args.get("command"), str):
         named = shell_named_files(args["command"], cwd, rubric_file)
         return ("Bash", named) if named else None
+    if isinstance(name, str) and name.startswith("mcp__"):
+        named = mcp_named_files(args, cwd, rubric_file)
+        return ("MCP", named) if named else None
     return None
+
+
+def mcp_named_files(args: dict, cwd, rubric_file) -> list:
+    """The rubric files an MCP tool call's arguments name, each with the file on disk it names.
+
+    A path key or a list of paths; a relative path resolves against an absolute `projectPath` (or
+    `project_path`) directory, else the call's cwd. A call naming a remote repository names nothing here.
+
+    @param cwd The directory the call was made in, for a relative path; None when unknown.
+    @return [(key "<skill>/<basename>", existing path)], a file that cannot be found left out.
+    """
+    if any(isinstance(args.get(key), str) and args[key] for key in MCP_REMOTE_KEYS):
+        return []
+    base = next((args[key] for key in MCP_PROJECT_KEYS
+                 if isinstance(args.get(key), str) and os.path.isabs(args[key]) and os.path.isdir(args[key])), None)
+    if base is None and isinstance(cwd, str) and os.path.isabs(cwd):
+        base = cwd
+    paths = [args[key] for key in MCP_PATH_KEYS if isinstance(args.get(key), str)]
+    for key in MCP_PATHS_KEYS:
+        if isinstance(args.get(key), list):
+            paths += [value for value in args[key] if isinstance(value, str)]
+    found = []
+    for value in paths[:MCP_PATH_LIMIT]:
+        path = os.path.expanduser(value.strip())
+        if not os.path.isabs(path):
+            if base is None:
+                continue
+            path = os.path.join(base, path)
+        path = os.path.normpath(path)
+        key = rubric_suffix(path, rubric_file)
+        if key and os.path.isfile(path) and (key, path) not in found:
+            found.append((key, path))
+    return found
+
+
+def json_strings(text: str) -> list:
+    """The string values inside a result that is JSON (a server wrapping a file's text), else []."""
+    if text.lstrip()[:1] not in ("{", "[", '"'):
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    out, stack = [], [data]
+    while stack and len(out) < JSON_STRING_LIMIT:
+        value = stack.pop()
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return out
 
 
 def proven(claim, item: dict, use_id, skill_calls: set) -> list:
@@ -721,6 +835,11 @@ def proven(claim, item: dict, use_id, skill_calls: set) -> list:
         return []  # the skill's text arrives in its announcement
     if kind == "Read" and (failed(item, text) or not NUMBERED_LINE.search(text)):
         return []
+    if kind == "MCP":
+        if failed(item, text):
+            return []
+        texts = [text] + json_strings(text)
+        return [(key, path) for key, path in detail if any(shows_text(shown, path, key) for shown in texts)]
     return [(key, path) for key, path in detail if shows_text(text, path, key)]
 
 
@@ -940,11 +1059,16 @@ def js_source_requirements(detected, registered, react: bool, path: str) -> set:
 
 
 def plan_text(cwd: str, path: str, text) -> str:
-    """What the plan says: the text being written plus every file already in the plan's directory."""
+    """What the plan says: the text being written plus every file already in the plan's directory.
+
+    A session plan's directory holds the plans of every session, so only the plan itself is read there.
+    """
     chunks = [text or ""]
-    directory = os.path.dirname(os.path.abspath(os.path.join(cwd, path)))
+    target = os.path.abspath(os.path.join(cwd, path))
+    directory = os.path.dirname(target)
     budget = PLAN_TEXT_LIMIT
-    for sibling in sorted(glob.glob(os.path.join(directory, "*.md"))):
+    siblings = [target] if session_plan(target) else sorted(glob.glob(os.path.join(directory, "*.md")))
+    for sibling in siblings:
         try:
             with open(sibling, encoding="utf-8", errors="ignore") as fh:
                 chunk = fh.read(budget)
@@ -968,11 +1092,17 @@ def orders_js(said: str, registered) -> bool:
 def plan_requirements(cwd: str, path: str, text, registered=()) -> set:
     """The rubric files a plan write needs: each skill the plan needs, with its stack or host skill.
 
+    The project is the one the plan lies in; a session plan lies in none, so the project is the
+    cwd's, found by walking up from the cwd.
+
     @param registered Every registered stack.
     """
-    php_root = project_root(cwd, path)
-    js_root = nearest_root(cwd, path, ("package.json", "tsconfig.json"))
-    detected = stacks_of(php_root, cwd, path, registered) if php_root else ()
+    anchor = path
+    if session_plan(os.path.abspath(os.path.join(cwd, path))):
+        anchor = os.path.join(os.path.abspath(cwd), os.path.basename(path))
+    php_root = project_root(cwd, anchor)
+    js_root = nearest_root(cwd, anchor, ("package.json", "tsconfig.json"))
+    detected = stacks_of(php_root, cwd, anchor, registered) if php_root else ()
     required = set()
     if php_root:
         required.add(f"{PHP_SKILL}/SKILL.md")
@@ -984,13 +1114,24 @@ def plan_requirements(cwd: str, path: str, text, registered=()) -> set:
         return required
     required.add(f"{JS_SKILL}/SKILL.md")
     hosts = stack_requirements(detected, "plan_js")
-    if JSX_IN_PLAN.search(said) or (not detected and js_root and depends_on_react(cwd, path, js_root)):
+    if JSX_IN_PLAN.search(said) or (not detected and js_root and depends_on_react(cwd, anchor, js_root)):
         hosts.add(f"{JS_SKILL}/react.md")
     return required | (hosts or {f"{JS_SKILL}/javascript.md"})
 
 
+def session_plan(path: str) -> bool:
+    """Report whether an absolute path lies in the Claude config directory's `plans/`, where plan
+    mode writes the session's plan (symbolic links resolved)."""
+    if not os.path.isabs(path):
+        return False
+    plans = os.path.realpath(os.path.join(config_dir(), "plans"))
+    directory = os.path.realpath(os.path.dirname(path))
+    return directory == plans or directory.startswith(plans + os.sep)
+
+
 def is_plan_file(path: str) -> bool:
-    return "/.claude/plans/" in path or path.startswith(".claude/plans/")
+    """Report whether the path is a plan: under a `.claude/plans/` directory, or a session plan."""
+    return "/.claude/plans/" in path or path.startswith(".claude/plans/") or session_plan(path)
 
 
 def missing_for(cwd: str, path: str, transcript_path: str, text=None):

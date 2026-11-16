@@ -15,6 +15,14 @@ Runner: the `/pipeline:agent-evals` command (`commands/agent-evals.md` in this p
 the agent **as registered** — `claude -p --agent <registered name>`, e.g.
 `pipeline:devils-advocate`, inside a scratch copy of the fixture —
 so the definition's own `tools:` and `model:` are what gets tested, not a paraphrase of it.
+User settings are left out of the nested session, so a plugin is enabled only by a `--plugin-dir`:
+the run passes the agent's plugin, `guards` and the fixture's stack plugin, **closed over the
+`dependencies` of every plugin passed** (each `.claude-plugin/plugin.json`, recursively), because
+Claude Code silently drops a plugin whose dependency is missing. Before a run is scored, the runner
+checks that the nested session listed the skills of every one of those plugins (the `skill_listing`
+attachments of its transcript); a run where one is missing is recorded as discarded and never
+scored. `bin/eval_plugins.py` does both — `closure` prints the plugin directories to pass,
+`check` reads the transcript — and `tests/test_eval_plugins.py` runs it.
 
 ## Layout
 
@@ -28,6 +36,7 @@ evals/
     verify-NN.*          # optional scorer run against the copy after the agent finishes — outside
                          # the fixture for the same reason as the answer key
     runs.log             # one line per run: date · agent@<content hash> · score · misses
+                         # (DISCARDED and the missing plugins, for a run the plugin check discarded)
 ```
 
 A fixture lives in the `evals/` directory of the plugin it belongs to: a fixture that is a project
