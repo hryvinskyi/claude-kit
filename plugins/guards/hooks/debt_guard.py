@@ -70,6 +70,7 @@ which fixes the debt instead of marking it. Fails open on an internal error — 
 hook must never wedge a session — but a baseline it cannot read is refused,
 never passed. Kill switch: CLAUDE_NO_DEBT_GUARD=1.
 """
+import bisect
 import json
 import os
 import re
@@ -482,18 +483,42 @@ def debt_occurrences(text: str, path: str, fragment: bool = False):
     typescript = extension in TYPESCRIPT_EXTENSIONS
     type_test = bool(TEST_FILE.search(path.replace(os.sep, "/")))
     found, lines, state, leading = Counter(), {}, None, fragment
-    for line in text.splitlines():
+    source, codes = text.splitlines(), []
+    for line in source:
         docblock = leading and state is None and bool(DOCBLOCK_LINE.match(line))
         if not docblock and line.strip():
             leading = False
         comments, code, state = scan_line(line, syntax, state, docblock)
+        codes.append(code)
         hits = [hit for comment in comments for hit in comment_debt(comment, type_test)]
-        if code_suppression(code) or (typescript and DOUBLE_CAST.search(code)):
+        if code_suppression(code):
             hits.append((SUPPRESSION_KIND, " ".join(line.split())))
         for hit in hits:
             found[hit] += 1
             lines.setdefault(hit, line.strip())
+    if typescript:
+        for first, last in double_casts(codes):
+            hit = (SUPPRESSION_KIND, " ".join(" ".join(source[first:last + 1]).split()))
+            found[hit] += 1
+            lines.setdefault(hit, source[first].strip())
     return found, lines
+
+
+def double_casts(codes: list) -> list:
+    """The lines each TypeScript double cast (`as unknown as`) spans in the code of a text, comments
+    and strings left out: the cast silences the type checker whether it stands on one line or is
+    split over several.
+
+    @param codes the code of each line, in order
+    @return [(first line index, last line index)], one pair per cast
+    """
+    joined = "\n".join(codes)
+    starts, offset = [], 0
+    for code in codes:
+        starts.append(offset)
+        offset += len(code) + 1
+    return [(bisect.bisect_right(starts, m.start()) - 1, bisect.bisect_right(starts, m.end() - 1) - 1)
+            for m in DOUBLE_CAST.finditer(joined)]
 
 
 def debt_added(old: str, new: str, path: str = "", fragment: bool = False):
