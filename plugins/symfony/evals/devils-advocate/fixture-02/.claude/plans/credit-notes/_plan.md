@@ -77,26 +77,47 @@
   `columnPrefix: 'total_'` (`total_minor`, `total_currency`, the columns Task 1 leaves) and
   `credited` with `columnPrefix: 'credited_'`. Each `Money` owns its own currency column; the
   check constraint of Task 1 keeps the two equal.
+- Doctrine reads none of it until the package registers its mapping directory, and the package
+  registers nothing today. This task adds `Resources/config/packages/doctrine.yaml`, which the
+  root configuration loads (`CLAUDE.md`, *Package activation*):
+  ```yaml
+  doctrine:
+      orm:
+          mappings:
+              AcmeBilling:
+                  type: attribute
+                  dir: '%kernel.project_dir%/packages/billing/src/Entity'
+                  prefix: 'Acme\Billing\Entity'
+  ```
+  Task 3's entities live in the same directory and need no further entry. The round-trip test
+  below fails without it ("not a valid entity or mapped super class").
 - `Invoice` gains `private Money $credited` (starts at zero) and two methods:
   - `remainingCreditable(): Money` — `total` minus `credited`.
-  - `credit(Money $amount): void` — throws `CreditExceedsRemaining` (new, `Api/`) when
-    `$amount` is greater than `remainingCreditable()`, and `InvalidArgumentException` from
-    `Money` on a currency mismatch; throws `NothingToCredit` (new, `Api/`) when `$amount`
-    is zero; otherwise adds to `credited`. There is no setter for `credited`.
+  - `credit(Money $amount): void` — throws `CreditCurrencyMismatch` (new, `Api/`, carrying the
+    invoice's currency) when `$amount` is not in the invoice's currency, checked before `Money`
+    is asked to combine the two, so `Money`'s `InvalidArgumentException` never leaves the
+    entity; throws `CreditExceedsRemaining` (new, `Api/`) when `$amount` is greater than
+    `remainingCreditable()`; throws `NothingToCredit` (new, `Api/`) when `$amount` is zero;
+    otherwise adds to `credited`. There is no setter for `credited`.
 - `InvoiceRepositoryInterface` gains one method. It does not exist today; this task adds
   it to the interface and to `DoctrineInvoiceRepository`:
   `public function getForUpdate(string $id): Invoice;` — `@throws InvoiceNotFound`; loads
   with `LockMode::PESSIMISTIC_WRITE`; must be called inside a transaction. When the request has
   already loaded the invoice (the endpoint's voter check does), the locked read does not
-  overwrite the managed instance, so `getForUpdate()` refreshes it under the lock
-  (`EntityManagerInterface::refresh($invoice, LockMode::PESSIMISTIC_WRITE)`): the state checked
-  is always the state read under the lock.
+  overwrite the managed instance. A `refresh()` cannot serve either: it hydrates into the
+  invoice's existing `Money` embeddables, whose properties are readonly, and Doctrine refuses to
+  change a readonly property once it is set. So `getForUpdate()` detaches a managed instance of
+  that id (`EntityManagerInterface::detach()`), then reads the row again with
+  `find($id, LockMode::PESSIMISTIC_WRITE)` and returns that fresh instance. The state checked is
+  always the state read under the lock. Callers work on the instance it returns; the one loaded
+  before is no longer managed and is never written.
 - Unit: `InvoiceTest` — credit within remaining, credit equal to remaining, exceeds,
-  zero, currency mismatch, two credits accumulate. Integration:
+  zero, currency mismatch (`CreditCurrencyMismatch`, `credited` unchanged), two credits
+  accumulate. Integration:
   `DoctrineInvoiceRepositoryTest` — `get`, `save`, `getForUpdate` round-trip against
   Postgres, `getForUpdate` on an unknown id throws `InvoiceNotFound`, and `getForUpdate` after
   `get` in the same request returns the `credited` amount another connection committed in
-  between.
+  between, and a credit on the instance it returned is saved on top of that amount.
 
 ## Task 3 — `CreditNote`, `RefundInstruction`, repository port
 
@@ -206,18 +227,34 @@ invoice with amounts that only fit once: exactly one succeeds, the other gets
 
 - Request: `POST /api/invoices/{id}/credit-notes`, header `Idempotency-Key` (required,
   ≤ 64 chars), body `{"amount_minor": int > 0, "currency": "EUR", "reason": string 1..500}`.
+  The payload rule checks `currency` against `^[A-Z]{3}$`, the form `Money` accepts, so a
+  malformed code is a `400` naming the field and never reaches `Money`.
+- Routes: the controller declares `#[Route]`, and the package has no route import today. This
+  task adds `Resources/config/routes.yaml`, which the root configuration loads (`CLAUDE.md`,
+  *Package activation*):
+  ```yaml
+  acme_billing:
+      resource: '../../Controller/'
+      type: attribute
+  ```
+  Task 7's admin controllers sit under the same directory and are imported by it.
 - Authorization: `InvoiceVoter` (new, `Security/`) grants `CREDIT` to `ROLE_BILLING_ADMIN`
   only; the controller calls `denyAccessUnlessGranted('CREDIT', $invoice)`.
 - Responses: `201 {"id": uuid, "remaining_creditable_minor": int, "currency": string}` ·
   `400 {"error": "invalid_payload", "fields": {name: message}}` ·
   `403 {"error": "forbidden"}` · `404 {"error": "invoice_not_found"}` ·
   `409 {"error": "credit_exceeds_remaining", "remaining_creditable_minor": int}` ·
-  `422 {"error": "nothing_to_credit"}`. Exception messages are never echoed. The payload
+  `422 {"error": "currency_mismatch", "currency": string}` (the invoice's, from
+  `CreditCurrencyMismatch`) · `422 {"error": "nothing_to_credit"}`. Exception messages are
+  never echoed. The payload
   rule already turns a zero amount into a `400`, so `nothing_to_credit` cannot be produced
   over HTTP; the mapping exists for callers of the issuer that are not this endpoint.
-- Unit: payload → command mapping and each exception → status mapping, `422` included.
-  Integration: `201`, `400`, `403`, `404` and `409` through the real kernel, plus a replay with the same
+- Unit: payload → command mapping, a malformed currency rejected, and each exception → status
+  mapping, both `422`s included.
+  Integration: `201`, `400` (a malformed currency among its cases), `403`, `404`, `409` and the
+  currency mismatch's `422` through the real kernel, plus a replay with the same
   `Idempotency-Key` returning the same `201` body and creating no second row.
+  These requests reach the controller only through the route import above.
 
 ## Task 7 — admin UI and strings
 
@@ -226,6 +263,15 @@ invoice with amounts that only fit once: exactly one succeeds, the other gets
   (`GET /admin/invoices/{id}`) renders `Resources/views/admin/invoice/detail.html.twig`. It calls
   `denyAccessUnlessGranted('VIEW', $invoice)`: this task adds `InvoiceVoter::VIEW`, granted to
   `ROLE_BILLING_ADMIN` and `ROLE_BILLING_VIEWER`.
+- The package has no Twig namespace today. This task adds `Resources/config/packages/twig.yaml`
+  (`CLAUDE.md`, *Package activation*):
+  ```yaml
+  twig:
+      paths:
+          '%kernel.project_dir%/packages/billing/src/Resources/views': AcmeBilling
+  ```
+  The controller renders `@AcmeBilling/admin/invoice/detail.html.twig`. Its routes come from
+  Task 6's import, which covers `Controller/Admin/`.
 - The screen gets an **Issue credit note** form (hidden without `CREDIT`): amount prefilled
   with the remaining creditable amount, reason, a CSRF token, and an idempotency key (a UUID
   drawn when the form is rendered, in a hidden field). It posts to

@@ -19,6 +19,18 @@ Services, listeners, and tagged `Api/` interfaces are registered in the module's
 `Resources/config/services.yaml`. A tagged interface missing from the resource glob never
 registers — the strategy pool is silently empty.
 
+## Package activation
+
+The application's root `config/` is not part of this repository excerpt, and it names no
+package. For every package it loads, by glob:
+- `src/Resources/config/services.yaml` as service definitions;
+- every file in `src/Resources/config/packages/` as bundle configuration;
+- `src/Resources/config/routes.yaml` as routes.
+
+So a package registers its own Doctrine mapping (`doctrine.orm.mappings`), Twig namespace
+(`twig.paths`) and route imports in those files. A package with none of them has no mapping,
+no templates and no routes.
+
 ## Knowledge IDE
 
 Knowledge-base directory: `kb/` (decisions in `kb/Decisions/`, board `kb/To DO.md`).

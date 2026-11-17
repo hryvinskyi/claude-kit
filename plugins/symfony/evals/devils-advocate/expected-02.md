@@ -155,3 +155,66 @@ the tag still registers through the main block's glob over `Api/`. The test-visi
 belongs to Task 3, the first task whose test needs it, and Task 4's services fall under it
 without an edit. A run after this date that reports the removed services as still standing has
 misread the plan. R1–R5 are untouched.
+
+## Fixture corrected (2026-11-17)
+
+The run of 2026-11-16 (C1–C3 in `runs.log`) reported three real Criticals:
+- **The Doctrine mapping was registered nowhere.** Task 2 wrote `Invoice`'s mapping as attributes,
+  but nothing told Doctrine to read `packages/billing/src/Entity/`.
+- **The routes and templates were never loaded.** No route import covered the controllers of Tasks 6
+  and 7, and no Twig namespace covered Task 7's template.
+- **A malformed or mismatched currency reached the client as an unmapped `500`.** This was a
+  calibration extra, kept as an Important finding until a run rated it Critical.
+
+The first two came from the fixture itself: it held no root `config/`, so a plan could not point at
+the place that loads a package.
+
+`CLAUDE.md` now has a *Package activation* section. The application's root configuration, outside
+the excerpt, loads each package's `services.yaml`, the files in its `Resources/config/packages/` and
+its `Resources/config/routes.yaml` by glob. A package registers its own mapping, Twig namespace and
+route imports there.
+
+The plan uses that convention:
+- **Task 2** adds `Resources/config/packages/doctrine.yaml`, with the mapping of `Entity/` as
+  attributes. The round-trip test fails without it.
+- **Task 6** adds `Resources/config/routes.yaml`, importing `Controller/` by attribute, which covers
+  Task 7's admin controllers too. Its integration tests reach the controller only through it.
+- **Task 7** adds `Resources/config/packages/twig.yaml` and renders
+  `@AcmeBilling/admin/invoice/detail.html.twig`.
+- **The currency:**
+  - `Invoice::credit()` throws `CreditCurrencyMismatch` (new, `Api/`) before `Money` combines two
+    currencies.
+  - The endpoint's payload rule checks the code against `^[A-Z]{3}$`, so a malformed code is a
+    `400`.
+  - A mismatch is `422 {"error": "currency_mismatch", "currency": …}`.
+  - Tasks 2 and 6 test both cases.
+
+What this leaves untouched:
+- **R1–R5 stand as they were.** The named constructors, `Money`'s `new self` and missing tests, the
+  level 9 gate, the missing generator task and `wrapInTransaction()` in the issuer are unchanged.
+- **D2 is unaffected.** Task 4 still plans no `services.yaml` edit. The three new files are bundle
+  configuration and routes, not service definitions, and the tag still registers through the main
+  block's glob.
+- **No other decoy moved.**
+
+A currency mismatch surfacing as an unmapped `500` is no longer an expected extra. A run after this
+date that reports one of the three as still standing has misread the plan.
+
+The run of the same day against that plan (2026-11-17 in `runs.log`) did not raise those three. It
+reported one new real Critical (C2), so the plan was corrected after that run:
+- **What was wrong.** The 2026-11-14 correction of `getForUpdate()` refreshed a managed invoice
+  under the lock, and a refresh cannot work here. Doctrine hydrates into the invoice's existing
+  `Money` embeddables, whose properties are readonly, and it refuses to change a readonly property
+  once set. So the refresh threw as soon as another connection had changed `credited`, which is the
+  very case Task 2's test sets up.
+- **The fix.** Task 2's `getForUpdate()` now detaches a managed instance of that id and reads the
+  row again with `find($id, LockMode::PESSIMISTIC_WRITE)`, returning the fresh instance. Callers
+  work on it. Its test also saves a credit on the returned instance on top of the amount the other
+  connection committed.
+
+That run's other findings stay as real extras. They include translations never loaded: the
+activation convention names no translator path, and a package that ships `translations/` has to add
+one.
+
+None of this touches R1–R5 or a decoy. A run after this correction that reports the refresh as still
+standing has misread the plan.
