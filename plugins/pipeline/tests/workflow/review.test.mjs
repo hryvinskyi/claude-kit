@@ -938,6 +938,69 @@ test('a dead verifier and a missing verdict leave their findings unverified with
   assertWhole(run, 3);
 });
 
+const NOT_LOADED = (type) => () => {
+  throw new Error(`agent({agentType}): agent type '${type}' not found. Available agents: claude, general-purpose`);
+};
+
+test('a verifier type the session has not loaded is not spawned again, and its findings say why they are unverified', async () => {
+  const run = await runWorkflow(
+    waveArgs(),
+    scenario({
+      members: {
+        'lens-a': [report(finding('src/a.js', 1, 'first'), finding('src/a.js', 2, 'second'))],
+        'lens-b': [report(finding('src/b.js', 1, 'third'))],
+      },
+      verifier: NOT_LOADED(VERIFIER),
+    }),
+    { 'lens-b': 25 },
+  );
+  assert.equal(verifierCalls(run.calls).length, 2, "lens-a's two verifiers are refused; lens-b's, later, is never spawned");
+  assert.deepEqual(run.result.missing_agent_types, [VERIFIER]);
+  assert.deepEqual(
+    run.result.unverified.map((entry) => [entry.id, entry.reason]).sort(),
+    [
+      ['lens-a-1', `${VERIFIER} is not loaded in this session`],
+      ['lens-a-2', `${VERIFIER} is not loaded in this session`],
+      ['lens-b-1', `${VERIFIER} is not loaded in this session`],
+    ],
+  );
+  assert.ok(run.result.not_checked.includes(`agents: ${VERIFIER} is not loaded in this session, so none of its agents ran`));
+  assert.equal(run.logs.filter((line) => line.includes('run /reload-plugins, then resume this run')).length, 1);
+  assertWhole(run, 3);
+});
+
+test('a member type the session has not loaded leaves its members dead without a retry', async () => {
+  const run = await runWorkflow(
+    waveArgs(),
+    scenario({ members: { 'lens-a': [NOT_LOADED(REVIEWER)], 'lens-b': [NOT_LOADED(REVIEWER)] } }),
+  );
+  const reviewerCalls = run.calls.filter((call) => call.opts.agentType === REVIEWER);
+  assert.equal(reviewerCalls.length, 2, 'each member is refused once and not retried');
+  assert.deepEqual(run.result.missing_agent_types, [REVIEWER]);
+  for (const name of ['lens-a', 'lens-b']) {
+    assert.equal(run.result.members.find((entry) => entry.name === name).status, 'dead', name);
+    assert.ok(run.result.not_checked.includes(`${name}: ${REVIEWER} is not loaded in this session; this pass did not run`), name);
+  }
+  assert.equal(run.result.members.find((entry) => entry.name === 'mechanical').status, 'ok', 'a member of no agent type still runs');
+  assert.ok(!run.logs.some((line) => /returned nothing; running it once more/.test(line)));
+  assertWhole(run, 0);
+});
+
+test('an error that is not a missing agent type still fails the spawn as before', async () => {
+  const run = await runWorkflow(
+    waveArgs(),
+    scenario({
+      members: { 'lens-a': [report(finding('src/a.js', 1, 'first'))] },
+      verifier: () => {
+        throw new Error('the model is overloaded');
+      },
+    }),
+  );
+  assert.deepEqual(run.result.missing_agent_types, []);
+  assert.deepEqual(run.result.unverified.map((entry) => entry.reason), ['verifier died']);
+  assertWhole(run, 1);
+});
+
 test('a verification stage that throws reports every finding it held unverified', async () => {
   const run = await runWorkflow(
     waveArgs({ max_agents: 5 }),
@@ -1215,8 +1278,10 @@ test('delta mode runs one delta member, no built-in and no mechanical, and its i
 test('the result carries the shape the session reads', async () => {
   const run = await runWorkflow(waveArgs(), scenario({ members: { 'lens-a': [report(finding('src/a.js', 1, 'defect'))] } }));
   assert.deepEqual(Object.keys(run.result).sort(), [
-    'budget', 'class', 'discarded', 'findings', 'gates', 'members', 'mode', 'not_checked', 'refuted', 'unverified',
+    'budget', 'class', 'discarded', 'findings', 'gates', 'members', 'missing_agent_types', 'mode', 'not_checked',
+    'refuted', 'unverified',
   ]);
+  assert.deepEqual(run.result.missing_agent_types, []);
   assert.equal(run.result.class, 'M');
   assert.deepEqual(Object.keys(run.result.budget).sort(), ['batched', 'max_agents', 'over_by', 'used']);
   const entry = run.result.findings[0];

@@ -23,6 +23,10 @@ const WAVE_MEMBER_NAMES = Object.freeze(['lens-a', 'lens-b', 'lens-c', 'builtin'
 const DELTA_MEMBER_NAME = /^delta-[1-9][0-9]*$/;
 const PHASES = Object.freeze({ wave: 'Wave', verify: 'Verify', result: 'Result' });
 const VERIFIER_TYPE = 'pipeline:finding-verifier';
+// How the runtime refuses a spawn whose agent type the session has not loaded. A session loads its
+// plugins' agents when its process starts and on /reload-plugins, so a process older than an agent
+// does not have it.
+const MISSING_AGENT_TYPE = /agent type '([^']+)' not found/;
 const RULES_MEMBER = 'rules';
 
 // Where a verdict sends a finding.
@@ -717,7 +721,7 @@ const run = parsed.value;
 
 const members = membersOf(run);
 const share = verifierShare(run.maxAgents, members.length, run.rulesLeads.length);
-const spawned = { count: 0, beyondPlan: [] };
+const spawned = { count: 0, beyondPlan: [], missingTypes: [] };
 const batchedMembers = [];
 const scriptNotChecked = [];
 
@@ -750,9 +754,31 @@ const records = new Map(
   ]),
 );
 
-function spawn(prompt, options) {
+// An agent of a type the session has not loaded is spawned once: its refusal is recorded, and every
+// later spawn of that type answers null without asking the runtime again.
+async function spawn(prompt, options) {
+  if (isMissingType(options.agentType)) return null;
   spawned.count += 1;
-  return agent(prompt, options);
+  try {
+    return await agent(prompt, options);
+  } catch (error) {
+    const missing = MISSING_AGENT_TYPE.exec(error instanceof Error ? error.message : String(error));
+    if (!isPresent(missing)) throw error;
+    if (!isMissingType(missing[1])) {
+      spawned.missingTypes.push(missing[1]);
+      log(`${missing[1]} is not loaded in this session: no agent of that type runs; run /reload-plugins, then resume this run`);
+    }
+    return null;
+  }
+}
+
+function isMissingType(agentType) {
+  return isPresent(agentType) && spawned.missingTypes.includes(agentType);
+}
+
+// Why a verifier gave no answer.
+function lostVerifierReason() {
+  return isMissingType(VERIFIER_TYPE) ? `${VERIFIER_TYPE} is not loaded in this session` : 'verifier died';
 }
 
 // An entry keeps the key it was sent under: a verdict may move its file and line, and the key
@@ -796,7 +822,7 @@ async function runMember(record, label) {
   };
   const prompt = kind.prompt(member, run);
   const first = await spawn(prompt, options);
-  if (isPresent(first)) return first;
+  if (isPresent(first) || isMissingType(options.agentType)) return first;
   log(`${member.name}: the agent returned nothing; running it once more`);
   spawned.beyondPlan.push(`a retry of ${member.name}`);
   return spawn(prompt, { ...options, label: `${label} retry` });
@@ -854,7 +880,7 @@ function settleBatches(batches, answers) {
     const answer = answers[index];
     for (const entry of batch) {
       const verdict = isPresent(answer) ? verdictFor(answer, entry.id) : undefined;
-      if (!isPresent(answer)) settled.unverified.push(unverifiedAs(entry, 'verifier died'));
+      if (!isPresent(answer)) settled.unverified.push(unverifiedAs(entry, lostVerifierReason()));
       else if (!isPresent(verdict)) settled.unverified.push(unverifiedAs(entry, 'no verdict'));
       else {
         const bucket = VERDICT_BUCKET[verdict.verdict];
@@ -992,12 +1018,19 @@ function markDead(record, why) {
   record.notChecked.push(`${why}; this pass did not run`);
 }
 
+// Why a member left no output: its agent type was refused, so it never ran, or it ran twice and
+// returned nothing.
+function deadMemberReason(record) {
+  const type = MEMBER_KINDS[record.member.kind].spawnOptions.agentType;
+  return isMissingType(type) ? `${type} is not loaded in this session` : 'no output after one retry';
+}
+
 // Verifies a member's output; when a finding of it cites a file or line that exists neither in
 // the checkout nor at the base, the member reviewed another tree and is run once more.
 async function settleMember(record, output) {
   const name = record.member.name;
   try {
-    if (!isPresent(output)) return markDead(record, 'no output after one retry');
+    if (!isPresent(output)) return markDead(record, deadMemberReason(record));
     const first = await verifyRun(record, output, `verify ${name}`);
     if (!first.anotherTree) {
       commitRun(record, first);
@@ -1218,6 +1251,8 @@ return {
   not_checked: [
     ...allRecords.flatMap((record) => record.notChecked.map((line) => `${record.member.name}: ${line}`)),
     ...scriptNotChecked,
+    ...spawned.missingTypes.map((type) => `agents: ${type} is not loaded in this session, so none of its agents ran`),
   ],
+  missing_agent_types: [...spawned.missingTypes],
   budget: { max_agents: run.maxAgents, used: spawned.count, batched: batchedMembers, over_by: overBy },
 };
