@@ -1,10 +1,11 @@
 ---
-description: Run the agent eval harness — run an agent as registered on a seeded-flaw fixture and score it against the answer key
-argument-hint: "[agent] [fixture] [model] — defaults: devils-advocate symfony/fixture-01, the agent's own model"
+description: Run the agent eval harness — run an agent as registered on a seeded-flaw fixture and score it against the answer key, or run a command eval by its own README
+argument-hint: "[agent | command eval] [fixture] [model] — defaults: devils-advocate symfony/fixture-01, the agent's own model"
 ---
 
 Run a regression eval for an agent definition. Default target: `devils-advocate` on
 `symfony/fixture-01`. See `${CLAUDE_PLUGIN_ROOT}/evals/README.md` for the harness rules.
+A first argument that names a **command eval** (below) runs that eval instead.
 
 **Evals run from the kit's source clone, never from the plugin cache.** The clone is
 `$CLAUDE_KIT_ROOT` when the variable is set; otherwise the git working tree that holds
@@ -27,7 +28,9 @@ that registered name loads.
 
 1. **Resolve**, beside each other in `<evals dir>/<agent>/`: the fixture `fixture-<NN>/`, its prompt
    `prompt-<NN>.md`, its answer key `expected-<NN>.md`, and its scorer `verify-<NN>.*` when the key
-   names one. Do NOT read the answer key into the agent's prompt — it is for scoring only.
+   names one. Do NOT read the answer key into the agent's prompt — it is for scoring only. When
+   `<evals dir>/<agent>/` holds a `README.md` and no agent of that name exists, it is a command eval:
+   go to *Command evals* below.
 2. **Copy the fixture** into the session scratchpad (fresh copy every run — agents edit
    files; never run on the original, never reuse a dirty copy).
 3. **Load the engineering standards from the clone.** An answer key may score a rule the
@@ -47,7 +50,13 @@ that registered name loads.
      claude -p --agent <registered name> --setting-sources project,local --add-dir <memory> \
      --session-id <uuid> --plugin-dir <plugin dir> … \
      --dangerously-skip-permissions --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
-     < <evals dir>/<agent>/prompt-<NN>.md > <copy>/../<agent>-report.md
+     < <copy>/../prompt-<NN>.md > <copy>/../<agent>-report.md
+   ```
+   `<copy>/../prompt-<NN>.md` is the fixture's prompt with every `{{COPY}}` replaced by the copy's
+   absolute real path, written beside the copy, never inside it: an agent whose input names
+   absolute paths (a verifier's `checkout` and `diff`) gets the paths of this run's copy.
+   ```
+   sed "s|{{COPY}}|$(cd <copy> && pwd -P)|g" <evals dir>/<agent>/prompt-<NN>.md > <copy>/../prompt-<NN>.md
    ```
    `--setting-sources project,local` keeps every user-scope skill, agent, hook and memory out of
    the nested session, so the run measures the clone and not the runner's machine; the standards
@@ -124,3 +133,23 @@ that registered name loads.
 
 Never edit the fixture, the prompt, or the answer key to make a run pass. Improve the agent
 definition instead, commit it, and re-run.
+
+## Command evals
+
+A command eval measures a command as a whole: the command, the workflow it starts and every agent
+that workflow spawns (`review/` measures `/pipeline:review`). It has no agent to pass to `--agent`,
+so it carries its own procedure: `<evals dir>/<name>/README.md` says how to set up the copy, how to
+run the command headless, what file the run leaves to score, and the run line `runs.log` takes.
+That README is the procedure; follow it step by step, with these rules of the harness on top:
+
+1. **A command eval is paid, and starts only on the owner's word.** A review run spawns up to two
+   dozen agents. Say what the run costs (the README names the agents it may spawn) and wait.
+2. **Copy, never run in place**, as step 2 above, in a fresh scratch directory per run.
+3. **Run it as the README says**, from inside the copy, with `--setting-sources project,local`, the
+   plugins the README names closed over their dependencies (`eval_plugins.py closure`, step 4) and
+   a fresh `--session-id <uuid>`, so step 5 can find the transcript. A `--model` given to this
+   command becomes the run's `--model`.
+4. **Check the plugins** with `eval_plugins.py check` against that transcript, as step 5 above; a
+   discarded run is recorded and never scored.
+5. **Score and record** as the README and its answer key say: the run line goes into that eval's
+   `runs.log`, with the content hash of every file the README lists as deciding the run.

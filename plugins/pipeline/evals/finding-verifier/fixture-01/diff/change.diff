@@ -1,0 +1,263 @@
+diff --git a/desk/cli.py b/desk/cli.py
+new file mode 100644
+index 0000000..c96cbab
+--- /dev/null
++++ b/desk/cli.py
+@@ -0,0 +1,25 @@
++"""Commands a staff member types; each returns its result and writes nothing."""
++
++from __future__ import annotations
++
++import re
++from typing import Mapping
++
++from desk.export import export_filename, render_ticket
++from desk.ticket import Ticket
++
++TICKET_ID = re.compile(r"[1-9][0-9]{0,8}")
++
++
++class UsageError(Exception):
++    """A command was given an argument it cannot use; the message says which and why."""
++
++
++def export_command(raw_id: str, tickets: Mapping[int, Ticket]) -> tuple[str, str]:
++    """The file name and the page of the ticket whose id was typed as `raw_id`."""
++    if TICKET_ID.fullmatch(raw_id) is None:
++        raise UsageError(f"A ticket id is a number such as 42, not {raw_id!r}.")
++    ticket = tickets.get(int(raw_id))
++    if ticket is None:
++        raise UsageError(f"There is no ticket {raw_id}.")
++    return export_filename(raw_id), render_ticket(ticket)
+diff --git a/desk/export.py b/desk/export.py
+new file mode 100644
+index 0000000..f4ab022
+--- /dev/null
++++ b/desk/export.py
+@@ -0,0 +1,51 @@
++"""A ticket, and the list of open tickets, as HTML pages the team prints or mails."""
++
++from __future__ import annotations
++
++from typing import Iterable
++
++from desk.markup import escape_text, tidy_entities
++from desk.ticket import Ticket
++
++INDEX_HEADING = "TODO: tickets waiting on the team"
++
++STATUS_BADGES = {
++    "new": ("New", "badge-new"),
++    "open": ("In progress", "badge-open"),
++    "resolved": ("Resolved", "badge-done"),
++    "closed": ("Closed", "badge-done"),
++}
++
++
++def render_ticket(ticket: Ticket) -> str:
++    """The ticket's page: its subject, its status and its thread."""
++    label, css_class = STATUS_BADGES[ticket.status]
++    thread = "".join(
++        f"<li><b>{escape_text(message.author)}</b>"
++        f"<p>{tidy_entities(escape_text(message.body))}</p></li>"
++        for message in ticket.messages
++    )
++    return (
++        f"<h1>{escape_text(ticket.subject)}</h1>"
++        f'<span class="{css_class}">{escape_text(label)}</span>'
++        f"<ol>{thread}</ol>"
++    )
++
++
++def open_tickets(tickets: Iterable[Ticket]) -> list[Ticket]:
++    """The tickets the index lists: every one still open, oldest first."""
++    return sorted((ticket for ticket in tickets if ticket.status != "closed"), key=lambda ticket: ticket.opened_at)
++
++
++def render_index(tickets: Iterable[Ticket]) -> str:
++    """The page listing the open tickets, each by its id and subject."""
++    rows = "".join(
++        f"<li>#{escape_text(str(ticket.id))} {escape_text(ticket.subject)}</li>"
++        for ticket in open_tickets(tickets)
++    )
++    return f"<h1>{escape_text(INDEX_HEADING)}</h1><ul>{rows}</ul>"
++
++
++def export_filename(ticket_id: str) -> str:
++    """The file name a ticket's page is saved under."""
++    return f"ticket-{ticket_id}.html"
+diff --git a/desk/markup.py b/desk/markup.py
+index 4db6abb..715917b 100644
+--- a/desk/markup.py
++++ b/desk/markup.py
+@@ -8,3 +8,9 @@ import html
+ def escape_text(value: str) -> str:
+     """`value` escaped for an HTML text node or a quoted attribute."""
+     return html.escape(value, quote=True)
++
++
++def tidy_entities(value: str) -> str:
++    """Turn the entities a mail client wrote into the characters they stand for, so a reply
++    pasted from a mail reads on the page as the customer typed it."""
++    return html.unescape(value)
+diff --git a/desk/sla.py b/desk/sla.py
+index 467a4e5..9b88f0e 100644
+--- a/desk/sla.py
++++ b/desk/sla.py
+@@ -10,6 +10,15 @@ def due_at(ticket: Ticket) -> int:
+     return ticket.opened_at + ticket.sla_hours
+ 
+ 
++def has_deadline(ticket: Ticket) -> bool:
++    """Whether the ticket's plan promises a first reply by a set hour."""
++    return ticket.sla_hours > 0
++
++
+ def is_overdue(ticket: Ticket, now: int) -> bool:
+-    """Whether the first reply is late: the ticket is still open and its due hour has passed."""
+-    return ticket.is_open() and now > due_at(ticket)
++    """Whether the first reply is late: the ticket is still open, its plan promises a deadline,
++    and the due hour has passed."""
++    if not has_deadline(ticket):
++        return False
++    due = due_at(ticket)
++    return ticket.is_open() and now > due
+diff --git a/desk/ticket.py b/desk/ticket.py
+index 0dd5e70..27bf857 100644
+--- a/desk/ticket.py
++++ b/desk/ticket.py
+@@ -9,6 +9,7 @@ OPEN_STATUSES = frozenset({"new", "open"})
+ PLAN_SLA_HOURS = {
+     "standard": 24,
+     "priority": 4,
++    "community": 0,
+ }
+ 
+ 
+@@ -24,7 +25,8 @@ class Message:
+ class Ticket:
+     """A customer's request and its thread.
+ 
+-    `sla_hours` is how many hours after `opened_at` the team's first reply is due.
++    `sla_hours` is how many hours after `opened_at` the team's first reply is due; 0 means the
++    plan promises no deadline at all. A negative `sla_hours` is refused when the ticket is built.
+     `opened_at` and every `now` are whole hours on one clock.
+     """
+ 
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+new file mode 100644
+index 0000000..d736c74
+--- /dev/null
++++ b/tests/test_cli.py
+@@ -0,0 +1,28 @@
++import unittest
++from dataclasses import replace
++
++from desk.cli import UsageError, export_command
++from desk.ticket import Message, open_ticket
++
++CUSTOMER = "ana@example.invalid"
++
++
++def tickets():
++    ticket = open_ticket(7, "Login fails", CUSTOMER, "standard", opened_at=0)
++    return {7: replace(ticket, messages=(Message(CUSTOMER, "It fails since Monday."),))}
++
++
++class ExportCommandTest(unittest.TestCase):
++    def test_the_file_is_named_after_the_ticket(self):
++        filename, page = export_command("7", tickets())
++        self.assertEqual("ticket-7.html", filename)
++        self.assertIn("Login fails", page)
++
++    def test_an_id_that_is_not_a_number_is_refused(self):
++        for raw_id in ("../../etc/passwd", "7/../../x", "07", "", "7 ", "-7", "\uff17"):
++            with self.subTest(raw_id=raw_id), self.assertRaises(UsageError):
++                export_command(raw_id, tickets())
++
++    def test_an_unknown_ticket_is_refused(self):
++        with self.assertRaises(UsageError):
++            export_command("8", tickets())
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..54cb451
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,46 @@
++import unittest
++from dataclasses import replace
++
++from desk.export import open_tickets, render_index, render_ticket
++from desk.ticket import Message, open_ticket
++
++CUSTOMER = "ana@example.invalid"
++
++
++def ticket_with(*bodies, status="new", ticket_id=7, subject="Login fails", opened_at=0):
++    ticket = open_ticket(ticket_id, subject, CUSTOMER, "standard", opened_at=opened_at)
++    return replace(ticket, status=status, messages=tuple(Message(CUSTOMER, body) for body in bodies))
++
++
++class RenderTicketTest(unittest.TestCase):
++    def test_the_page_shows_the_thread(self):
++        page = render_ticket(ticket_with("It fails since Monday.", "Still failing."))
++        self.assertIn("<p>It fails since Monday.</p>", page)
++        self.assertIn("<p>Still failing.</p>", page)
++
++    def test_the_subject_is_escaped(self):
++        page = render_ticket(ticket_with("Hi", subject="<script>alert(1)</script>"))
++        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
++        self.assertNotIn("<script>", page)
++
++    def test_an_entity_pasted_from_a_mail_reads_as_typed(self):
++        page = render_ticket(ticket_with("Tom &amp; Jerry"))
++        self.assertIn("<p>Tom &amp; Jerry</p>", page)
++
++    def test_the_page_shows_the_status(self):
++        page = render_ticket(ticket_with("Hi", status="resolved"))
++        self.assertIn('<span class="badge-done">Resolved</span>', page)
++
++
++class IndexTest(unittest.TestCase):
++    def test_the_index_lists_open_tickets_oldest_first(self):
++        newer = ticket_with("Hi", ticket_id=2, subject="Second", opened_at=5)
++        older = ticket_with("Hi", ticket_id=1, subject="First", opened_at=1)
++        self.assertEqual([older, newer], open_tickets([newer, older]))
++
++    def test_the_index_leaves_closed_tickets_out(self):
++        self.assertEqual([], open_tickets([ticket_with("Hi", status="closed")]))
++
++    def test_the_index_page_names_each_ticket(self):
++        page = render_index([ticket_with("Hi", ticket_id=3, subject="Refund")])
++        self.assertIn("<li>#3 Refund</li>", page)
+diff --git a/tests/test_markup.py b/tests/test_markup.py
+index df66c86..88de8fa 100644
+--- a/tests/test_markup.py
++++ b/tests/test_markup.py
+@@ -1,6 +1,6 @@
+ import unittest
+ 
+-from desk.markup import escape_text
++from desk.markup import escape_text, tidy_entities
+ 
+ 
+ class MarkupTest(unittest.TestCase):
+@@ -9,3 +9,6 @@ class MarkupTest(unittest.TestCase):
+ 
+     def test_quotes_are_escaped(self):
+         self.assertEqual("&quot;x&quot; &#x27;y&#x27;", escape_text("\"x\" 'y'"))
++
++    def test_entities_from_a_mail_client_read_as_typed(self):
++        self.assertEqual("Tom & Jerry", tidy_entities("Tom &amp; Jerry"))
+diff --git a/tests/test_sla.py b/tests/test_sla.py
+index df8cee3..ee5292f 100644
+--- a/tests/test_sla.py
++++ b/tests/test_sla.py
+@@ -23,3 +23,7 @@ class SlaTest(unittest.TestCase):
+     def test_a_resolved_ticket_is_never_overdue(self):
+         ticket = open_ticket(1, "Login fails", CUSTOMER, "standard", opened_at=10)
+         self.assertFalse(is_overdue(replace(ticket, status="resolved"), now=100))
++
++    def test_a_ticket_without_a_deadline_is_never_overdue(self):
++        ticket = open_ticket(2, "Feature idea", CUSTOMER, "community", opened_at=10)
++        self.assertFalse(is_overdue(ticket, now=10))

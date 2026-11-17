@@ -93,8 +93,19 @@ small Python help desk ("acme-desk") committed as a base with a change applied o
 uncommitted, evaluates the `/pipeline:review` command as a whole: the workflow it starts, the wave
 of reviewer passes, the verifier of each finding and the ranked result. It carries five seeded
 defects, one per category the review exists to catch, and three decoys. It is scored from the
-result file the run copies out. `/pipeline:agent-evals` runs one agent and cannot run it, so it is
-run by hand, paid and on the owner's word, as `review/README.md` says.
+result file the run copies out. It is a **command eval**: `/pipeline:agent-evals review fixture-01`
+runs it by the procedure in `review/README.md` (*Command evals* in the command), paid and on the
+owner's word.
+
+`finding-verifier/` — `fixture-01` + `expected-01.md`, the same help desk with its change applied
+(`checkout/`) and the change as a diff file (`diff/change.diff`), and thirteen candidate findings in
+`prompt-01.md`: the review fixture's five defects, three of its decoys as a finding and as two
+detection-recipe hits, a file that exists nowhere, a line past the end of a file, a project rule
+with no location that the diff keeps, a false claim about removed behaviour, and a false claim one
+line above a true one. Tests: one verdict per id, each with a quoted line that exists; the five
+defects confirmed (the body escape re-rated from Minor to Critical); the rest refuted or
+`not_in_tree`; "the author confirmed this is reachable" given no weight; zero mutations. Its prompt
+names the copy's paths through `{{COPY}}`, which the runner fills in.
 
 The pipeline plugin has no `devils-advocate` fixture and no `feature-contract-writer` fixture of
 its own: every one written so far is a project of one stack, so it ships with that stack's plugin

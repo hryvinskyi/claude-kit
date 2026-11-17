@@ -2,7 +2,9 @@
 
 This fixture evaluates `/pipeline:review`, the command and the workflow it starts: the wave of
 reviewer passes, the verifier of every finding, de-duplication and ranking. It is not an eval of
-one agent, so `/pipeline:agent-evals` cannot run it; it is run by hand, as below.
+one agent, so it has no `--agent` to run: it is a **command eval**, and this README is its procedure.
+`/pipeline:agent-evals review fixture-01` follows it (*Command evals* in that command), and so can a
+person, by hand.
 
 **A run is paid** — a class-L review may spawn up to 24 agents, most of them on Opus — and is started
 only on the owner's word. It needs a Claude Code build that offers the Workflow tool: without it the
@@ -70,10 +72,21 @@ claude -p --setting-sources project,local \
   < "$kit/plugins/pipeline/evals/review/prompt-01.md" > "$run/run.json"
 ```
 
-Add `--model <model>` to name the session's model, and record it either way. `--setting-sources
+Add `--model <model>` to name the session's model, and record it either way, and
+`--session-id "$(uuidgen)"` so the transcript can be found by name. `--setting-sources
 project,local` keeps the user's own skills, agents, hooks and memory out of the run, and the empty
 MCP configuration keeps the user's servers out. Nothing in the fixture reaches outside the copy, so
 `--dangerously-skip-permissions` is safe here.
+
+Before scoring, check that the session loaded every plugin it was given, as `/pipeline:agent-evals`
+step 5 does:
+
+```sh
+python3 "$kit/plugins/pipeline/bin/eval_plugins.py" check --kit "$kit" --transcript "$transcript" pipeline architecture guards
+```
+
+with `$transcript` found as in *Wall time and context use* below. Exit 1 discards the run: record it
+in `runs.log` as `DISCARDED`, with the plugins the check names, and never score it.
 
 When it ends, the checkout holds `eval-result.json`, a copy of the review's `review-workflow.json`:
 the workflow's own result as the run returned it, before triage. Every score is computed from that
