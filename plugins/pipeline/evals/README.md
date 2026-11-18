@@ -21,8 +21,10 @@ the run passes the agent's plugin, `guards` and the fixture's stack plugin, **cl
 Claude Code silently drops a plugin whose dependency is missing. Before a run is scored, the runner
 checks that the nested session listed the skills of every one of those plugins (the `skill_listing`
 attachments of its transcript); a run where one is missing is recorded as discarded and never
-scored. `bin/eval_plugins.py` does both — `closure` prints the plugin directories to pass,
-`check` reads the transcript — and `tests/test_eval_plugins.py` runs it.
+scored. An agent whose `tools:` leaves out `Skill` (`finding-verifier`) is never sent a listing, so
+for it the check finds the definition in the session's system prompt instead, which confirms the
+agent's plugin and its dependencies. `bin/eval_plugins.py` does both — `closure` prints the plugin
+directories to pass, `check` reads the transcript — and `tests/test_eval_plugins.py` runs it.
 
 ## Layout
 

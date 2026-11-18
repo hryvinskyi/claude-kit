@@ -94,20 +94,28 @@ that registered name loads.
 5. **Check that the session loaded every plugin** before anything is scored:
    ```
    python3 <kit>/plugins/pipeline/bin/eval_plugins.py check --kit <kit> --copy <copy> --session <uuid> \
-     <agent's plugin> guards [<stack plugin>]
+     --agent <registered name> <agent's plugin> guards [<stack plugin>]
    ```
    It closes the plugins over their dependencies as step 4 did, reads the nested session's
    transcript (`~/.claude/projects/<slug of the copy's real path>/<uuid>.jsonl`, or
    `$CLAUDE_CONFIG_DIR/projects/…`; `--transcript <file>` names it directly), and compares the
    names its `skill_listing` attachments listed with every skill and model-invocable command each
    plugin ships. Exit 0 (`"verdict": "ok"`): go on. Exit 1 (`"verdict": "discard"`): a plugin's
-   skills are missing from the listing, or the transcript holds no listing — the run measured
-   another plugin set, so it is **discarded, never scored**: record it under step 8 as discarded,
-   with the plugins and skills the check names as missing, fix the invocation and run again.
-   Exit 2: the transcript is not where the check looked; find it before deciding anything. A plugin
-   that ships no skill and no command (`guards`) cannot be confirmed by the listing; the check
-   reports it `unverifiable`, and the run record says so. The subagent fallback of step 4 has no
-   nested session to check; its run record says the check did not run.
+   skills are missing from the listing, the transcript holds no listing, or an agent with no Skill
+   tool (below) is not in the system prompt — the run measured another plugin set, so it is
+   **discarded, never scored**: record it under step 8 as discarded, with the plugins and skills the
+   check names as missing, fix the invocation and run again. Exit 2: the input is unusable, and the
+   error on standard error says which — the transcript is not where the check looked (find it before
+   deciding anything), it cannot be read, or `--agent` names a `<plugin>:<agent>` the kit holds no
+   definition of (fix the name). A plugin that ships no skill and no command (`guards`) cannot be
+   confirmed by the listing; the check reports it `unverifiable`, and the run record says so.
+   An agent whose one-line `tools:` leaves out `Skill`, or whose `disallowedTools` names it whole,
+   is never sent a listing: for it the check looks for the definition's first line of prose in the
+   session's system prompt instead, reports its plugin and that plugin's dependencies `loaded` when
+   it is there, and any other plugin with skills `unreachable`, since the agent cannot use them. An
+   agent with the Skill tool, and one registered by a bare name, are checked by the listing. The
+   subagent fallback of step 4 has no nested session to check; its run record says the check did not
+   run.
 6. **Score** a run the check kept: read the report and the produced artifacts (for
    devils-advocate: `.claude/plans/*/_devils_advocate.md` in the copy plus its plan edits;
    for an implementer: `diff -rq` of the fixture against the copy) and compare against the

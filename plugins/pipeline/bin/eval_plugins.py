@@ -2,7 +2,7 @@
 
 Usage:
     eval_plugins.py closure --kit KIT PLUGIN...
-    eval_plugins.py check --kit KIT (--transcript FILE | --copy DIR --session UUID) PLUGIN...
+    eval_plugins.py check --kit KIT (--transcript FILE | --copy DIR --session UUID) [--agent NAME] PLUGIN...
 
 closure prints the directory of every plugin the run must pass with --plugin-dir, one per line: the
 plugins named and, recursively, every plugin their .claude-plugin/plugin.json lists under
@@ -21,10 +21,24 @@ the real path of DIR with every character other than a letter or a digit replace
 `claude -p --session-id UUID` session started in DIR writes. A plugin that ships no skill and no
 command cannot be confirmed by the listing; it is reported as unverifiable and does not fail the check.
 
+An agent whose definition's "tools" leaves out Skill, written on one line as a comma list or a
+[flow] list, or whose "disallowedTools" so written names it whole (Skill, not Skill(<name>)), is
+never sent a listing, so the listing cannot confirm its run. With --agent naming such an agent (as
+<plugin>:<agent>, its definition under <kit>/plugins/<plugin>/agents/), the check looks instead for
+the definition's first line of prose in the session's system prompt (its prompt_snapshot and
+api-request-shape records). Finding it confirms the agent's plugin and, since Claude Code drops a
+plugin whose dependency is not enabled, every plugin that plugin depends on: those are reported as
+loaded. Any other plugin with skills or commands is reported as unreachable, because an agent with
+no Skill tool cannot use them; it does not fail the check. Not finding the definition discards the
+run. An agent that has the Skill tool, one whose "tools" is absent or written in any other form (a
+block list, a comment, a continued line), and a bare name (a user-scope or project agent) are
+checked by the listing as above.
+
 Output is JSON on standard output. Exit status: 0 the closure printed, or every plugin listed; 1 a
-plugin's skills are missing from the listing, or the transcript holds no listing — the run is
-discarded, never scored; 2 the input is unusable (an unknown plugin, an unreadable manifest, no
-transcript file).
+plugin's skills are missing from the listing, the transcript holds no listing, or an agent with no
+Skill tool is not in the system prompt — the run is discarded, never scored; 2 the input is unusable
+(an unknown plugin, a <plugin>:<agent> with no definition in the kit or no prose in it, an
+unreadable manifest, no transcript file or one that cannot be read).
 """
 from __future__ import annotations
 
@@ -131,12 +145,8 @@ def transcript_path(copy: str, session: str) -> Path:
 
 def listed_names(transcript: Path) -> Optional[Set[str]]:
     """The union of every skill_listing attachment's names, or None when the transcript holds none."""
-    try:
-        text = transcript.read_text(encoding="utf-8", errors="replace")
-    except OSError as error:
-        raise Unusable(f"the transcript {transcript} cannot be read: {error}") from error
     names: Optional[Set[str]] = None
-    for line in text.splitlines():
+    for line in read_transcript(transcript).splitlines():
         if "skill_listing" not in line:
             continue
         try:
@@ -157,11 +167,122 @@ def listed_names(transcript: Path) -> Optional[Set[str]]:
     return names
 
 
-def check(kit: Path, named: Sequence[str], transcript: Path) -> Dict[str, object]:
-    """The verdict on one run: ok when every plugin of the closure is in the transcript's listing."""
+def front_matter_list(text: str, key: str) -> Optional[List[str]]:
+    """The entries of the front-matter key KEY when it is written on one line, as a comma scalar or a
+    [flow] list ("[]" is an empty list). None when the front matter does not set KEY, or sets it in any
+    other form: an empty value, a comment, a value continued or a block list on the lines below."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return None
+        match = re.match(rf"^{re.escape(key)}:(.*)$", line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if not value or "#" in value or following[:1] in (" ", "\t"):
+            return None
+        if value.startswith("["):
+            if not value.endswith("]"):
+                return None
+            value = value[1:-1]
+        entries = [entry.strip().strip("'\"") for entry in value.split(",")]
+        return [entry for entry in entries if entry]
+    return None
+
+
+def names_skill(tools: Sequence[str]) -> bool:
+    """Whether an allow list grants the Skill tool, whole or narrowed as Skill(...)."""
+    return any(tool == "Skill" or tool.startswith("Skill(") for tool in tools)
+
+
+def read_transcript(transcript: Path) -> str:
+    """The transcript's text, or Unusable when it cannot be read."""
+    try:
+        return transcript.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise Unusable(f"the transcript {transcript} cannot be read: {error}") from error
+
+
+def opening_without_skills(kit: Path, agent: str) -> Optional[str]:
+    """The first line of prose of AGENT's definition when it has no Skill tool, else None. A bare
+    name (a user-scope or project agent, which the kit does not hold) is None: its run is checked by
+    the listing."""
+    plugin, _, name = agent.partition(":")
+    if not plugin or not name:
+        return None
+    definition = plugin_dir(kit, plugin) / "agents" / f"{name}.md"
+    try:
+        text = definition.read_text(encoding="utf-8")
+    except OSError as error:
+        raise Unusable(f"no definition of the agent '{agent}' at {definition}: {error}") from error
+    tools = front_matter_list(text, "tools")
+    disallowed = front_matter_list(text, "disallowedTools") or []
+    if (tools is None or names_skill(tools)) and "Skill" not in disallowed:
+        return None
+    body = text.split("\n---", 1)[-1] if text.startswith("---") else text
+    for line in body.splitlines():
+        line = line.strip()
+        if line and not line.startswith(("#", "---")):
+            return line
+    raise Unusable(f"the definition {definition} has no prose to find in a system prompt")
+
+
+def system_prompt_holds(transcript: Path, opening: str) -> bool:
+    """Whether a prompt_snapshot or api-request-shape record of the transcript carries OPENING."""
+    for line in read_transcript(transcript).splitlines():
+        if "prompt_snapshot" not in line and "api-request-shape" not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        texts: List[object] = []
+        attachment = entry.get("attachment")
+        if isinstance(attachment, dict) and attachment.get("type") == "prompt_snapshot":
+            prompt = attachment.get("systemPrompt")
+            texts.extend(prompt if isinstance(prompt, list) else [prompt])
+        shape = entry.get("shape") if entry.get("type") == "api-request-shape" else None
+        if isinstance(shape, dict) and isinstance(shape.get("system"), list):
+            texts.extend(part.get("text") for part in shape["system"] if isinstance(part, dict))
+        if any(isinstance(text, str) and opening in text for text in texts):
+            return True
+    return False
+
+
+def check_by_definition(kit: Path, plugins: List[str], agent: str, opening: str, transcript: Path) -> Dict[str, object]:
+    """The verdict on a run of an agent with no Skill tool: ok when its definition reached the session."""
+    found = system_prompt_holds(transcript, opening)
+    loaded = closure(kit, [agent.partition(":")[0]])
+    report: Dict[str, object] = {}
+    for name in plugins:
+        expected = len(expected_names(kit, name))
+        if name in loaded:
+            status = "loaded" if found else "missing"
+        else:
+            status = "unreachable" if expected else "unverifiable"
+        report[name] = {"status": status, "expected": expected, "missing": []}
+    result: Dict[str, object] = {"verdict": "ok" if found else "discard", "transcript": str(transcript), "plugins": report}
+    result["reason"] = (
+        f"{agent} has no Skill tool, so no listing is sent; its definition "
+        + ("is in the session's system prompt" if found else "is not in the session's system prompt")
+    )
+    return result
+
+
+def check(kit: Path, named: Sequence[str], transcript: Path, agent: Optional[str] = None) -> Dict[str, object]:
+    """The verdict on one run: ok when every plugin of the closure is in the transcript's listing, or,
+    for an AGENT with no Skill tool, when its definition is in the session's system prompt."""
     if not transcript.is_file():
         raise Unusable(f"no transcript at {transcript}")
     plugins = closure(kit, named)
+    opening = opening_without_skills(kit, agent) if agent else None
+    if agent and opening is not None:
+        return check_by_definition(kit, plugins, agent, opening, transcript)
     listed = listed_names(transcript)
     report: Dict[str, object] = {}
     verdict = "ok"
@@ -193,6 +314,7 @@ def main(argv: Sequence[str]) -> int:
             sub.add_argument("--transcript", help="the nested session's .jsonl transcript")
             sub.add_argument("--copy", help="the directory the nested session ran in")
             sub.add_argument("--session", help="the --session-id the nested session ran with")
+            sub.add_argument("--agent", help="the agent the run started, by its registered name: <plugin>:<agent>, or a bare name")
     args = parser.parse_args(argv)
     kit = Path(args.kit)
     try:
@@ -206,7 +328,7 @@ def main(argv: Sequence[str]) -> int:
             transcript = transcript_path(args.copy, args.session)
         else:
             raise Unusable("check needs --transcript, or --copy and --session")
-        result = check(kit, args.plugins, transcript)
+        result = check(kit, args.plugins, transcript, args.agent)
     except Unusable as error:
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 2
