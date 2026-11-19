@@ -1493,6 +1493,44 @@ def ddev_danger(argv):
     return None
 
 
+WAIT_LOOP_WORDS = frozenset({"while", "until"})
+WAIT_PAUSE_WORDS = frozenset({"sleep", "gsleep"})
+WAIT_LOOP_PREFIXES = frozenset({"do", "then", "else", "{", "(", "!"})
+WAIT_BOUND = re.compile(r"\bSECONDS\b|\bdate\b.*\+%s|^-(?:lt|le|gt|ge)$|\(\(")
+WAIT_BOUND_COMMANDS = frozenset({"timeout", "gtimeout"})
+
+
+def unbounded_wait(line):
+    """Why a `while`/`until` loop that pauses with `sleep` and names no deadline is refused, else None.
+
+    Such a loop ends only when its condition comes true. A condition that never can -- a command
+    shadowed by a shell function that ignores its options, a file that stops changing, a process
+    that already left -- keeps it running for hours, and a background shell left behind by a
+    finished agent keeps it running after anyone looks. The loop is bounded when the line reads
+    the shell's clock (`$SECONDS`, `date +%s`), compares a counter (`-lt`, `-le`, `-gt`, `-ge`,
+    `(( … ))`), or runs under `timeout`/`gtimeout`.
+
+    @param line one parsed command line: its pipelines, each a list of segments
+    """
+    words = [word for pipeline in line for segment in pipeline for word in segment.argv]
+    starts = []
+    for pipeline in line:
+        for segment in pipeline:
+            argv = [w for w in segment.argv if not getattr(w, "quoted", False)]
+            while argv and argv[0] in WAIT_LOOP_PREFIXES:
+                argv = argv[1:]
+            if argv:
+                starts.append(argv[0])
+    if not WAIT_LOOP_WORDS.intersection(starts) or not WAIT_PAUSE_WORDS.intersection(starts):
+        return None
+    if WAIT_BOUND_COMMANDS.intersection(starts) or any(WAIT_BOUND.search(word) for word in words):
+        return None
+    return ("a `while`/`until` loop that waits with `sleep` names no deadline, so it runs for as long as "
+            "its condition stays false, for hours if it never comes true. Bound it: "
+            "`end=$((SECONDS+600)); until <condition> || [ $SECONDS -ge $end ]; do sleep 5; done`, "
+            "or count the rounds (`for i in $(seq 120)`), or run it under `timeout`.")
+
+
 def curl_short_body(group):
     """Report whether a curl short-option group sends a body: `-d`, `-sd@x`, `-Fa=@x`, `-T./f`.
 
@@ -3714,7 +3752,7 @@ def command_danger(argv, cwd, cmd, stdin, ctx=None):
             or baseline_removal_danger(argv, cwd, ctx) or board_queue_danger(argv, cwd, stdin, ctx))
 
 
-def judge(text, cwd, cmd, writes, depth=0, fed=()):
+def judge(text, cwd, cmd, writes, depth=0, fed=(), timed=False):
     """Return why the first refused command of a command line is refused, else None.
 
     Each simple command is judged with its reserved words, assignments and wrappers taken off;
@@ -3734,10 +3772,14 @@ def judge(text, cwd, cmd, writes, depth=0, fed=()):
     @param writes the ShellWrites collecting each file written
     @param depth  how many command lines enclose this one
     @param fed    what an enclosing pipeline feeds to this line's stdin
+    @param timed  whether an enclosing command runs this line under `timeout`, which bounds its loops
     """
     deeper = depth < SHELL_NESTING_LIMIT
     previous = None
     for line in parse(text):
+        why = None if timed else unbounded_wait(line)
+        if why:
+            return why
         commands = [[command_words(segment.argv) for segment in pipeline] for pipeline in line]
         written = line_text(line, commands)
         for pipeline, argvs in zip(line, commands):
@@ -3772,7 +3814,8 @@ def judge(text, cwd, cmd, writes, depth=0, fed=()):
                 if not deeper and any(inner.strip() for inner, _ in nested):
                     return NESTED_TOO_DEEP
                 for inner, inner_fed in nested:
-                    why = judge(inner, cwd, cmd, writes, depth + 1, inner_fed)
+                    why = judge(inner, cwd, cmd, writes, depth + 1, inner_fed,
+                                timed or any(os.path.basename(word) in WAIT_BOUND_COMMANDS for word in segment.argv))
                     if why:
                         return why
     return None

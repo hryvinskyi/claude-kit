@@ -68,6 +68,25 @@ expect_exit "bash: force-push main blocked" 2 "$(bash_json 'git push --force ori
 expect_exit "bash: -f HEAD:main blocked" 2 "$(bash_json 'git push -f origin HEAD:main')" "$B"
 expect_exit "bash: -fu combined flag blocked" 2 "$(bash_json 'git push -fu origin main')" "$B"
 expect_exit "bash: bare force-push on main blocked" 2 "$(bash_json 'git push --force' "$TMP/repo-main")" "$B"
+# A wait loop with no deadline ran ten hours once: its condition called a `pgrep` that a shell
+# function had replaced, so it could never come true.
+expect_exit "bash: until loop sleeping with no deadline blocked" 2 \
+  "$(bash_json 'until ! pgrep -f "x" >/dev/null && tail -1 f | grep -qvE "^== "; do sleep 5; done; tail -8 f')" "$B"
+expect_exit "bash: while true sleeping blocked" 2 "$(bash_json 'while true; do curl -s localhost/x; sleep 10; done')" "$B"
+expect_exit "bash: unbounded loop inside bash -c blocked" 2 "$(bash_json "bash -c 'while true; do sleep 1; done'")" "$B"
+expect_exit "bash: loop bounded by SECONDS allowed" 0 \
+  "$(bash_json 'end=$((SECONDS+600)); until test -f x || [ $SECONDS -ge $end ]; do sleep 5; done')" "$B"
+expect_exit "bash: loop bounded by a counter allowed" 0 "$(bash_json 'i=0; while [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done')" "$B"
+expect_exit "bash: loop bounded by the clock allowed" 0 \
+  "$(bash_json 'end=$(( $(date +%s) + 60 )); while [ $(date +%s) -lt $end ]; do sleep 1; done')" "$B"
+expect_exit "bash: loop run under timeout allowed" 0 "$(bash_json "timeout 300 bash -c 'until test -f x; do sleep 1; done'")" "$B"
+expect_exit "bash: counted for loop allowed" 0 "$(bash_json 'for i in $(seq 60); do test -f x && break; sleep 1; done')" "$B"
+expect_exit "bash: read loop without sleep allowed" 0 "$(bash_json 'while read l; do echo "$l"; done < f')" "$B"
+expect_exit "bash: loop words inside quotes allowed" 0 "$(bash_json 'echo "wait until done"; sleep 5')" "$B"
+expect_exit "bash: loop written to a file as text allowed" 0 \
+  "$(bash_json "cat > $TMP/s.sh <<'EOF'
+while true; do sleep 1; done
+EOF")" "$B"
 expect_exit "bash: git -C dir force-push blocked" 2 "$(bash_json 'git -C repo-main push -f' "$TMP")" "$B"
 expect_exit "bash: cd && force-push blocked" 2 "$(bash_json 'cd repo-main && git push --force' "$TMP")" "$B"
 expect_exit "bash: force HEAD while on main blocked" 2 "$(bash_json 'git push --force origin HEAD' "$TMP/repo-main")" "$B"
