@@ -9,7 +9,7 @@ rules (`CLAUDE.md`/`AGENTS.md`, its gates, its layout) and follows them.
 | `architecture` | Clean Architecture, onion-at-module-altitude, SOLID and DDD rubrics, with review and plan formats, an implementer's cut and detection recipes, in words that name no framework | skills `architecture:clean-architecture-php` (PHP), `architecture:clean-architecture-js` (JavaScript, TypeScript, React, Node, and the browser code a server-rendered application ships) |
 | stack plugins: `symfony`, `magento2` | The same rubrics in one framework's idiom: where each piece goes, how the container wires it, what its templates hand the browser, detection recipes in its spelling. Install the one your project runs on | skills `<stack>:<stack>-architecture-php` and `<stack>:<stack>-architecture-frontend`, loaded beside the core ones; see each plugin's README |
 | `pipeline` | A feature pipeline sized to the change (S, M or L decides the plan, the reviewers, the models and the effort) that plans and verifies on the main model and delegates each task to an implementer, an adversarial plan reviewer, a code review that sizes its passes to the change and runs them as a workflow (fresh-context reviewers by lens, every finding judged by a fresh verifier, one ranked result, one fix batch, a delta pass over the fixes; the project's rules from its `REVIEW.md`), a bug-fix loop that starts from a failing test, and an eval harness that regression-tests the agents | commands `/pipeline:feature`, `/pipeline:review`, `/pipeline:bug-fix`, `/pipeline:explain`, `/pipeline:learn`, `/pipeline:update-codemaps`, `/pipeline:agent-evals`; agents `pipeline:devils-advocate`, `pipeline:code-reviewer`, `pipeline:finding-verifier`, `pipeline:feature-implementer`, `pipeline:feature-contract-writer`; the review workflow; `pipeline-decide` on the Bash path |
-| `qa` | A text tightener | skill `qa:tighten` |
+| `qa` | A text tightener: shorter text with no claim lost, written to the ASD-STE100 Simplified Technical English rules (sentence and paragraph limits, one instruction per sentence, simple verb forms, one word per thing) in a strictness that fits the kind of text, with a checker for the limits a reader counts badly | skill `qa:tighten` |
 | `docs` | Documentation written from the product: an end-user guide in plain language for non-technical readers, and technical documentation (installation guide, developer guide, reference, migration notes) for developers and operators. Each frames the reader, builds a fact list from the code, proposes an outline, checks itself against its quality bar, is reviewed by a fresh agent, and is updated by a staleness sweep; a stack plugin adds where its framework keeps the facts | skills `docs:user-guide`, `docs:technical-guide`; see [plugins/docs/README.md](plugins/docs/README.md) |
 | `guards` | Hooks that refuse catastrophic shell commands, PHP and JS/TS source or plans written before the architecture rubric is loaded, new deferral markers and suppressions, growing static-analysis baselines and hand edits inside generated regions, and lint each edited PHP file | hooks only: `PreToolUse` on `Edit\|Write` and `Bash`, `PostToolUse` on `Edit\|Write`; see [plugins/guards/README.md](plugins/guards/README.md) |
 | `vault` | A project knowledge vault beside the code: a session-start brief, session-end capture into an inbox, a check that holds the notes to the code, a search index, git merge drivers for its busiest files | commands `/vault:decision`, `/vault:journal`, `/vault:todo`, `/vault:wiki-sync`; agent `vault:wiki-updater`; hooks on `SessionStart`, `SessionEnd`, `Stop`; `find-vault`, `vault-check`, `vault-capture`, `vault-search`, `vault-merge` on the Bash path |
@@ -180,7 +180,10 @@ which is the clone for a local-directory marketplace and for `--plugin-dir`.
 - **Engineering standards.** Where a command or skill cites §*Architecture and tech debt* or
   §*Tests run code*, it means `standards/CLAUDE.standards.md`, which your user `CLAUDE.md`
   imports (see below).
-- `qa:tighten` finishes with the `humanizer:humanizer` skill when it is installed.
+- `qa:tighten` finishes with the `humanizer:humanizer` skill when it is installed. It measures its
+  rewrites with `scripts/ste_check.py` from its own directory, which needs `python3` (3.9 or later)
+  on `PATH`; without it the skill counts by hand. The skill carries the ASD-STE100 writing rules in
+  summary and not the STE dictionary, which is free on request at asd-ste100.org.
 
 ## Engineering standards
 
@@ -215,6 +218,7 @@ sections inline (every rule would load twice) or imports a standards file from a
 python3 -m unittest discover -s tests       # the installer, in a fake home with stand-ins for claude, npm and node
 python3 -m unittest discover -s bin/tests   # the command shims
 python3 -m unittest discover -s plugins/pipeline/tests   # pipeline-decide against a fake endpoint, eval_plugins against a fake kit, the review report renderer, and the review workflow's node tests (needs node on PATH; fails without it)
+python3 -m unittest discover -s plugins/qa/tests         # the checker tighten runs on its rewrites: the STE sentence and paragraph limits, word counts, and what it reports in English
 plugins/vault/tests/tests.sh                # the vault plugin, its merge drivers and their wiring
 plugins/guards/hooks/tests.sh               # the guard hooks
 npm --prefix plugins/board-queue test       # the board queue (after npm ci)

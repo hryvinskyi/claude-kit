@@ -1,7 +1,7 @@
 {
   "name": "qa",
-  "version": "0.1.0",
-  "description": "Quality skills: tighten shortens text without losing meaning.",
+  "version": "0.2.0",
+  "description": "Quality skills: tighten shortens text without losing meaning and writes it in Simplified Technical English (the ASD-STE100 writing rules).",
   "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
   "repository": "https://github.com/hryvinskyi/claude-kit",
   "license": "MIT",
