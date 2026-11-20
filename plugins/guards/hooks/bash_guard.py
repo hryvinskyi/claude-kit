@@ -3673,10 +3673,11 @@ def unnamed_danger(writes):
     return None
 
 
-def write_danger(writes, transcript_path):
+def write_danger(writes, transcript_path, session_cwd=None):
     """Apply the rubric gate and the debt guard to files written through the shell.
 
     @param writes the ShellWrites of the command (a ShellWrites, whose unnamed writes are named here)
+    @param session_cwd the directory the command line starts in, before any `cd`
     """
     if rubric is None or debt is None:
         return None
@@ -3694,7 +3695,7 @@ def write_danger(writes, transcript_path):
                         "file by its absolute path, or give the cd a literal one.")
             continue
         if not os.environ.get("CLAUDE_NO_PLAN_SKILL_GATE"):
-            verdict = rubric.missing_for(write.cwd, path, transcript_path, text)
+            verdict = rubric.missing_for(write.cwd, path, transcript_path, text, session_cwd)
             if verdict is not None:
                 text_ = rubric.denial(*verdict).rstrip()
                 return "a shell write of " + text_[len("Blocked: "):] if text_.startswith("Blocked: ") else text_
@@ -3829,7 +3830,7 @@ def check(cmd, cwd, transcript_path=""):
     """
     writes = ShellWrites()
     try:
-        return judge(cmd, cwd, cmd, writes) or write_danger(writes, transcript_path)
+        return judge(cmd, cwd, cmd, writes) or write_danger(writes, transcript_path, cwd)
     except NestingTooDeep:
         return (f"the command nests substitutions or expansions more than {SUBSTITUTION_LIMIT} deep, "
                 "so what it runs cannot be read. Split it into steps.")

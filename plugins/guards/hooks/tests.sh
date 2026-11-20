@@ -735,6 +735,28 @@ expect_exit "js gate: js file outside any project untouched" 0 \
   "$(gate Write "$TMP/loose" "$TMP/empty.jsonl" "$TMP/loose/x.js")" "$P"
 expect_exit "js gate: missing transcript never blocks" 0 \
   "$(gate Write "$TMP/js" "$TMP/nope.jsonl" "$TMP/js/src/widgets/coupon.js")" "$P"
+# a browser driver written to a temporary directory beside its own `npm install`, to take a screenshot
+mkdir -p "$TMP/pw" && echo '{"dependencies":{"playwright-core":"1.63.0"}}' > "$TMP/pw/package.json"
+echo '{}' > "$TMP/pw/composer.json"
+expect_exit "js gate: a one-off script in a temporary directory, the session elsewhere, untouched" 0 \
+  "$(gate Write "$H" "$TMP/empty.jsonl" "$TMP/pw/shot.mjs")" "$P"
+expect_exit "php gate: a one-off script in a temporary directory, the session elsewhere, untouched" 0 \
+  "$(gate Write "$H" "$TMP/empty.jsonl" "$TMP/pw/probe.php")" "$P"
+expect_exit "bash write: heredoc of a one-off script in a temporary directory untouched" 0 \
+  "$(bash_json "cd $TMP/pw && cat > shot.mjs <<'EOF'
+import { chromium } from 'playwright-core';
+EOF
+node shot.mjs" "$H" "$TMP/empty.jsonl")" "$H/bash_guard.py"
+expect_exit "js gate: the cwd's own project in a temporary directory still gated" 2 \
+  "$(gate Write "$TMP/pw" "$TMP/empty.jsonl" "$TMP/pw/shot.mjs")" "$P"
+printf '{"tool_name":"mcp__fs__write_file","cwd":"%s","transcript_path":"%s","tool_input":{"path":"%s","content":"import x;"}}' \
+  "$H" "$TMP/empty.jsonl" "$TMP/pw/shot.mjs" > "$TMP/pw-mcp.json"
+expect_exit "mcp: a one-off script in a temporary directory, the session elsewhere, untouched" 0 \
+  "$(cat "$TMP/pw-mcp.json")" "$H/mcp_guard.py"
+printf '{"tool_name":"mcp__fs__write_file","cwd":"%s","transcript_path":"%s","tool_input":{"path":"%s","content":"import x;"}}' \
+  "$TMP/pw" "$TMP/empty.jsonl" "$TMP/pw/shot.mjs" > "$TMP/pw-mcp-in.json"
+expect_exit "mcp: the cwd's own project in a temporary directory still gated" 2 \
+  "$(cat "$TMP/pw-mcp-in.json")" "$H/mcp_guard.py"
 OUT=$(gate Write "$TMP/react" "$TMP/empty.jsonl" "$TMP/react/src/features/cart/ui/Cart.tsx" | python3 "$P" 2>&1)
 case "$OUT" in *"Skill tool with \`architecture:clean-architecture-js\`"*"clean-architecture-js/references/javascript.md"*"clean-architecture-js/references/react.md"*"clean-architecture-js/references/solid.md"*"clean-architecture-js/references/typescript.md"*) ok ;;
   *) ko "js gate: denial names the JS skill and every missing reference"; echo "$OUT" ;; esac

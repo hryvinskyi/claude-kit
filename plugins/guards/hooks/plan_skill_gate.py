@@ -17,6 +17,14 @@ rubric being loaded, when the target is
     .tsx`, outside node_modules/, build output, test files, declaration files,
     minified files and tool configs) — rubric: the clean-architecture-js skill.
 
+A PHP or JS/TS file in a temporary directory (/tmp, /var/folders, $TMPDIR), written
+by a session whose working directory is not temporary, is a one-off script, not
+source: a browser driver written beside its own `npm install` to take a screenshot,
+a probe run once. It needs no rubric, through Write, Edit, the shell (judged by the
+directory the command starts in, not by its `cd`) or an MCP tool alike. A session
+working from inside a temporary directory (a fixture project, an eval run) is gated
+as usual there.
+
 Two core skills, one rule each, published by the `architecture` plugin as
 `architecture:clean-architecture-php` and `architecture:clean-architecture-js`.
 
@@ -147,6 +155,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -958,6 +967,33 @@ def nearest_root(cwd: str, path: str, markers):
     return None
 
 
+def temp_roots() -> set:
+    """The system's temporary directories, symbolic links resolved (/tmp is /private/tmp on macOS)."""
+    candidates = {"/tmp", "/var/tmp", "/var/folders", tempfile.gettempdir(), os.environ.get("TMPDIR", "")}
+    return {os.path.realpath(candidate) for candidate in candidates if candidate}
+
+
+def throwaway_script(session_cwd: str, target: str) -> bool:
+    """Report whether the target is a one-off script rather than a project's source.
+
+    A file in a temporary directory, written by a session that works outside every
+    temporary directory, is a script written to run once (a browser driver that takes
+    a screenshot, a probe), even when an `npm install` beside it left a package.json
+    there: no project ships it, so there is no architecture to keep. A session whose
+    own working directory is temporary (a fixture project, an eval run) works on the
+    projects there, and they stay gated.
+
+    @param session_cwd The session's working directory, before any `cd` of a shell command.
+    @param target The absolute path of the file written.
+    """
+    roots = temp_roots()
+    target = os.path.realpath(target)
+    here = os.path.realpath(session_cwd)
+    if any(here == root or here.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
+        return False
+    return any(target.startswith(root.rstrip(os.sep) + os.sep) for root in roots)
+
+
 def project_root(cwd: str, path: str):
     """The PHP project the target belongs to: the nearest composer.json above the file."""
     return nearest_root(cwd, path, ("composer.json",))
@@ -1134,7 +1170,7 @@ def is_plan_file(path: str) -> bool:
     return "/.claude/plans/" in path or path.startswith(".claude/plans/") or session_plan(path)
 
 
-def missing_for(cwd: str, path: str, transcript_path: str, text=None):
+def missing_for(cwd: str, path: str, transcript_path: str, text=None, session_cwd=None):
     """Decide what a write to `path` still lacks of the rubric.
 
     Shared with bash_guard.py, which sees the same writes made through the shell.
@@ -1143,6 +1179,8 @@ def missing_for(cwd: str, path: str, transcript_path: str, text=None):
     @param path The target file (any separator).
     @param transcript_path The caller's own transcript (evidence_transcript of the hook input).
     @param text The text being written, when visible (plan files use it to tell what they order).
+    @param session_cwd The session's own working directory when `cwd` is where a shell command
+            moved with `cd`; defaults to `cwd`.
     @return (what the target is, set of missing "<skill>/<basename>", the plugin publishing each
             skill directory) when the write must be refused; None when the target is out of
             scope, nothing can be proven about the session, or everything required was loaded.
@@ -1151,6 +1189,8 @@ def missing_for(cwd: str, path: str, transcript_path: str, text=None):
     extension = os.path.splitext(path)[1].lower()
     plan = is_plan_file(path)
     if not (plan or extension == ".php" or extension in JS_EXTENSIONS):
+        return None
+    if not plan and throwaway_script(session_cwd or cwd, os.path.join(cwd, path)):
         return None
     registered = registered_stacks(transcript_path)
     if plan:
