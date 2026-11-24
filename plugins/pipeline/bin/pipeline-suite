@@ -1,0 +1,10 @@
+#!/bin/sh
+# pipeline-suite census|check|diff — where a test suite's cases and seconds are, whether verdicts on its tests hold up, and what a change took out of it; see suite.py beside it.
+# Its own directory, through any links that lead here.
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in /*) SELF=$LINK ;; *) SELF=$(dirname "$SELF")/$LINK ;; esac
+done
+HERE=$(cd "$(dirname "$SELF")" && pwd)
+exec python3 "$HERE/suite.py" "$@"
