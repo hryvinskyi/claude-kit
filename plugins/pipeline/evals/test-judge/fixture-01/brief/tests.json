@@ -1,0 +1,499 @@
+[
+ {
+  "file": "tests/integration/labels.test.js",
+  "test": "the tracking page names the state booked",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.044
+ },
+ {
+  "file": "tests/integration/labels.test.js",
+  "test": "the tracking page names the state collected",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/labels.test.js",
+  "test": "the tracking page names the state delivered",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/labels.test.js",
+  "test": "the tracking page names the state returned",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/labels.test.js",
+  "test": "a state nobody defined has no label page",
+  "line": 22,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "a clerk books a parcel: it is stored and answered with its id, price and collection day",
+  "line": 5,
+  "cases": 1,
+  "seconds": 0.044
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "booking a parcel answers 201",
+  "line": 14,
+  "cases": 1,
+  "seconds": 0.041
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "a second parcel with the same id is answered 409",
+  "line": 23,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "a postcode that cannot be stored is answered 422 with its reason",
+  "line": 33,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "a guest may not book a parcel",
+  "line": 42,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "a request without the session token is refused",
+  "line": 50,
+  "cases": 1,
+  "seconds": 0.041
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "a booked parcel is shown to its sender",
+  "line": 58,
+  "cases": 1,
+  "seconds": 0.043
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "a parcel nobody booked is answered 404",
+  "line": 67,
+  "cases": 1,
+  "seconds": 0.045
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "an address nobody serves is answered 404",
+  "line": 73,
+  "cases": 1,
+  "seconds": 0.041
+ },
+ {
+  "file": "tests/integration/partner.test.js",
+  "test": "a delivered parcel is reported to the partner",
+  "line": 6,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/integration/quotes-table.test.js",
+  "test": "the quote page prices a parcel of 1 kg at 4",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.043
+ },
+ {
+  "file": "tests/integration/quotes-table.test.js",
+  "test": "the quote page prices a parcel of 30 kg at 14",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.041
+ },
+ {
+  "file": "tests/integration/quotes-table.test.js",
+  "test": "the quote page prices a parcel of 5 kg at 6.5",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.041
+ },
+ {
+  "file": "tests/integration/quotes-table.test.js",
+  "test": "the quote page prices a parcel of 5.01 kg at 9",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.041
+ },
+ {
+  "file": "tests/integration/quotes.test.js",
+  "test": "a quote is answered with the price",
+  "line": 5,
+  "cases": 1,
+  "seconds": 0.043
+ },
+ {
+  "file": "tests/integration/quotes.test.js",
+  "test": "a refused quote is answered 422 with its reason, worded for the reader",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/refusals.test.js",
+  "test": "POST /parcels refuses a parcel for no_weight",
+  "line": 12,
+  "cases": 1,
+  "seconds": 0.042
+ },
+ {
+  "file": "tests/integration/refusals.test.js",
+  "test": "POST /parcels refuses a parcel for too_heavy",
+  "line": 12,
+  "cases": 1,
+  "seconds": 0.041
+ },
+ {
+  "file": "tests/integration/refusals.test.js",
+  "test": "POST /quotes refuses a parcel for no_weight",
+  "line": 12,
+  "cases": 1,
+  "seconds": 0.043
+ },
+ {
+  "file": "tests/integration/refusals.test.js",
+  "test": "POST /quotes refuses a parcel for too_heavy",
+  "line": 12,
+  "cases": 1,
+  "seconds": 0.041
+ },
+ {
+  "file": "tests/unit/booking.test.js",
+  "test": "booking a parcel answers its id",
+  "line": 5,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/export.test.js",
+  "test": "the export holds a heading and one line for each parcel",
+  "line": 10,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/ledger.test.js",
+  "test": "a new parcel starts booked",
+  "line": 8,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/ledger.test.js",
+  "test": "a second parcel with the same id is refused",
+  "line": 15,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/ledger.test.js",
+  "test": "parcels are listed in the order they were handed in",
+  "line": 23,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/ledger.test.js",
+  "test": "a parcel cannot skip a step",
+  "line": 31,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/ledger.test.js",
+  "test": "only a collected parcel is out for delivery",
+  "line": 39,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/messages.test.js",
+  "test": "every message is worded in every language",
+  "line": 5,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/messages.test.js",
+  "test": "a language the product does not ship answers the key",
+  "line": 16,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/notify.test.js",
+  "test": "the recipient gets one message that names the parcel, in their language",
+  "line": 8,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/notify.test.js",
+  "test": "the notice is logged before it is sent",
+  "line": 17,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/parcel.test.js",
+  "test": "a parcel holds what it was given",
+  "line": 5,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/parcel.test.js",
+  "test": "a parcel's postcode is stored the way postcodes are stored",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/parcel.test.js",
+  "test": "a parcel without an id is refused",
+  "line": 17,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/parcel.test.js",
+  "test": "the sender is shown the id, the postcode and the state",
+  "line": 21,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/parcel.test.js",
+  "test": "the sender is never shown the depot note",
+  "line": 27,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/postcode.test.js",
+  "test": "a postcode is stored without spaces, in upper case",
+  "line": 5,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/postcode.test.js",
+  "test": "a postcode of nothing but spaces is refused",
+  "line": 9,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/postcode.test.js",
+  "test": "eight characters are stored, nine are refused",
+  "line": 13,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 1 kg costs 4",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 1.01 kg costs 6.5",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 10 kg costs 9",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 10.01 kg costs 14",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 2 kg costs 6.5",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 3 kg costs 6.5",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 4 kg costs 6.5",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 5 kg costs 6.5",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 5.01 kg costs 9",
+  "line": 19,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel with no weight is refused",
+  "line": 24,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "the heaviest parcel carried is 30 kg",
+  "line": 28,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a side of 120 cm makes a parcel oversize",
+  "line": 33,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "express is charged on the oversize fee as well",
+  "line": 38,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "every quote refusal is worded in both languages",
+  "line": 43,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/router.test.js",
+  "test": "a path parameter is read from the address",
+  "line": 7,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/router.test.js",
+  "test": "an address with one segment too many matches nothing",
+  "line": 11,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/routes.test.js",
+  "test": "every route names a handler that exists",
+  "line": 8,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/schedule.test.js",
+  "test": "a parcel booked before five is collected the same day",
+  "line": 7,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/schedule.test.js",
+  "test": "a parcel booked at five is collected the next day",
+  "line": 11,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "the stored values of the states are the published ones",
+  "line": 5,
+  "cases": 1,
+  "seconds": 0.001
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "the states are written in lower case",
+  "line": 9,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "booked is not the end of the road",
+  "line": 23,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "collected is not the end of the road",
+  "line": 23,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "delivered is the end of the road",
+  "line": 23,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "returned is the end of the road",
+  "line": 23,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "a parcel moves only along the allowed steps",
+  "line": 28,
+  "cases": 1,
+  "seconds": 0.0
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "a state nobody defined ends nothing and leads nowhere",
+  "line": 36,
+  "cases": 1,
+  "seconds": 0.0
+ }
+]

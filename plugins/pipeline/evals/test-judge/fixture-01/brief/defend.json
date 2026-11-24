@@ -1,0 +1,577 @@
+[
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "the states are written in lower case",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "The stored values of the states are the published ones.",
+  "evidence": [
+   {
+    "path": "tests/unit/status.test.js",
+    "line": 11,
+    "quote": "assert.equal(value, value.toLowerCase());"
+   },
+   {
+    "path": "tests/unit/status.test.js",
+    "line": 6,
+    "quote": "assert.deepEqual({ ...STATUS }, { BOOKED: 'booked', COLLECTED: 'collected', DELIVERED: 'delivered', RETURNED: 'returned' });"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/status.test.js",
+    "line": 5,
+    "test": "the stored values of the states are the published ones"
+   }
+  ],
+  "mutation": "src/status.js:6 — write the value as 'Booked'",
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/routes.test.js",
+  "test": "every route names a handler that exists",
+  "verdict": "delete",
+  "class": "file-read",
+  "rule": "Every route of the table names a handler that exists.",
+  "evidence": [
+   {
+    "path": "tests/unit/routes.test.js",
+    "line": 9,
+    "quote": "const routes = JSON.parse(readFileSync(new URL('../../config/routes.json', import.meta.url), 'utf8'));"
+   },
+   {
+    "path": "scripts/build.mjs",
+    "line": 7,
+    "quote": "const broken = routes.filter((route) => typeof handlers[route.handler] !== 'function');"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/integration/labels.test.js",
+    "line": 22,
+    "test": "a state nobody defined has no label page"
+   }
+  ],
+  "mutation": "config/routes.json:5 — name the handler showLabels",
+  "gate": "the build (npm run build, scripts/build.mjs), which npm test runs before the tests",
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/notify.test.js",
+  "test": "the notice is logged before it is sent",
+  "verdict": "delete",
+  "class": "implementation",
+  "rule": "The recipient is told that the parcel was collected.",
+  "evidence": [
+   {
+    "path": "tests/unit/notify.test.js",
+    "line": 23,
+    "quote": "assert.deepEqual(calls, ['log notify collected P-7', 'send']);"
+   },
+   {
+    "path": "CLAUDE.md",
+    "line": 43,
+    "quote": "No alert and no parser reads them; their wording and"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/notify.test.js",
+    "line": 8,
+    "test": "the recipient gets one message that names the parcel, in their language"
+   }
+  ],
+  "mutation": "src/notify.js:13 — drop the call to mailer.send",
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/parcel.test.js",
+  "test": "a parcel's postcode is stored the way postcodes are stored",
+  "verdict": "delete",
+  "class": "level",
+  "rule": "A booked parcel's postcode is stored without spaces, in upper case.",
+  "evidence": [
+   {
+    "path": "src/parcel.js",
+    "line": 17,
+    "quote": "this.postcode = normalise(postcode);"
+   },
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 64,
+    "quote": "assert.deepEqual(answer, { status: 200, body: { id: 'P-1', postcode: 'AB12CD', status: 'booked' } });"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 58,
+    "test": "a booked parcel is shown to its sender"
+   }
+  ],
+  "mutation": "src/parcel.js:16 — store the postcode as it was typed",
+  "cases": 1
+ },
+ {
+  "file": "tests/integration/quotes-table.test.js",
+  "test": "the quote page prices a parcel of 5 kg at 6.5",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "A parcel of exactly 5 kg is in the second band, and the quote route answers the price the rule gives.",
+  "evidence": [
+   {
+    "path": "tests/integration/quotes-table.test.js",
+    "line": 7,
+    "quote": "[5, 6.5],"
+   },
+   {
+    "path": "src/handlers.js",
+    "line": 9,
+    "quote": "return { status: 200, body: { price: quote(body) } };"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/quote.test.js",
+    "line": 19,
+    "test": "a parcel of 5 kg costs 6.5"
+   },
+   {
+    "path": "tests/integration/quotes.test.js",
+    "line": 5,
+    "test": "a quote is answered with the price"
+   }
+  ],
+  "mutation": "src/quote.js:5 — end the second band at 4.5",
+  "cases": 1
+ },
+ {
+  "file": "tests/integration/refusals.test.js",
+  "test": "POST /parcels refuses a parcel for too_heavy",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "A refusal of the quote rule is answered 422 with its reason.",
+  "evidence": [
+   {
+    "path": "src/app.js",
+    "line": 41,
+    "quote": "const answer = REFUSALS.find(([kind]) => error instanceof kind);"
+   },
+   {
+    "path": "tests/integration/refusals.test.js",
+    "line": 10,
+    "quote": "for (const path of ['/quotes', '/parcels']) {"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/integration/refusals.test.js",
+    "line": 12,
+    "test": "POST /quotes refuses a parcel for too_heavy"
+   }
+  ],
+  "mutation": "src/app.js:15 — answer 400 for a refused quote",
+  "cases": 1
+ },
+ {
+  "file": "tests/integration/refusals.test.js",
+  "test": "POST /parcels refuses a parcel for no_weight",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "A refusal of the quote rule is answered 422 with its reason.",
+  "evidence": [
+   {
+    "path": "src/app.js",
+    "line": 41,
+    "quote": "const answer = REFUSALS.find(([kind]) => error instanceof kind);"
+   },
+   {
+    "path": "tests/integration/refusals.test.js",
+    "line": 10,
+    "quote": "for (const path of ['/quotes', '/parcels']) {"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/integration/refusals.test.js",
+    "line": 12,
+    "test": "POST /quotes refuses a parcel for no_weight"
+   }
+  ],
+  "mutation": "src/app.js:15 — answer 400 for a refused quote",
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/quote.test.js",
+  "test": "a parcel of 3 kg costs 6.5",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "A parcel over 1 kg and up to 5 kg costs 6.5.",
+  "evidence": [
+   {
+    "path": "src/quote.js",
+    "line": 5,
+    "quote": "const BANDS = [[1, 4.0], [5, 6.5], [10, 9.0], [MAX_WEIGHT, 14.0]];"
+   },
+   {
+    "path": "tests/unit/quote.test.js",
+    "line": 10,
+    "quote": "[3, 6.5],"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/quote.test.js",
+    "line": 19,
+    "test": "a parcel of 1.01 kg costs 6.5"
+   },
+   {
+    "path": "tests/unit/quote.test.js",
+    "line": 19,
+    "test": "a parcel of 5 kg costs 6.5"
+   }
+  ],
+  "mutation": "src/quote.js:5 — change the second band to [5, 7.0], or move either of its ends",
+  "cases": 1
+ },
+ {
+  "file": "tests/integration/quotes.test.js",
+  "test": "a refused quote is answered 422 with its reason, worded for the reader",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "A parcel over 30 kg is refused as too heavy, and the refusal is answered 422.",
+  "evidence": [
+   {
+    "path": "src/quote.js",
+    "line": 31,
+    "quote": "if (weight > MAX_WEIGHT) throw new QuoteRefused('too_heavy');"
+   },
+   {
+    "path": "tests/integration/refusals.test.js",
+    "line": 17,
+    "quote": "assert.equal(answer.status, 422);"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/quote.test.js",
+    "line": 28,
+    "test": "the heaviest parcel carried is 30 kg"
+   },
+   {
+    "path": "tests/integration/refusals.test.js",
+    "line": 12,
+    "test": "POST /quotes refuses a parcel for too_heavy"
+   },
+   {
+    "path": "tests/unit/messages.test.js",
+    "line": 5,
+    "test": "every message is worded in every language"
+   }
+  ],
+  "mutation": "src/app.js:15 — answer 400 for a refused quote",
+  "cases": 1
+ },
+ {
+  "file": "tests/integration/partner.test.js",
+  "test": "a delivered parcel is reported to the partner",
+  "verdict": "delete",
+  "class": "dead",
+  "rule": "none",
+  "evidence": [
+   {
+    "path": "tests/integration/partner.test.js",
+    "line": 6,
+    "quote": "test('a delivered parcel is reported to the partner', { skip: sandbox ? false : 'the partner sandbox is not reachable' }, async () => {"
+   },
+   {
+    "path": "CLAUDE.md",
+    "line": 46,
+    "quote": "no workstation, no CI job — sets `PARTNER_SANDBOX_URL`."
+   }
+  ],
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/ledger.test.js",
+  "test": "only a collected parcel is out for delivery",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "A parcel moves through its states in order.",
+  "evidence": [
+   {
+    "path": "src/ledger.js",
+    "line": 65,
+    "quote": "return this.list().filter((entry) => entry.status === STATUS.COLLECTED).map((entry) => entry.parcel.id);"
+   },
+   {
+    "path": "tests/unit/ledger.test.js",
+    "line": 44,
+    "quote": "ledger.move('P-2', 'collected');"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/ledger.test.js",
+    "line": 31,
+    "test": "a parcel cannot skip a step"
+   },
+   {
+    "path": "tests/unit/ledger.test.js",
+    "line": 8,
+    "test": "a new parcel starts booked"
+   }
+  ],
+  "mutation": "src/ledger.js:60 — let a parcel move to any state",
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/parcel.test.js",
+  "test": "the sender is shown the id, the postcode and the state",
+  "verdict": "delete",
+  "class": "level",
+  "rule": "The sender is shown a parcel's id, postcode and state.",
+  "evidence": [
+   {
+    "path": "tests/unit/parcel.test.js",
+    "line": 24,
+    "quote": "assert.deepEqual(publicView(parcel, 'booked'), { id: 'P-1', postcode: 'AB12CD', status: 'booked' });"
+   },
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 64,
+    "quote": "assert.deepEqual(answer, { status: 200, body: { id: 'P-1', postcode: 'AB12CD', status: 'booked' } });"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 58,
+    "test": "a booked parcel is shown to its sender"
+   }
+  ],
+  "mutation": "src/parcel.js:30 — leave the state out of what the sender is shown",
+  "cases": 1
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "booking a parcel answers 201",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "A booking is answered 201 with the parcel's id.",
+  "evidence": [
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 19,
+    "quote": "assert.equal(answer.status, 201);"
+   },
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 10,
+    "quote": "assert.deepEqual(answer, { status: 201, body: { id: 'P-1', price: 6.5, collectedOn: '2026-03-10' } });"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 5,
+    "test": "a clerk books a parcel: it is stored and answered with its id, price and collection day"
+   }
+  ],
+  "mutation": "src/handlers.js:17 — answer 200 in place of 201",
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/router.test.js",
+  "test": "a path parameter is read from the address",
+  "verdict": "delete",
+  "class": "tool",
+  "rule": "none",
+  "evidence": [
+   {
+    "path": "tests/unit/router.test.js",
+    "line": 3,
+    "quote": "import { match } from '../../vendor/tiny-router/index.js';"
+   },
+   {
+    "path": "CLAUDE.md",
+    "line": 12,
+    "quote": "third-party code, copied in as released. It is not ours to change or to test."
+   }
+  ],
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/status.test.js",
+  "test": "returned is the end of the road",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "A parcel in a final state goes nowhere.",
+  "evidence": [
+   {
+    "path": "src/status.js",
+    "line": 33,
+    "quote": "return status in NEXT && NEXT[status].length === 0;"
+   },
+   {
+    "path": "tests/unit/status.test.js",
+    "line": 18,
+    "quote": "['delivered', true],"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/status.test.js",
+    "line": 23,
+    "test": "delivered is the end of the road"
+   }
+  ],
+  "mutation": "src/status.js:35 — answer false for every state",
+  "cases": 1
+ },
+ {
+  "file": "tests/integration/parcels.test.js",
+  "test": "a guest may not book a parcel",
+  "verdict": "delete",
+  "class": "vacuous",
+  "rule": "A request without the session token is refused.",
+  "evidence": [
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 45,
+    "quote": "const answer = app.handle({ method: 'POST', path: '/parcels', body: typed(), role: 'guest', token: 'x' });"
+   },
+   {
+    "path": "src/app.js",
+    "line": 35,
+    "quote": "if (request.token !== token) return { status: 403, body: { error: 'forbidden' } };"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 50,
+    "test": "a request without the session token is refused"
+   }
+  ],
+  "mutation": "src/app.js:37 — drop the token check",
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/booking.test.js",
+  "test": "booking a parcel answers its id",
+  "verdict": "delete",
+  "class": "level",
+  "rule": "A booking is answered 201 with the parcel's id.",
+  "evidence": [
+   {
+    "path": "tests/unit/booking.test.js",
+    "line": 7,
+    "quote": "const ledger = { add: (parcel) => held.push(parcel) };"
+   },
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 10,
+    "quote": "assert.deepEqual(answer, { status: 201, body: { id: 'P-1', price: 6.5, collectedOn: '2026-03-10' } });"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/integration/parcels.test.js",
+    "line": 5,
+    "test": "a clerk books a parcel: it is stored and answered with its id, price and collection day"
+   }
+  ],
+  "mutation": "src/handlers.js:17 — answer 200 in place of 201",
+  "cases": 1
+ },
+ {
+  "file": "tests/unit/export.test.js",
+  "test": "the export holds a heading and one line for each parcel",
+  "verdict": "delete",
+  "class": "file-read",
+  "rule": "The ledger lists its parcels in the order they were handed in.",
+  "evidence": [
+   {
+    "path": "tests/unit/export.test.js",
+    "line": 21,
+    "quote": "readFileSync(join(directory, 'ledger.csv'), 'utf8'),"
+   },
+   {
+    "path": "CLAUDE.md",
+    "line": 32,
+    "quote": "A test runs code. It never reads a file of the project to assert what the file says."
+   }
+  ],
+  "cases": 1,
+  "survivors": [
+   {
+    "path": "tests/unit/ledger.test.js",
+    "line": 23,
+    "test": "parcels are listed in the order they were handed in"
+   }
+  ],
+  "mutation": "src/ledger.js:49 — list the parcels in reverse"
+ },
+ {
+  "file": "tests/unit/schedule.test.js",
+  "test": "a parcel booked at five is collected the next day",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "The collection day follows the hour a parcel is booked at.",
+  "evidence": [
+   {
+    "path": "src/schedule.js",
+    "line": 12,
+    "quote": "if (day.getUTCHours() >= LAST_HOUR) day.setUTCDate(day.getUTCDate() + 1);"
+   },
+   {
+    "path": "tests/unit/schedule.test.js",
+    "line": 8,
+    "quote": "assert.equal(collectionDay(at('16:59')), '2026-03-10');"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/schedule.test.js",
+    "line": 7,
+    "test": "a parcel booked before five is collected the same day"
+   }
+  ],
+  "mutation": "src/schedule.js:2 — set the last hour to 16",
+  "cases": 1
+ },
+ {
+  "file": "tests/integration/labels.test.js",
+  "test": "the tracking page names the state returned",
+  "verdict": "delete",
+  "class": "duplicate",
+  "rule": "Every state has a label in every language.",
+  "evidence": [
+   {
+    "path": "src/messages.js",
+    "line": 37,
+    "quote": "return message(`label.${status}`, language);"
+   },
+   {
+    "path": "tests/unit/messages.test.js",
+    "line": 7,
+    "quote": "for (const key of keys()) {"
+   }
+  ],
+  "survivors": [
+   {
+    "path": "tests/unit/messages.test.js",
+    "line": 5,
+    "test": "every message is worded in every language"
+   },
+   {
+    "path": "tests/integration/labels.test.js",
+    "line": 13,
+    "test": "the tracking page names the state booked"
+   }
+  ],
+  "mutation": "src/messages.js:39 — build the key without the label. prefix",
+  "cases": 1
+ }
+]

@@ -1,0 +1,206 @@
+diff -ruN a/src/messages/de.js b/src/messages/de.js
+--- a/src/messages/de.js
++++ b/src/messages/de.js
+@@ -2,6 +2,8 @@
+ export default Object.freeze({
+   no_weight: 'Geben Sie das Gewicht des Pakets ein.',
+   too_heavy: 'Wir befördern Pakete bis 30 kg.',
++  value_too_high: 'Wir versichern Pakete bis zu einem Wert von 5000.',
++  value_invalid: 'Geben Sie den Wert des Pakets als Zahl ab 0 an.',
+   empty: 'Geben Sie eine Postleitzahl ein.',
+   too_long: 'Eine Postleitzahl hat höchstens acht Zeichen.',
+   'label.booked': 'Gebucht',
+diff -ruN a/src/messages/en.js b/src/messages/en.js
+--- a/src/messages/en.js
++++ b/src/messages/en.js
+@@ -2,6 +2,8 @@
+ export default Object.freeze({
+   no_weight: "Enter the parcel's weight.",
+   too_heavy: 'We carry parcels up to 30 kg.',
++  value_too_high: 'We insure parcels up to a value of 5000.',
++  value_invalid: "Enter the parcel's value as a number, 0 or more.",
+   empty: 'Enter a postcode.',
+   too_long: 'A postcode has at most eight characters.',
+   'label.booked': 'Booked',
+diff -ruN a/src/quote.js b/src/quote.js
+--- a/src/quote.js
++++ b/src/quote.js
+@@ -9,8 +9,15 @@
+ const OVERSIZE_FEE = 5.0;
+ const EXPRESS_FACTOR = 1.5;
+ 
++/** A declared value up to this is insured for free. */
++const INSURED_FREE_UP_TO = 100;
++/** The share of a higher declared value that its insurance costs. */
++const INSURED_RATE = 0.01;
++/** The highest declared value that is insured. */
++const INSURED_AT_MOST = 5000;
++
+ /** The reasons a quote is refused for. Each is a code the client matches on. */
+-export const QUOTE_REASONS = Object.freeze(['no_weight', 'too_heavy']);
++export const QUOTE_REASONS = Object.freeze(['no_weight', 'too_heavy', 'value_too_high', 'value_invalid']);
+ 
+ /** A quote that cannot be given. */
+ export class QuoteRefused extends Error {
+@@ -26,18 +33,35 @@
+   }
+ }
+ 
++/** An amount rounded to the cent. */
++const cents = (amount) => Math.round(amount * 100) / 100;
++
+ /**
+- * The price of carrying a parcel.
++ * What insuring a declared value costs, before rounding.
+  *
+- * @param {{ weight: number, longestSide: number, express?: boolean }} parcel weight in kilograms, longest side in centimetres
++ * @param {unknown} value the declared value
++ * @returns {number}
++ * @throws {QuoteRefused} when the value is not a finite number of 0 or more, or is higher than is insured
++ */
++function insurance(value) {
++  if (!Number.isFinite(value) || value < 0) throw new QuoteRefused('value_invalid');
++  if (value > INSURED_AT_MOST) throw new QuoteRefused('value_too_high');
++  if (value <= INSURED_FREE_UP_TO) return 0;
++  return value * INSURED_RATE;
++}
++
++/**
++ * The price of carrying a parcel, with the insurance of its declared value.
++ *
++ * @param {{ weight: number, longestSide: number, express?: boolean, insuredValue?: number }} parcel weight in kilograms, longest side in centimetres
+  * @returns {number} the price
+- * @throws {QuoteRefused} when the parcel has no weight or is heavier than is carried
++ * @throws {QuoteRefused} when the parcel has no weight, is heavier than is carried, or its declared value cannot be insured
+  */
+-export function quote({ weight, longestSide, express = false }) {
++export function quote({ weight, longestSide, express = false, insuredValue = 0 }) {
+   if (!(weight > 0)) throw new QuoteRefused('no_weight');
+   if (weight > MAX_WEIGHT) throw new QuoteRefused('too_heavy');
+   let price = BANDS.find(([upTo]) => weight <= upTo)[1];
+   if (longestSide >= OVERSIZE_FROM) price += OVERSIZE_FEE;
+-  if (express) price = Math.round(price * EXPRESS_FACTOR * 100) / 100;
+-  return price;
++  if (express) price = cents(price * EXPRESS_FACTOR);
++  return cents(price + insurance(insuredValue));
+ }
+diff -ruN a/tests/integration/quotes.test.js b/tests/integration/quotes.test.js
+--- a/tests/integration/quotes.test.js
++++ b/tests/integration/quotes.test.js
+@@ -17,3 +17,44 @@
+ 
+   assert.deepEqual(answer, { status: 422, body: { error: 'too_heavy', message: 'Wir befördern Pakete bis 30 kg.' } });
+ });
++
++test('the quote page prices the declared value', async () => {
++  const app = await boot();
++
++  const answer = send(app, 'POST', '/quotes', { body: { weight: 2, longestSide: 30, insuredValue: 1000 } });
++
++  assert.deepEqual(answer, { status: 200, body: { price: 16.5 } });
++});
++
++const insured = [
++  [100, 6.5],
++  [100.01, 7.5],
++  [5000, 56.5],
++];
++
++for (const [insuredValue, price] of insured) {
++  test(`the quote page prices a parcel worth ${insuredValue} at ${price}`, async () => {
++    const app = await boot();
++
++    const answer = send(app, 'POST', '/quotes', { body: { weight: 2, longestSide: 30, insuredValue } });
++
++    assert.deepEqual(answer, { status: 200, body: { price } });
++  });
++}
++
++const refused = [
++  [6000, 'value_too_high'],
++  [-1, 'value_invalid'],
++  ['a lot', 'value_invalid'],
++];
++
++for (const [insuredValue, reason] of refused) {
++  test(`the quote page refuses a declared value of ${insuredValue}`, async () => {
++    const app = await boot();
++
++    const answer = send(app, 'POST', '/quotes', { body: { weight: 2, longestSide: 30, insuredValue } });
++
++    assert.equal(answer.status, 422);
++    assert.equal(answer.body.error, reason);
++  });
++}
+diff -ruN a/tests/unit/quote.test.js b/tests/unit/quote.test.js
+--- a/tests/unit/quote.test.js
++++ b/tests/unit/quote.test.js
+@@ -1,6 +1,6 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { quote, QuoteRefused } from '../../src/quote.js';
++import { quote, QuoteRefused, QUOTE_REASONS } from '../../src/quote.js';
+ import { LANGUAGES, message } from '../../src/messages.js';
+ 
+ const prices = [
+@@ -46,4 +46,60 @@
+       assert.notEqual(message(reason, language), reason);
+     }
+   }
++});
++
++const refusedFor = (reason) => (error) => error instanceof QuoteRefused && error.reason === reason;
++
++const insured = [
++  [0, 6.5],
++  [50, 6.5],
++  [100, 6.5],
++  [100.01, 7.5],
++  [133.33, 7.83],
++  [1000, 16.5],
++  [2500, 31.5],
++  [5000, 56.5],
++];
++
++for (const [insuredValue, price] of insured) {
++  test(`a parcel of 2 kg worth ${insuredValue} costs ${price}`, () => {
++    assert.equal(quote({ weight: 2, longestSide: 30, insuredValue }), price);
++  });
++}
++
++test('express does not multiply the insurance', () => {
++  assert.equal(quote({ weight: 2, longestSide: 30, express: true, insuredValue: 100 }), 9.75);
++});
++
++test('a parcel worth more than 5000 is not insured', () => {
++  assert.throws(() => quote({ weight: 2, longestSide: 30, insuredValue: 5000.01 }), refusedFor('value_too_high'));
++});
++
++const unusable = [
++  ['below 0', -1],
++  ['written as a text', '250'],
++  ['without end', Number.POSITIVE_INFINITY],
++];
++
++for (const [what, insuredValue] of unusable) {
++  test(`a declared value ${what} is refused`, () => {
++    assert.throws(() => quote({ weight: 2, longestSide: 30, insuredValue }), refusedFor('value_invalid'));
++  });
++}
++
++test('a parcel that is too heavy is refused for its weight, whatever it is worth', () => {
++  assert.throws(() => quote({ weight: 31, longestSide: 30, insuredValue: 6000 }), refusedFor('too_heavy'));
++});
++
++test('the refusals of a declared value are worded in both languages', () => {
++  for (const reason of ['value_too_high', 'value_invalid']) {
++    for (const language of LANGUAGES) {
++      assert.notEqual(message(reason, language), reason);
++    }
++  }
++});
++
++test('the refusals of a declared value are registered', () => {
++  assert.ok(QUOTE_REASONS.includes('value_too_high'));
++  assert.ok(QUOTE_REASONS.includes('value_invalid'));
+ });

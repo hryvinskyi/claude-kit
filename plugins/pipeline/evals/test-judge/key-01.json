@@ -1,0 +1,458 @@
+{
+ "tests": [
+  {
+   "file": "tests/unit/quote.test.js",
+   "test": "a parcel of 2 kg costs 6.5",
+   "verdict": [
+    "delete",
+    "trim"
+   ],
+   "class": [
+    "duplicate"
+   ]
+  },
+  {
+   "file": "tests/unit/quote.test.js",
+   "test": "a parcel of 3 kg costs 6.5",
+   "verdict": [
+    "delete",
+    "trim"
+   ],
+   "class": [
+    "duplicate"
+   ]
+  },
+  {
+   "file": "tests/unit/quote.test.js",
+   "test": "a parcel of 4 kg costs 6.5",
+   "verdict": [
+    "delete",
+    "trim"
+   ],
+   "class": [
+    "duplicate"
+   ]
+  },
+  {
+   "file": "tests/unit/quote.test.js",
+   "test": "every quote refusal is worded in both languages",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "duplicate"
+   ]
+  },
+  {
+   "file": "tests/unit/parcel.test.js",
+   "test": "a parcel holds what it was given",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "restates",
+    "duplicate"
+   ]
+  },
+  {
+   "file": "tests/unit/parcel.test.js",
+   "test": "the sender is never shown the depot note",
+   "verdict": [
+    "delete",
+    "rewrite"
+   ],
+   "class": [
+    "vacuous",
+    "duplicate"
+   ]
+  },
+  {
+   "file": "tests/unit/status.test.js",
+   "test": "the states are written in lower case",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "duplicate",
+    "restates"
+   ]
+  },
+  {
+   "file": "tests/unit/notify.test.js",
+   "test": "the notice is logged before it is sent",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "implementation"
+   ]
+  },
+  {
+   "file": "tests/unit/router.test.js",
+   "test": "a path parameter is read from the address",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "tool"
+   ]
+  },
+  {
+   "file": "tests/unit/router.test.js",
+   "test": "an address with one segment too many matches nothing",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "tool"
+   ]
+  },
+  {
+   "file": "tests/unit/routes.test.js",
+   "test": "every route names a handler that exists",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "file-read",
+    "gate",
+    "duplicate"
+   ]
+  },
+  {
+   "file": "tests/unit/booking.test.js",
+   "test": "booking a parcel answers its id",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "level",
+    "fixture",
+    "duplicate",
+    "vacuous"
+   ]
+  },
+  {
+   "file": "tests/integration/quotes-table.test.js",
+   "test": "the quote page prices a parcel of 1 kg at 4",
+   "verdict": [
+    "delete",
+    "move"
+   ],
+   "class": [
+    "duplicate",
+    "level"
+   ]
+  },
+  {
+   "file": "tests/integration/quotes-table.test.js",
+   "test": "the quote page prices a parcel of 5 kg at 6.5",
+   "verdict": [
+    "delete",
+    "move"
+   ],
+   "class": [
+    "duplicate",
+    "level"
+   ]
+  },
+  {
+   "file": "tests/integration/quotes-table.test.js",
+   "test": "the quote page prices a parcel of 5.01 kg at 9",
+   "verdict": [
+    "delete",
+    "move"
+   ],
+   "class": [
+    "duplicate",
+    "level"
+   ]
+  },
+  {
+   "file": "tests/integration/quotes-table.test.js",
+   "test": "the quote page prices a parcel of 30 kg at 14",
+   "verdict": [
+    "delete",
+    "move"
+   ],
+   "class": [
+    "duplicate",
+    "level"
+   ]
+  },
+  {
+   "file": "tests/integration/refusals.test.js",
+   "test": "POST /quotes refuses a parcel for no_weight",
+   "verdict": [
+    "delete",
+    "trim"
+   ],
+   "class": [
+    "duplicate",
+    "level"
+   ]
+  },
+  {
+   "file": "tests/integration/refusals.test.js",
+   "test": "POST /quotes refuses a parcel for too_heavy",
+   "verdict": [
+    "delete",
+    "trim"
+   ],
+   "class": [
+    "duplicate",
+    "level"
+   ]
+  },
+  {
+   "file": "tests/integration/refusals.test.js",
+   "test": "POST /parcels refuses a parcel for no_weight",
+   "verdict": [
+    "keep",
+    "delete",
+    "rewrite"
+   ],
+   "class": [
+    "none",
+    "duplicate",
+    "level",
+    "vacuous"
+   ],
+   "group": "parcels-refusal"
+  },
+  {
+   "file": "tests/integration/refusals.test.js",
+   "test": "POST /parcels refuses a parcel for too_heavy",
+   "verdict": [
+    "keep",
+    "delete",
+    "rewrite"
+   ],
+   "class": [
+    "none",
+    "duplicate",
+    "level",
+    "vacuous"
+   ],
+   "group": "parcels-refusal"
+  },
+  {
+   "file": "tests/integration/parcels.test.js",
+   "test": "booking a parcel answers 201",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "duplicate"
+   ]
+  },
+  {
+   "file": "tests/integration/parcels.test.js",
+   "test": "a guest may not book a parcel",
+   "verdict": [
+    "rewrite"
+   ],
+   "class": [
+    "vacuous"
+   ]
+  },
+  {
+   "file": "tests/integration/labels.test.js",
+   "test": "the tracking page names the state booked",
+   "verdict": [
+    "move",
+    "keep"
+   ],
+   "class": [
+    "level",
+    "fixture",
+    "none"
+   ],
+   "group": "labels"
+  },
+  {
+   "file": "tests/integration/labels.test.js",
+   "test": "the tracking page names the state collected",
+   "verdict": [
+    "move",
+    "keep"
+   ],
+   "class": [
+    "level",
+    "fixture",
+    "none"
+   ],
+   "group": "labels"
+  },
+  {
+   "file": "tests/integration/labels.test.js",
+   "test": "the tracking page names the state delivered",
+   "verdict": [
+    "move",
+    "keep"
+   ],
+   "class": [
+    "level",
+    "fixture",
+    "none"
+   ],
+   "group": "labels"
+  },
+  {
+   "file": "tests/integration/labels.test.js",
+   "test": "the tracking page names the state returned",
+   "verdict": [
+    "move",
+    "keep"
+   ],
+   "class": [
+    "level",
+    "fixture",
+    "none"
+   ],
+   "group": "labels"
+  },
+  {
+   "file": "tests/integration/partner.test.js",
+   "test": "a delivered parcel is reported to the partner",
+   "verdict": [
+    "delete"
+   ],
+   "class": [
+    "dead"
+   ]
+  }
+ ],
+ "decoys": [
+  {
+   "file": "tests/unit/parcel.test.js",
+   "test": "a parcel's postcode is stored the way postcodes are stored",
+   "why": "a read-back that passes through a transformation: only it fails, at the unit level, when the constructor stops normalising"
+  },
+  {
+   "file": "tests/unit/notify.test.js",
+   "test": "the recipient gets one message that names the parcel, in their language",
+   "why": "a call recorded on a port, and the call is the outcome"
+  },
+  {
+   "file": "tests/unit/status.test.js",
+   "test": "the stored values of the states are the published ones",
+   "why": "a literal read back, and the literal is a published contract (CLAUDE.md, Things other systems rely on), pinned once"
+  },
+  {
+   "file": "tests/unit/status.test.js",
+   "test": "delivered is the end of the road",
+   "why": "a member of a closed set with a row of its own"
+  },
+  {
+   "file": "tests/unit/status.test.js",
+   "test": "returned is the end of the road",
+   "why": "a member of a closed set that shares its answer with another member"
+  },
+  {
+   "file": "tests/unit/ledger.test.js",
+   "test": "only a collected parcel is out for delivery",
+   "why": "an absence asserted beside a presence in the same fixture"
+  },
+  {
+   "file": "tests/integration/quotes.test.js",
+   "test": "a refused quote is answered 422 with its reason, worded for the reader",
+   "why": "it looks like the unit refusal one level up, and it is the joining fact: the status and the wording through the route"
+  },
+  {
+   "file": "tests/unit/schedule.test.js",
+   "test": "a parcel booked before five is collected the same day",
+   "why": "a stubbed clock, and the outcome is the rule"
+  },
+  {
+   "file": "tests/unit/schedule.test.js",
+   "test": "a parcel booked at five is collected the next day",
+   "why": "a stubbed clock, and the outcome is the rule"
+  },
+  {
+   "file": "tests/unit/export.test.js",
+   "test": "the export holds a heading and one line for each parcel",
+   "why": "it reads a file, and the file is what the code under test wrote"
+  },
+  {
+   "file": "tests/unit/quote.test.js",
+   "test": "a parcel of 1.01 kg costs 6.5",
+   "why": "a boundary row: the survivor of the rows that go"
+  },
+  {
+   "file": "tests/unit/quote.test.js",
+   "test": "a parcel of 5 kg costs 6.5",
+   "why": "a boundary row: the survivor of the rows that go"
+  },
+  {
+   "file": "tests/unit/quote.test.js",
+   "test": "a parcel of 10.01 kg costs 14",
+   "why": "a boundary row"
+  },
+  {
+   "file": "tests/integration/parcels.test.js",
+   "test": "a postcode that cannot be stored is answered 422 with its reason",
+   "why": "it looks like one more refusal through the route, and it is the only proof of another refusal's mapping"
+  },
+  {
+   "file": "tests/integration/labels.test.js",
+   "test": "a state nobody defined has no label page",
+   "why": "the one refusal of the label route"
+  }
+ ],
+ "groups": {
+  "parcels-refusal": {
+   "members": 2,
+   "rule": "one of the two is the only proof that a booking is refused when its quote is, and the second repeats it; neither checks that the refused parcel is not stored",
+   "accept": [
+    [
+     "delete",
+     "keep"
+    ],
+    [
+     "keep",
+     "rewrite"
+    ],
+    [
+     "delete",
+     "rewrite"
+    ]
+   ],
+   "hole_found_by": "rewrite"
+  },
+  "labels": {
+   "members": 4,
+   "rule": "the table moves to the unit level and one row may stay for the route; a row deleted with nothing in its place loses a defect only it catches",
+   "accept": [
+    [
+     "move",
+     "move",
+     "move",
+     "move"
+    ],
+    [
+     "keep",
+     "move",
+     "move",
+     "move"
+    ]
+   ]
+  }
+ },
+ "bar": {
+  "verdicts": {
+   "found": 19,
+   "decoys_tripped": 1,
+   "groups": 2,
+   "other_keeps_removed": 2
+  },
+  "defence": {
+   "stopped": 8,
+   "agreed": 7
+  },
+  "suite": {
+   "seeded_gone": 17,
+   "cases_at_most": 56
+  }
+ }
+}

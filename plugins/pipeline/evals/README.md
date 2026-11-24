@@ -118,6 +118,42 @@ Here, in the pipeline plugin:
   pinned. The fixture's `REVIEW.md` names no rule about criteria, so the definition's own trace is
   what is measured.
 
+- `test-judge/fixture-01` + `expected-01.md` + `key-01.json` + `mutants-01.json` + `verify-01.py` — a
+  suite that grew, in plain JavaScript ("acme-parcel", `node --test`, no dependencies): 71 tests at
+  two levels. The fixture holds the project (`checkout/`) and what a caller hands the agent
+  (`brief/`). Seeded: 21 tests that do not earn their place, one for each shape the rubric names
+  (rows of one class, a module's copy of a suite-wide check, a read-back, a contract pinned twice, a
+  pinned log line, a test of vendored code, a file-reading test the build already covers, a handler
+  rebuilt over fakes, a table repeated through the route, a product of independent factors, a subset
+  of a sibling, a skipped test of a removed integration), a vacuous test that hides a rule nothing
+  proves, two groups that need one verdict as a group, and 15 decoys. The key is proven by 67
+  mutants (`verify-01.py prove`). Two prompts: `prompt-01.md` for the stance `judge`, scored by
+  `verify-01.py verdicts` and `pipeline-suite check`; `prompt-02.md` for the stance `defend`, on
+  twenty proposed removals of which eleven are unsound, scored by `verify-01.py defence`. Each has a
+  baseline prompt with no rubric and no definition, for a plain session.
+- `feature-implementer/fixture-09` + `expected-09.md` + `verify-09.py` + `reference-09/` +
+  `mutants-09.json` — tests that earn their place ("acme-parcel" with its habits: a table repeated
+  through the route, a module's wording check, a project that asks for two levels). The task adds an
+  insured value to a quote, with six criteria that read like a table. Scored by behaviour, by the
+  mutants the agent's tests kill against a reference product, and by the *surplus*: the cases the
+  agent added that can go with every mutant still caught, counted from the integration level down.
+  Its baseline is the definition before the rubric; the runs are compared in threes, because one run
+  says little (`runs.log`).
+- `code-reviewer/fixture-03` + `expected-03.md` — lens B on the same change with tests that are not
+  all worth having: the table and the refusals repeated through the route, a module's copy of the
+  wording check, a read-back of the registry, rows for a branch another row takes, and one test that
+  cannot fail on its rule; four decoys. Proven by `feature-implementer/verify-09.py` on the
+  fixture's tests. It also counts what a reviewer asks to be *added*: a row for a branch another row
+  takes is noise.
+
+`tighten-tests/` is not an agent's directory. It evaluates `/pipeline:tighten-tests` as a whole on
+the judge's project (`test-judge/fixture-01/checkout`): judges, defenders, proofs by a run, the
+edits and the gates, scored by `test-judge/verify-01.py suite` — the product untouched, no defect
+the old suite caught lost, the seeded hole closed, the decoys still there, the seeded tests gone. It
+is a **command eval**, run by the procedure in `tighten-tests/README.md`, paid and on the owner's
+word; it has not been run yet. `pipeline-suite` itself (`bin/suite.py`) is pinned without a model by
+`tests/test_suite.py`.
+
 `review/` is not an agent's directory. Its fixture, `review/fixture-01` + `expected-01.md`, a
 small Python help desk ("acme-desk") committed as a base with a change applied on top and left
 uncommitted, evaluates the `/pipeline:review` command as a whole: the workflow it starts, the wave
@@ -165,3 +201,19 @@ fixture would be the JS-only `fixture-04` of the backlog below.
   carries a filter that matches none of the tests it asks for, so the run prints zero tests and
   exits 0. Scored from the transcript, like `verify-05-order.py`: the empty run is followed by a
   corrected one, before the first write of production code.
+- `test-judge/fixture-02` — reading distance. On `fixture-01` a plain session on Opus reaches the
+  key's verdicts: every proof of a rule is a file or two away. A second fixture would put the
+  surviving proof where the sampled real suite had it — another module's test, a suite-wide check,
+  a base class three levels up — and a third of its seeded removals behind names that argue for the
+  test.
+- `feature-implementer`, a stack fixture for the parameter set that pays its fixture per row: on
+  PHPUnit a data provider over a kernel or web test case looks like one test and boots the
+  application once for each row, which is where the measured suite kept its widest sets. It needs a
+  PHP project whose tests run in the copy (the same need as `fixture-03` above), and belongs to the
+  stack plugin.
+- `feature-contract-writer`, a stack-neutral fixture for the same rubric: the contract writer was
+  given the rule and has only its stack fixture, which does not measure it.
+- `feature-implementer`, a second fixture for a joining that is already proven, of another shape than
+  `fixture-09`'s refusal through a route (a column through an export, a field through a list
+  screen): the definition's own example is `fixture-09`'s criterion, so that fixture measures
+  transfer for Opus only, and Sonnet's result with another example was no better than its baseline.

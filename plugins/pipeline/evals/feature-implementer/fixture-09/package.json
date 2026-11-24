@@ -1,0 +1,12 @@
+{
+  "name": "acme-parcel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node --test tests/",
+    "test:unit": "node --test tests/unit/",
+    "test:integration": "node --test tests/integration/",
+    "test:junit": "node --test --test-reporter=junit --test-reporter-destination=junit.xml tests/"
+  }
+}

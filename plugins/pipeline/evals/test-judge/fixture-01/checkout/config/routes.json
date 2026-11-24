@@ -1,0 +1,6 @@
+[
+  { "method": "POST", "path": "/quotes", "handler": "quoteParcel" },
+  { "method": "POST", "path": "/parcels", "handler": "bookParcel" },
+  { "method": "GET", "path": "/parcels/:id", "handler": "showParcel" },
+  { "method": "GET", "path": "/labels/:status", "handler": "showLabel" }
+]
