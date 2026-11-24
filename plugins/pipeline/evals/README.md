@@ -127,6 +127,17 @@ result file the run copies out. It is a **command eval**: `/pipeline:agent-evals
 runs it by the procedure in `review/README.md` (*Command evals* in the command), paid and on the
 owner's word.
 
+`feature/` is not an agent's directory either. Its fixture, `feature/fixture-01` + `setup-01.sh` +
+`expected-01.md` + `verify-01.py`, is a `/pipeline:feature` run that stopped inside Phase 4
+("acme-library" again): the plan approved, one task accepted with its red record intact, the next
+started and left half-written — a module that breaks two criteria and the project's own rule, under
+a test bent to fit it, so the suite is green — and one document edited by nobody in the pipeline.
+It evaluates `/pipeline:feature --resume`: the record read first, nothing decided or accepted done
+again, the half-written work set aside as a patch before its task runs again from a clean start,
+the outside edit left as found and named. It is a **command eval**, run by the procedure in
+`feature/README.md`, paid and on the owner's word. The record itself (`bin/progress.py`) is pinned
+without a model by `tests/test_progress.py`.
+
 `finding-verifier/` — `fixture-01` + `expected-01.md`, the same help desk with its change applied
 (`checkout/`) and the change as a diff file (`diff/change.diff`), and thirteen candidate findings in
 `prompt-01.md`: the review fixture's five defects, three of its decoys as a finding and as two

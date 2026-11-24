@@ -145,7 +145,8 @@ definition instead, commit it, and re-run.
 ## Command evals
 
 A command eval measures a command as a whole: the command, the workflow it starts and every agent
-that workflow spawns (`review/` measures `/pipeline:review`). It has no agent to pass to `--agent`,
+that workflow spawns (`review/` measures `/pipeline:review`; `feature/` measures
+`/pipeline:feature --resume`). It has no agent to pass to `--agent`,
 so it carries its own procedure: `<evals dir>/<name>/README.md` says how to set up the copy, how to
 run the command headless, what file the run leaves to score, and the run line `runs.log` takes.
 That README is the procedure; follow it step by step, with these rules of the harness on top:

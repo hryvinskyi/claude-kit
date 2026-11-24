@@ -1,7 +1,7 @@
 {
   "name": "pipeline",
   "version": "0.4.0",
-  "description": "Plan, review and implement features: the feature pipeline sized to the change, the review command (its wave, verification and ranking run as a workflow) and the bug-fix command, pipeline-decide for an optional decision model, the devils-advocate plan reviewer, the fresh-context code-reviewer, the finding-verifier that judges each review finding, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents.",
+  "description": "Plan, review and implement features: the feature pipeline sized to the change, the review command (its wave, verification and ranking run as a workflow) and the bug-fix command, pipeline-decide for an optional decision model, pipeline-progress for the record a stopped feature run is resumed from, the devils-advocate plan reviewer, the fresh-context code-reviewer, the finding-verifier that judges each review finding, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents.",
   "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
   "repository": "https://github.com/hryvinskyi/claude-kit",
   "license": "MIT",
