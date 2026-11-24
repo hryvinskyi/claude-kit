@@ -37,7 +37,7 @@ Without a `REVIEW.md` the review runs on the generic checks and the repository's
 3. **Checkpoint, then stray files.** Before anything is restored, record the tree as it is, with this script (it stages into a copy of the index, so what the user has staged stays as it was, and a new file counts; given a file of paths, it strikes those paths from the tree). Each Bash call is a new shell, so it lives in a file in the git directory, and a tree id is carried from call to call as the id itself:
    ```sh
    cat > "$(git rev-parse --git-path review-snap.sh)" <<'SH'
-   set -e; i=$(mktemp); cp "$(git rev-parse --git-path index)" "$i"; GIT_INDEX_FILE="$i" git add -A
+   set -e; i=$(mktemp); cp -p "$(git rev-parse --git-path index)" "$i"; GIT_INDEX_FILE="$i" git add -A
    [ -z "$1" ] || GIT_INDEX_FILE="$i" git update-index --force-remove --stdin < "$1"
    GIT_INDEX_FILE="$i" git write-tree; rm -f "$i"
    SH
