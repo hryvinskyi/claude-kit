@@ -64,5 +64,6 @@
   {"id": "label-in-german-only", "file": "src/handlers.js", "find": "label(params.status, language)", "replace": "label(params.status, 'de')", "breaks": "a label is in the reader's language"},
   {"id": "export-columns-moved", "file": "src/export.js", "find": "[parcel.id, parcel.weight, parcel.longestSide, parcel.postcode, status]", "replace": "[parcel.id, parcel.postcode, parcel.weight, parcel.longestSide, status]", "breaks": "the export's columns keep their order"},
   {"id": "export-no-heading", "file": "src/export.js", "find": "const lines = ['id,weight,longest_side,postcode,status'];", "replace": "const lines = [];", "breaks": "the export starts with its heading"},
-  {"id": "route-names-no-handler", "file": "config/routes.json", "find": "\"handler\": \"showLabel\"", "replace": "\"handler\": \"showLabels\"", "breaks": "every route names a handler that exists", "build_fails": true}
+  {"id": "route-names-no-handler", "file": "config/routes.json", "find": "\"handler\": \"showLabel\"", "replace": "\"handler\": \"showLabels\"", "breaks": "every route names a handler that exists", "build_fails": true},
+  {"id": "label-route-gone", "file": "config/routes.json", "find": ",\n  { \"method\": \"GET\", \"path\": \"/labels/:status\", \"handler\": \"showLabel\" }", "replace": "", "breaks": "the tracking page is reached at all", "missed_by": [["tests/integration/labels.test.js", "a state nobody defined has no label page"]]}
 ]

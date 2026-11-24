@@ -126,7 +126,7 @@ Here, in the pipeline plugin:
   pinned log line, a test of vendored code, a file-reading test the build already covers, a handler
   rebuilt over fakes, a table repeated through the route, a product of independent factors, a subset
   of a sibling, a skipped test of a removed integration), a vacuous test that hides a rule nothing
-  proves, two groups that need one verdict as a group, and 15 decoys. The key is proven by 67
+  proves, three groups that need one verdict as a group, and 14 decoys. The key is proven by 68
   mutants (`verify-01.py prove`). Two prompts: `prompt-01.md` for the stance `judge`, scored by
   `verify-01.py verdicts` and `pipeline-suite check`; `prompt-02.md` for the stance `defend`, on
   twenty proposed removals of which eleven are unsound, scored by `verify-01.py defence`. Each has a

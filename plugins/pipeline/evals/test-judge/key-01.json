@@ -321,6 +321,19 @@
    "class": [
     "dead"
    ]
+  },
+  {
+   "file": "tests/integration/labels.test.js",
+   "test": "a state nobody defined has no label page",
+   "verdict": [
+    "keep",
+    "move"
+   ],
+   "class": [
+    "none",
+    "level"
+   ],
+   "group": "unknown-label"
   }
  ],
  "decoys": [
@@ -393,11 +406,6 @@
    "file": "tests/integration/parcels.test.js",
    "test": "a postcode that cannot be stored is answered 422 with its reason",
    "why": "it looks like one more refusal through the route, and it is the only proof of another refusal's mapping"
-  },
-  {
-   "file": "tests/integration/labels.test.js",
-   "test": "a state nobody defined has no label page",
-   "why": "the one refusal of the label route"
   }
  ],
  "groups": {
@@ -437,13 +445,25 @@
      "move"
     ]
    ]
+  },
+  "unknown-label": {
+   "members": 1,
+   "rule": "the refusal is a branch the handler decides alone, behind a route whose joining the label rows prove and an answer a handler's 404 already travels through: it may move to a unit test of the handler written first, or stay; deleted with nothing in its place it loses the only proof that an undefined state is refused",
+   "accept": [
+    [
+     "keep"
+    ],
+    [
+     "move"
+    ]
+   ]
   }
  },
  "bar": {
   "verdicts": {
    "found": 19,
    "decoys_tripped": 1,
-   "groups": 2,
+   "groups": 3,
    "other_keeps_removed": 2
   },
   "defence": {

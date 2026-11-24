@@ -14,13 +14,16 @@ the product, and `prove` runs the fixture's suite against every one of them and 
 - every defect is caught by some test, except the ones marked `hole`, which the whole suite lets
   through — each is a rule a test claims and does not prove (`required` marks the one a seeded test
   hides; the other sits behind a test that is kept, and a judge that finds it is credited);
-- every test the key deletes catches nothing that a test the key keeps does not also catch;
+- every test the key deletes catches nothing that a test the key keeps, or the build, does not also
+  catch;
 - every decoy — a test that looks removable and is not — catches a defect that no other kept test
   of its level or a cheaper one catches;
 - of each group the key keeps one member of, the group catches a defect nothing else does;
 - a change marked `refactor`, which breaks no rule, turns red only tests the key calls
   `implementation`;
 - the defect marked `build_fails` fails the build, which is the gate the key names.
+- a test named in a defect's `missed_by` stays green on it: what the test looks as if it proves and
+  does not.
 
 `verdicts` scores a judge's output against the key: seeded removals found, the verdict and the class
 of each, decoys and other kept tests left alone, and what does not hold up mechanically.
@@ -172,6 +175,8 @@ def prove(fixture: Path) -> int:
             claim(bool(kills[mutant_id]), "caught — %s" % mutant["breaks"])
         if mutant.get("build_fails"):
             claim(not matrix["build"][mutant_id], "the build fails for: %s" % mutant["breaks"])
+        for file, name in mutant.get("missed_by", []):
+            claim((file, name) not in kills[mutant_id], "%s stays green when this breaks: %s" % (name, mutant["breaks"]))
 
     kept = {test for test in every if kept_by_key(test)}
     for entry in KEY["tests"]:
@@ -179,7 +184,7 @@ def prove(fixture: Path) -> int:
         if entry.get("group") or entry["verdict"][0] != "delete":
             continue
         own = [m for m in rule_mutants if test in kills[m]]
-        orphaned = [m for m in own if not (kills[m] & (kept - {test}))]
+        orphaned = [m for m in own if not (kills[m] & (kept - {test})) and not (by_id[m].get("build_fails") and not matrix["build"][m])]
         claim(not orphaned, "delete — %s catches nothing a kept test does not" % entry["test"] + ("" if not orphaned else " (only it catches %s)" % orphaned))
         if "implementation" in entry["class"]:
             refactors = [m["id"] for m in MUTANTS if m.get("refactor") and test in kills[m["id"]]]

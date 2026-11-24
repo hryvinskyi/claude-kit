@@ -1,7 +1,7 @@
 # Answer key — tighten-tests / fixture-01 (acme-parcel, the command as a whole)
 
 The project is `test-judge/fixture-01/checkout`: 71 tests at two levels, with 21 seeded tests that do
-not earn their place, two groups that need a verdict as a group, two holes and 15 decoys. Its key
+not earn their place, three groups that need a verdict as a group, two holes and 14 decoys. Its key
 (`test-judge/key-01.json`) and its mutants (`test-judge/mutants-01.json`) are the same ones the judge
 is scored with, and `test-judge/expected-01.md` describes them. This eval asks what the judge's eval
 cannot: whether the command, with its judges, its defenders, its proofs and its gates, leaves a
@@ -49,4 +49,9 @@ See `runs.log`, which the first run creates.
   it as a branch the handler decides alone, behind a route whose joining the `booked` row proves, and
   `src/app.js` passes a handler's status through as it is. Which reading holds is a question about
   the key, settled by a mutant that only the integration test catches or by the owner's word, never
-  by this run's result. Until then the key stands as written and the run is a FAIL.
+  by this run's result.
+- **The key was corrected on the owner's word, the same day.** No mutant is caught by that test
+  alone except at the level below, a handler's 404 already travels through the app in `a parcel
+  nobody booked is answered 404`, and a new mutant shows the test stays green when the label route is
+  gone (`label-route-gone`, `missed_by`). It is now the group `unknown-label`: `keep` or `move`, never
+  `delete`. By the corrected key the first run is a PASS, T1 to T12.

@@ -5,9 +5,9 @@
 (`tests.json`), the project's gates (`gates.md`) and, for the defender, twenty verdicts
 (`defend.json`). The agent writes into `out/` of the copy.
 
-The key is `key-01.json`, and it is not an opinion. `mutants-01.json` holds 67 changes to the
-product: one defect for each rule and each boundary, one change that breaks no rule, and two defects
-that no test catches. `python3 verify-01.py prove fixture-01/checkout` runs the suite against every one of
+The key is `key-01.json`, and it is not an opinion. `mutants-01.json` holds 68 changes to the
+product: one defect for each rule and each boundary, one change that breaks no rule, two defects
+that no test catches, and one that a test looks as if it catches and does not (`missed_by`). `python3 verify-01.py prove fixture-01/checkout` runs the suite against every one of
 them and checks each claim below; it must print `the key holds` before a run is scored. Run it again
 after any edit to the fixture: a key that the mutants no longer prove is a bug in the fixture.
 
@@ -41,6 +41,7 @@ failed run.
 |---|---|---|---|
 | `parcels-refusal` | `POST /parcels refuses a parcel for no_weight`, `… for too_heavy` | one is kept and one deleted; or one is `rewrite` and the other kept or deleted | only these two fail when a booking swallows the quote's refusal: one of them is the joining fact, the second repeats it. Neither checks that the refused parcel is not stored, which is the second hole (below) |
 | `labels` | the four `the tracking page names the state …` | three or four are `move`, the rest `keep`, none `delete` | the table belongs at the unit level; a row deleted with nothing in its place loses the defect "a state has no label", which nothing else catches |
+| `unknown-label` | `a state nobody defined has no label page` | `keep` or `move`, never `delete` | the refusal is a branch `showLabel` decides alone: the route reaching it is proven by the label rows, a handler's 404 already travels through the app in `a parcel nobody booked is answered 404`, and the test stays green when the label route is gone (`label-route-gone`). It may move to a unit test of the handler; deleted with nothing in its place, the only proof that an undefined state is refused goes with it |
 
 ## The hole behind a kept test
 
@@ -52,7 +53,7 @@ so the key was corrected: the mutant was added, `prove` shows that no test catch
 `rewrite` in the group is accepted. The scorer prints whether a run found it. It is credited and not
 required: a judge that keeps the row loses nothing the suite had.
 
-## Decoys — 15 tests that look removable and are not
+## Decoys — 14 tests that look removable and are not
 
 `key-01.json` lists them with the reason for each. `prove` shows that each catches a defect no other
 kept test of its level or a cheaper one catches. The kinds: a read-back through a transformation; a
@@ -71,7 +72,7 @@ Then check the output mechanically, as the command does:
 up (a quote that is not at its line, a duplicate with no survivor, a survivor the same output
 removes) is counted in the run line.
 
-**PASS**: at least 19 of 21 found, both groups right, the seeded hole given `rewrite`, at most one
+**PASS**: at least 19 of 21 found, all three groups right, the seeded hole given `rewrite`, at most one
 decoy tripped, at most two other kept tests removed or changed.
 
 ## Scoring a defender — `python3 verify-01.py defence <copy>/out/defended.json`
@@ -126,3 +127,13 @@ and the seeded tests gone.
 
 See `runs.log`. The bars above were set before the first run and are revised only from runs, with
 the run line that does it saying so.
+
+The key was corrected once more on 2026-11-24, after the first run of the command eval
+(`tighten-tests/runs.log`): `a state nobody defined has no label page` was a decoy and is now the
+group `unknown-label`, for the reasons in its row above. A judge that gives it `move` was counted as
+tripping a decoy before; it is right now, and a `delete` fails a group where it used to cost one of
+the decoys a run may trip. The lines of `runs.log` before that keep the score of their day. Scored
+again by the corrected key, the Sonnet baseline is a PASS: its one remaining decoy tripped and its two
+other kept tests removed are the errors the rubric was written against — unit tests of a rule
+deleted on the word of an integration test — and both counts are inside the bars. On this fixture
+the gain of the definition on Sonnet is those three errors, not a PASS against a FAIL.
