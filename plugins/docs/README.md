@@ -19,7 +19,7 @@ Both skills write for **one reader, within that reader's reach**: a document hol
 can open, run or call, on the product as it is today. A screen that only someone with more access
 can open (the vendor's own staff, an operator) is documented for that person, in the technical
 skill's administration guide, and where the reader needs its result the user guide gives the
-request: who to ask, and for what. A change in who may use something is therefore a change in what
+request: what to ask support for, and never names the role behind it. A change in who may use something is therefore a change in what
 each document holds. The body tells the product as it is; what changed is told in the document
 history or the migration notes. A help page edited as part of a code change is an Update: load the
 skill for the page's reader.

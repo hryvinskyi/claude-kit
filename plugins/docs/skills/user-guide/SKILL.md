@@ -38,9 +38,16 @@ they have it today. This decides what goes in before any sentence is written.
   belongs to someone with more access (the vendor's own staff, an operator, an administrator the
   reader is not) is documented in that person's document. Being true and being in the code do not
   make it this reader's.
-- **Where someone else must act, the reader's part is the request.** The guide says who to ask,
-  what to ask for and what the reader sees when it is done. It never gives the other person's
-  steps, and it never tells what other people see.
+- **Where someone else must act, the reader's part is the request.** The guide says what to ask
+  for, to the vendor's support, and what the reader sees when it is done. It never gives the other
+  person's steps, and it never tells what other people see.
+- **Roles the reader cannot hold stay unnamed.** The vendor's or host's operator, staff and
+  super-user accounts, and the screens, settings, permissions and steps only they see, are not
+  named or hinted at: no "only staff see this", no "not switched on yet", no "no role can be given
+  this". The guide describes what the reader can see and do. Where the reader needs what only such
+  a role can do, it says to contact support for the outcome, without saying who does it, where or
+  why the reader cannot. Those roles and screens are documented in the operator's own technical
+  guide.
 - **What does not work for the reader yet does not exist for the guide**: not released, not
   switched on, hidden, planned, or a control that does nothing yet.
 - **A change in who can reach something is a change in what the guide holds.** When the product
@@ -65,7 +72,7 @@ and the cases in depth.
 - `references/method.md` before the first section is written: the reader and their reach, the
   default outline, plain language, the product as it is, exact labels, screenshots, accessibility,
   findability, the sweeps, and the update in depth.
-- `references/quality-bar.md` before the self-check and in Review mode: the 15 conditions, their
+- `references/quality-bar.md` before the self-check and in Review mode: the 16 conditions, their
   pass and gap signals, the overlap guards and the review report.
 
 ## Three modes
@@ -110,7 +117,9 @@ or plan that opens the screen or shows the control, with the place the rule is w
 skill says where each kind of fact lives. Read existing documentation for tone and terminology; do
 not copy it, and do not trust it over the code.
 
-Mark each fact against the guide's reader:
+Collect the facts as the guide's reader: sign in with their role, and take no fact from a screen
+only a role with more access sees (reading its code to learn what it does is fine; it stays out of
+the guide). Mark each fact against the guide's reader:
 
 - **In reach**: the reader can open it or do it. It is material for the guide.
 - **Out of reach**: only someone else can. It stays in the list, with what the reader meets in its
@@ -143,7 +152,7 @@ how-to traces to a goal. A screen or setting that serves no goal goes to the ref
 how-to of its own.
 
 A goal is something this reader can finish themselves. Where a step belongs to someone else, the
-reader's goal is **the request**: who to ask, what to ask for, what to have ready, and what the
+reader's goal is **the request**: what to ask support for, what to have ready, and what the
 reader sees when it is done. It is one short how-to, or one sentence in the how-to it belongs to.
 The other person's steps go to their document.
 
@@ -180,7 +189,7 @@ them is the most common reason a guide confuses its reader.
 - **Troubleshooting and FAQ.** Organized by what the reader **sees** ("The label does not appear on
   the product page"), never by the internal cause. Each entry: symptom, likely cause, fix as
   numbered steps, the exact message where there is one. Built from the product's real messages and
-  failure paths. A fix that is not the reader's to make says who to ask and what to tell them. End
+  failure paths. A fix that is not the reader's to make gives the request: what to ask support for. End
   with how to get more help: a person or a channel the reader can find.
 - **Glossary.** Every term the guide had to define, in one place.
 - **Document history.** The guide's own version and what changed in it, distinct from the
@@ -218,7 +227,7 @@ Plain language is the core of this skill; `references/method.md` has the detail 
    ```bash
    python3 "<skill directory>/scripts/guide_sweep.py" <guide> --other-reader "<a role that is not the reader>"
    ```
-2. Run the 15 conditions of `references/quality-bar.md` against the guide yourself and fix every
+2. Run the 16 conditions of `references/quality-bar.md` against the guide yourself and fix every
    miss.
 3. Hand the guide to a **fresh agent** that did not write it: a general-purpose subagent with the
    guide, the fact list and the instruction to load this skill in **Review mode** (and the stack
@@ -245,7 +254,7 @@ A guide is updated when the product changes or a reader reports a gap. Edit, nev
    - It **left** the reader's reach (it became a staff screen, a permission was withdrawn, it was
      switched off or hidden for them): take it out of this guide. Its how-to, its reference entry,
      its screenshot, its troubleshooting entries and every mention go. What stays is what the
-     reader still meets: the request to whoever holds it now, when there is one. Hand what you took
+     reader still meets: the request for the outcome, when there is one. Hand what you took
      out to the document of the reader who holds it now, and name that document in your report, or
      say that there is none.
    - It **entered** the reader's reach: it gets its goal, its how-to and its reference entry.
@@ -271,7 +280,7 @@ A guide is updated when the product changes or a reader reports a gap. Edit, nev
 7. **Sweep.** Run `python3 "<skill directory>/scripts/guide_sweep.py" <guide> --other-reader
    "<role>"` over the whole guide, not only over what you changed, and settle every place it lists.
    An update is when old history, another reader's section and a stale picture are found.
-8. **Check.** Run the 15 conditions of `references/quality-bar.md` over the changed parts.
+8. **Check.** Run the 16 conditions of `references/quality-bar.md` over the changed parts.
 9. **Review in a fresh context**, as in Write step 7: a subagent that did not write the change
    gets the changed guide, the fact rows of the change with their reach, and the instruction to
    load this skill in Review mode. This step is part of the update, not an option. A small change
@@ -291,7 +300,7 @@ Run in a context that did not write the guide. Judge, never edit.
    screenshot, can the guide's stated reader open it? Take it from the fact list's reach column;
    from the product when the list has none (the stack skill says where the rule is written); and
    report it as unverifiable when neither can be read.
-3. Judge each of the 15 conditions of `references/quality-bar.md`: pass, or a named gap that would
+3. Judge each of the 16 conditions of `references/quality-bar.md`: pass, or a named gap that would
    block or mislead a real reader.
 4. Emit one line, `VERDICT: approve` or `VERDICT: revise`, then the findings, most blocking first,
    each with the condition number, the location, and a concrete fix. The report format and the

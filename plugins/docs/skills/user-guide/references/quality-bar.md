@@ -6,7 +6,7 @@ mode. Numbered the same in both places so the two never drift.
 A condition **passes** unless there is a real, named deficiency that would block or mislead a real
 reader. Wording you would have chosen differently is not a deficiency.
 
-## The 15 conditions
+## The 16 conditions
 
 **1. Goal coverage — one how-to per goal, no orphans.**
 - *Pass:* every goal the product supports for this reader has exactly one how-to; every how-to
@@ -94,12 +94,13 @@ reader. Wording you would have chosen differently is not a deficiency.
 **13. One reader, within their reach.**
 - *Pass:* every how-to, step, reference entry, screenshot and troubleshooting fix is something the
   guide's stated reader can open, do or see; "you" is that reader throughout; where someone else
-  must act, the guide gives the request: who to ask, what for, what the reader sees when it is done.
+  must act, the guide gives the request: what to ask support for, what the reader sees when it is
+  done.
 - *Gap:* steps or a reference entry for a screen, a setting or an action the reader cannot reach
   (always blocking); a section addressed to another role, or "you" changing its owner inside a page;
   a telling of what other roles see or are told; "ask an administrator" or "ask whoever runs it"
   where the reader cannot tell who that is; a fix on a screen the reader cannot open, with no
-  request; a screenshot showing controls the reader does not have; a permission, a role or a scope
+  request; a permission, a role or a scope
   in the guide's list that nobody in the reader's place can hold; another person's procedure for
   acting in the reader's own space, or what is kept from the reader there.
 - *Not a gap:* a prerequisite naming the permission the reader needs; one request; a second kind of
@@ -135,12 +136,26 @@ reader. Wording you would have chosen differently is not a deficiency.
 - *Overlap guard:* a word the reader does not know is condition 10. Steps packed into a paragraph
   are condition 5. This condition is about whose story the text tells, and how many times.
 
+**16. Roles the reader cannot hold stay unnamed.**
+- *Pass:* no role the reader cannot hold (the vendor's or host's operator, staff or super-user
+  accounts) is named or hinted at, and neither is a screen, setting, permission or step only those
+  roles see; where the reader needs what only they can do, the guide says to contact support for
+  the outcome; every screenshot shows only what the reader's own role sees.
+- *Gap:* "only staff see this", "settings not switched on yet", "no role can be given this";
+  who does the work, where, or why the reader cannot; a screenshot taken as a super-user, with a
+  menu item, tab or setting the reader does not have (always blocking when it shows one).
+- *Not a gap:* "contact support" with the outcome wanted; a prerequisite naming a permission the
+  reader's own organization can hold.
+- *Overlap guard:* steps or a reference entry for such a screen are condition 13; this condition is
+  the hint, the name and the picture. A screenshot of a control the reader lacks is reported here
+  once, not under 13.
+
 ## Proportionality
 
 The bar scales with the product. A small product's guide may collapse sections, have nothing to
 define, no images and a single page, and still pass. The floor at every size: every goal the
 product supports for this reader has a how-to (condition 1), nothing is invented (condition 4), and
-nothing is outside the reader's reach (condition 13).
+nothing is outside the reader's reach (condition 13), and no hidden role is named (condition 16).
 
 ## Severity
 
@@ -163,6 +178,8 @@ One defect, one finding, under the condition that owns it.
   for another reader is one finding with its line range, not one per sentence.
 - The past, the future and the clock → 14. A label that changed and still stands in a step → 9.
 - Mechanism, a defended design, a repeat → 15. An unknown term → 10.
+- A hint at, or the name of, a role or screen the reader cannot hold, or a screenshot showing one →
+  16. Steps for it → 13.
 
 ## Review report
 

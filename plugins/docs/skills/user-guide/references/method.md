@@ -49,14 +49,15 @@ When the reader needs something only another person can do, the reader's task is
 > Your tokens are listed under **Account** > **Access tokens**. You can revoke one there at any
 > time.
 
-A request has: who to ask, by a name the reader can find (a team, a role in their own
-organization, a channel); what to ask for; what to have ready; what the reader sees when it is
-done; what stays the reader's to do. It has none of the other person's screen, steps, menu path or
-permission.
+A request has: the channel the reader finds in their own product (contact support, or a role in
+their own organization that they can hold); what to ask for; what to have ready; what the reader
+sees when it is done; what stays the reader's to do. It has none of the other person's screen,
+steps, menu path or permission, and it does not say who does the work, where, or why the reader
+cannot.
 
 "Ask your administrator" is enough only when the reader's organization has such a person and the
-product shows who it is. "Ask whoever runs the installation" names nobody. Find out who this reader
-really turns to (the user knows) and name the channel.
+product shows who it is. "Ask whoever runs the installation" names nobody. For anything only the
+vendor or host can do, write "contact support" and the outcome wanted, never the role behind it.
 
 ### Several kinds of reader in one guide
 
@@ -75,8 +76,8 @@ The vendor's staff may be able to open a customer's account; an administrator ma
 work. Whether the guide tells the reader, and in which words, is the product owner's decision. It
 is never a by-product of documenting the other person's screen.
 
-- When the owner wants it said: once, as a plain statement of what the reader can expect, in the
-  reader's words ("The Acme support team can open your account to help you.").
+- The guide does not say it: that is a role the reader cannot hold (§Roles the reader cannot hold).
+  It goes in the operator's own technical guide.
 - Never as the other person's procedure, and never as a description of what is kept from the reader.
 - When you meet such material while collecting facts, mark it out of reach and raise it with the
   user. Do not decide it yourself.
@@ -86,7 +87,7 @@ is never a by-product of documenting the other person's screen.
 | What you found | What the guide holds |
 |---|---|
 | A screen only the vendor's staff can open | Nothing; or the request, when the reader needs its result |
-| A setting the reader sees and cannot change | A reference entry saying what it shows, and the request to whoever changes it |
+| A setting the reader sees and cannot change | A reference entry saying what it shows, and the request to support for the outcome, without saying who changes it |
 | A menu entry shown only to another role | Nothing: the reader never sees it |
 | One step of the reader's task that another person does | The request, in one sentence, inside the reader's how-to |
 | A permission the reader can give a colleague | A how-to for the reader ("Let a colleague manage labels") naming the permission by its label |
@@ -94,6 +95,25 @@ is never a by-product of documenting the other person's screen.
 | A control the reader sees that does nothing yet (the value is stored and nothing reads it) | Reported to the user; never a how-to, never presented as working |
 | A product message that tells the reader to do what they cannot | Reported to the user as a finding about the product; the troubleshooting entry gives the request |
 | The fix for a failure is on a screen the reader cannot open | The troubleshooting entry gives the request and what to tell the other person |
+
+### Roles the reader cannot hold
+
+The guide is written for the reader's own role. The vendor's or host's operator, staff and
+super-user accounts are roles the reader cannot hold. Neither they nor the screens, settings,
+permissions and steps only they see are named or hinted at.
+
+| Not written | Written |
+|---|---|
+| "Only staff see this setting." | Nothing, or the request for its outcome |
+| "This setting is not switched on yet." | Nothing |
+| "No role can be given this permission." | Nothing: it is not in the list of permissions |
+| "Support staff change this in the admin area." | "Contact support and ask for the change." |
+
+- **Collect the facts as the reader's role.** What the reader's own screens show is the fact list.
+  Code that serves another role is read to learn what is out of reach, and stays out of the guide.
+- **No traces.** A guide that says what is missing, hidden or reserved tells the reader about the
+  roles it hides. Describe what the reader sees and does, and stop there.
+- **Documented elsewhere.** Those roles and screens belong in the operator's own technical guide.
 
 ## Outline
 
@@ -246,9 +266,10 @@ is. A reader who cannot see the image still has the words.
 
 - One screenshot per screen the reader must find their way around, not one per step.
 - **Taken signed in as the guide's reader**, with the role and permissions the guide states, never
-  with an account that has more access. An administrator's screenshot in a member's guide shows
-  menu entries, buttons and panels the reader does not have. When no such account exists, create
-  one, or ask the user for one.
+  as a super-user or with any account that has more access. An administrator's screenshot in a
+  member's guide shows menu entries, buttons, tabs, settings and panels the reader does not have,
+  and so shows the reader that hidden roles exist. When no such account exists, create one, or ask
+  the user for one.
 - Taken from a real instance with realistic but invented data. Never a screenshot holding real
   customer data, an e-mail address, an order of a real person, a key or a password: blur a key or a
   token the screen shows, and say so in the caption.
