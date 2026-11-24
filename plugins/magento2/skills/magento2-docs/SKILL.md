@@ -46,6 +46,7 @@ Read these into the fact list before writing. The path is relative to the module
 | Settings | `etc/adminhtml/system.xml` | Tab, section, group and field `label`s; `comment` and `tooltip` (the screen's own explanation); `showInDefault`, `showInWebsite`, `showInStore` (where it can be set); `depends` (when it is visible); `source_model` (read its `toOptionArray()` for the option labels); `backend_model` (validation, encryption) | User Guide (labels, effect, options, where it applies); technical (path `section/group/field`) |
 | Defaults | `etc/config.xml` | The value under the same `section/group/field`; map it to the option's label for the User Guide | both |
 | Permissions | `etc/acl.xml` | Each resource's `title`, nested as the **Role Resources** tree shows it; the `id` for the technical docs | User Guide (as a task); technical (ID table) |
+| Who can open what | The `resource` attribute of each `menu.xml` item; `<resource>` of each `system.xml` section; `ADMIN_RESOURCE` in each admin controller; `<resource ref>` of each `webapi.xml` route | A role without the resource does not see the menu entry or the settings section, and opening the address shows the Admin's access-denied page. A setting whose value is locked in the deployment configuration (`config:set --lock-env` or `--lock-config`) is shown greyed out: the admin cannot change it | Every document: the reach column of the fact list (`method.md` §The reader and their reach) |
 | Grids, forms, buttons | `view/adminhtml/ui_component/*.xml`, button classes under `Block/Adminhtml/` | Column, filter, field and fieldset `label`s; mass actions; button `label` from `getButtonData()`; `notice` texts | User Guide |
 | Exact wording | `i18n/en_US.csv` and the other locales | The first column is the source string; a guide in another language uses that locale's second column | both |
 | Messages the admin sees | Controllers and services | `addSuccessMessage`, `addErrorMessage`, `addNoticeMessage`, `addWarningMessage`, and `LocalizedException(__('…'))` texts | User Guide troubleshooting (as the admin sees them); technical troubleshooting |
@@ -170,6 +171,13 @@ On top of the core skill's conditions:
 - **User Guide, condition 10 (plain language):** no configuration path, ACL ID, command, class,
   table or XML name in the body; a step that needs a developer says so and links the Installation
   or Developer Guide.
+- **User Guide, condition 13 (reach):** the fact list records the ACL resource behind each screen
+  and each settings section. The guide's reader is a store admin whose role holds the module's
+  resources, and a how-to names the resource it needs, by its title, as a prerequisite. What only a
+  developer or whoever hosts the store can do (a command, a deployment, a setting locked in the
+  deployment configuration and shown greyed out) is the request in one sentence, with a link to the
+  Installation or Developer Guide. When the guide is for an admin with a limited role, screenshots
+  are taken with a user of that role, not with the store's main administrator.
 - **Installation Guide:** every cron job, queue consumer, indexer and cache type the module relies
   on is named with how to check it runs; uninstall lists the tables of `db_schema.xml`, the
   configuration paths and any data the patches wrote, and every store-wide setting the setup

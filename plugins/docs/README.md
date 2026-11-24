@@ -15,15 +15,26 @@ Each skill has three modes — **Write**, **Update** and **Review** — and its 
 `references/quality-bar.md`, used by the author for the self-check and by the reviewer, numbered the
 same in both.
 
+Both skills write for **one reader, within that reader's reach**: a document holds what its reader
+can open, run or call, on the product as it is today. A screen that only someone with more access
+can open (the vendor's own staff, an operator) is documented for that person, in the technical
+skill's administration guide, and where the reader needs its result the user guide gives the
+request: who to ask, and for what. A change in who may use something is therefore a change in what
+each document holds. The body tells the product as it is; what changed is told in the document
+history or the migration notes. A help page edited as part of a code change is an Update: load the
+skill for the page's reader.
+
 ## Stacks
 
 The skills name no framework. A stack plugin adds a docs skill that says where its framework keeps
 the facts (screens, settings, permissions, messages, commands, endpoints), which document each
-belongs in, how the platform's own documentation words things, and the front matter of a guide:
+belongs in, where the framework writes down who may open each of them, how the platform's own
+documentation words things, and the front matter of a guide:
 
 | Stack plugin | Docs skill |
 |---|---|
 | `magento2` | `magento2:magento2-docs` |
+| `symfony` | `symfony:symfony-docs` |
 
 ## Rendering
 

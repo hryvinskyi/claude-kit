@@ -1,0 +1,74 @@
+--- a/app/access.php
++++ b/app/access.php
+@@ -21,10 +21,10 @@
+     'actions' => [
+         'members.invite' => 'team_admin',
+         'members.remove' => 'team_admin',
+-        'tokens.create' => 'team_admin',
++        'tokens.create' => 'staff',
+         'tokens.revoke' => 'agent',
+         'security.session_hours' => 'team_admin',
+-        'security.two_step' => 'team_admin',
++        'security.two_step' => 'staff',
+         'teams.close' => 'staff',
+     ],
+ ];
+--- a/app/labels.en.php
++++ b/app/labels.en.php
+@@ -8,7 +8,7 @@
+ return [
+     'menu.inbox' => 'Inbox',
+     'menu.requests' => 'Requests',
+-    'menu.replies' => 'Saved replies',
++    'menu.replies' => 'Templates',
+     'menu.team' => 'Team',
+     'menu.members' => 'Members',
+     'menu.security' => 'Security',
+@@ -52,10 +52,11 @@
+     'tokens.revoke' => 'Revoke',
+     'tokens.revoked' => 'The token was revoked. It stops working at once.',
+     'tokens.shown_once' => 'Copy the token now. It is shown only once.',
++    'tokens.none' => 'You have no access tokens. The Acme support team creates them: write to support@acme.example and say what the token is for.',
+ 
+-    'replies.title' => 'Saved replies',
+-    'replies.new' => 'New saved reply',
+-    'replies.none' => 'No saved replies yet.',
++    'replies.title' => 'Templates',
++    'replies.new' => 'New template',
++    'replies.none' => 'No templates yet.',
+ 
+     'staff.teams.title' => 'Teams',
+     'staff.teams.status.open' => 'Open',
+--- a/app/screens/replies.php
++++ b/app/screens/replies.php
+@@ -1,6 +1,6 @@
+ <?php
+ /**
+- * Inbox > Saved replies.
++ * Inbox > Templates.
+  *
+  * @var list<array{title: string, text: string}> $replies
+  * @var callable(string): string $t
+--- a/app/screens/security.php
++++ b/app/screens/security.php
+@@ -15,8 +15,10 @@
+     </label>
+     <p><?= $t('security.session_hours.help') ?></p>
+ 
++    <?php if ($viewer->can('security.two_step')): ?>
+     <label><input type="checkbox" name="two_step" <?= $settings['two_step'] ? 'checked' : '' ?>> <?= $t('security.two_step') ?></label>
+     <p><?= $t('security.two_step.help') ?></p>
++    <?php endif ?>
+ 
+     <button><?= $t('security.save') ?></button>
+ </form>
+--- a/app/screens/tokens.php
++++ b/app/screens/tokens.php
+@@ -36,3 +36,7 @@
+     <?php endforeach ?>
+     </tbody>
+ </table>
++
++<?php if ($tokens === [] && !$viewer->can('tokens.create')): ?>
++<p><?= $t('tokens.none') ?></p>
++<?php endif ?>

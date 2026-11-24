@@ -1,0 +1,23 @@
+{% extends 'base.html.twig' %}
+
+{% block body %}
+<h1>{{ 'members.title'|trans }}</h1>
+
+<form method="post" action="{{ path('admin_members_invite') }}">
+    <label>{{ 'members.email'|trans }} <input type="email" name="email" required></label>
+    <button>{{ 'members.invite'|trans }}</button>
+</form>
+
+<table>
+    {% for member in members %}
+        <tr>
+            <td>{{ member.email }}</td>
+            <td>
+                {% if is_granted('ROLE_STAFF') %}
+                    <a href="{{ path('note_list', {'_switch_user': member.email}) }}">{{ 'members.sign_in_as'|trans }}</a>
+                {% endif %}
+            </td>
+        </tr>
+    {% endfor %}
+</table>
+{% endblock %}

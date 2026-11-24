@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<body>
+<nav>
+    <a href="{{ path('note_list') }}">{{ 'menu.notes'|trans }}</a>
+    {% if is_granted('ROLE_ADMIN') %}
+        <span>{{ 'menu.admin'|trans }}</span>
+        <a href="{{ path('admin_members') }}">{{ 'menu.members'|trans }}</a>
+        {% if is_granted('ROLE_STAFF') %}
+            <a href="{{ path('admin_billing') }}">{{ 'menu.billing'|trans }}</a>
+            <a href="{{ path('admin_export') }}">{{ 'menu.export'|trans }}</a>
+        {% endif %}
+    {% endif %}
+</nav>
+{% for message in app.flashes('success') %}<p class="flash">{{ message|trans }}</p>{% endfor %}
+{% block body %}{% endblock %}
+</body>
+</html>

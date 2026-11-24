@@ -1,0 +1,9 @@
+{% extends 'base.html.twig' %}
+
+{% block body %}
+<form method="post">
+    <label>{{ 'notes.title'|trans }} <input name="title" required></label>
+    <label>{{ 'notes.text'|trans }} <textarea name="text"></textarea></label>
+    <button>{{ 'notes.save'|trans }}</button>
+</form>
+{% endblock %}

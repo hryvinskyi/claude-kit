@@ -1,0 +1,6 @@
+{% extends 'base.html.twig' %}
+
+{% block body %}
+<h1>{{ 'billing.title'|trans }}</h1>
+{% for invoice in invoices %}<p>{{ invoice.number }}</p>{% endfor %}
+{% endblock %}

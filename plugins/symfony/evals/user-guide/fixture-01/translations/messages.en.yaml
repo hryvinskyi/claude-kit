@@ -1,0 +1,24 @@
+menu.notes: Notes
+menu.admin: Admin
+menu.members: Members
+menu.billing: Billing
+menu.export: Data export
+
+members.title: Members
+members.email: Email
+members.invite: Invite a member
+members.invited: The invitation was sent.
+members.sign_in_as: Sign in as this member
+
+notes.new: New note
+notes.edit: Edit note
+notes.title: Title
+notes.text: Text
+notes.save: Save note
+notes.only_author: Only the author can edit this note.
+
+billing.title: Billing
+
+export.title: Data export
+export.start: Start export
+export.started: The export was started.

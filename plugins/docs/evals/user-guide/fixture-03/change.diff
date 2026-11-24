@@ -1,0 +1,155 @@
+--- a/app/access.php
++++ b/app/access.php
+@@ -16,6 +16,7 @@
+         'team.members' => ['role' => 'team_admin', 'menu' => ['menu.team', 'menu.members']],
+         'team.security' => ['role' => 'team_admin', 'menu' => ['menu.team', 'menu.security']],
+         'account.tokens' => ['role' => 'agent', 'menu' => ['menu.account', 'menu.tokens']],
++        'account.notifications' => ['role' => 'agent', 'menu' => ['menu.account', 'menu.notifications']],
+         'staff.teams' => ['role' => 'staff', 'menu' => ['menu.staff', 'menu.teams']],
+     ],
+     'actions' => [
+@@ -26,5 +27,9 @@
+         'security.session_hours' => 'team_admin',
+         'security.two_step' => 'staff',
+         'teams.close' => 'staff',
++        'requests.archive' => 'agent',
++        'requests.unarchive' => 'agent',
++        'requests.export' => 'team_admin',
++        'requests.purge' => 'staff',
+     ],
+ ];
+--- a/app/archive.php
++++ b/app/archive.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++/**
++ * Limits of the archive.
++ */
++return [
++    'batch_limit' => 50,
++    'kept_days' => 365,
++];
+--- a/app/jobs.php
++++ b/app/jobs.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++/**
++ * What runs without a person: the name of each job and when it runs.
++ */
++return [
++    'archive.cleanup' => 'daily at 03:00',
++    'export.build' => 'when an export is asked for',
++];
+--- a/app/labels.en.php
++++ b/app/labels.en.php
+@@ -14,6 +14,7 @@
+     'menu.security' => 'Security',
+     'menu.account' => 'Account',
+     'menu.tokens' => 'Access tokens',
++    'menu.notifications' => 'Notifications',
+     'menu.staff' => 'Staff',
+     'menu.teams' => 'Teams',
+ 
+@@ -57,6 +58,26 @@
+     'replies.title' => 'Templates',
+     'replies.new' => 'New template',
+     'replies.none' => 'No templates yet.',
++
++    'requests.title' => 'Requests',
++    'requests.show' => 'Show',
++    'requests.show.open' => 'Open',
++    'requests.show.archived' => 'Archived',
++    'requests.archive' => 'Archive',
++    'requests.archived' => '%count% requests archived.',
++    'requests.archive_limit' => 'You can archive up to 50 requests at a time. Select fewer and try again.',
++    'requests.archive_note' => 'An archived request is deleted 365 days after it was archived.',
++    'requests.unarchive' => 'Bring back',
++    'requests.unarchived' => 'The request is back in your open requests.',
++    'requests.export' => 'Export archived requests',
++    'requests.export_started' => 'We are preparing the file. You will get an email with it in a few minutes.',
++    'requests.export_empty' => 'There is nothing to export: no request is archived.',
++    'requests.purge' => 'Delete for good',
++
++    'notifications.title' => 'Notifications',
++    'notifications.weekly_summary' => 'Email me a weekly summary',
++    'notifications.save' => 'Save',
++    'notifications.saved' => 'Notification settings saved.',
+ 
+     'staff.teams.title' => 'Teams',
+     'staff.teams.status.open' => 'Open',
+--- a/app/screens/notifications.php
++++ b/app/screens/notifications.php
+@@ -0,0 +1,14 @@
++<?php
++/**
++ * Account > Notifications.
++ *
++ * @var array{weekly_summary: bool} $settings
++ * @var callable(string): string $t
++ */
++?>
++<h1><?= $t('notifications.title') ?></h1>
++
++<form method="post" action="/account/notifications">
++    <label><input type="checkbox" name="weekly_summary" <?= $settings['weekly_summary'] ? 'checked' : '' ?>> <?= $t('notifications.weekly_summary') ?></label>
++    <button><?= $t('notifications.save') ?></button>
++</form>
+--- a/app/screens/requests.php
++++ b/app/screens/requests.php
+@@ -3,19 +3,50 @@
+  * Inbox > Requests.
+  *
+  * @var \Acme\Desk\Viewer $viewer
++ * @var string $show 'open' or 'archived'
+  * @var list<array{id: int, subject: string, customer: string, answered: bool}> $requests
+  * @var callable(string): string $t
+  */
+ ?>
+ <h1><?= $t('requests.title') ?></h1>
+ 
++<form method="get" action="/inbox/requests">
++    <label><?= $t('requests.show') ?>
++        <select name="show">
++            <option value="open" <?= $show === 'open' ? 'selected' : '' ?>><?= $t('requests.show.open') ?></option>
++            <option value="archived" <?= $show === 'archived' ? 'selected' : '' ?>><?= $t('requests.show.archived') ?></option>
++        </select>
++    </label>
++</form>
++
++<?php if ($show === 'archived'): ?>
++<p><?= $t('requests.archive_note') ?></p>
++<?php if ($viewer->can('requests.export')): ?>
++<form method="post" action="/inbox/requests/export"><button><?= $t('requests.export') ?></button></form>
++<?php endif ?>
++<?php endif ?>
++
++<form method="post" action="/inbox/requests/archive">
+ <table>
+     <tbody>
+     <?php foreach ($requests as $request): ?>
+         <tr>
++            <?php if ($show === 'open' && $viewer->can('requests.archive')): ?>
++            <td><input type="checkbox" name="ids[]" value="<?= $request['id'] ?>"></td>
++            <?php endif ?>
+             <td><a href="/inbox/requests/<?= $request['id'] ?>"><?= htmlspecialchars($request['subject']) ?></a></td>
+             <td><?= htmlspecialchars($request['customer']) ?></td>
++            <?php if ($show === 'archived'): ?>
++            <td>
++                <?php if ($viewer->can('requests.unarchive')): ?><button name="unarchive" value="<?= $request['id'] ?>"><?= $t('requests.unarchive') ?></button><?php endif ?>
++                <?php if ($viewer->can('requests.purge')): ?><button name="purge" value="<?= $request['id'] ?>"><?= $t('requests.purge') ?></button><?php endif ?>
++            </td>
++            <?php endif ?>
+         </tr>
+     <?php endforeach ?>
+     </tbody>
+ </table>
++<?php if ($show === 'open' && $viewer->can('requests.archive')): ?>
++<button><?= $t('requests.archive') ?></button>
++<?php endif ?>
++</form>

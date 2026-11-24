@@ -1,0 +1,15 @@
+{
+    "name": "acme/notes",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.3",
+        "symfony/framework-bundle": "^7.4",
+        "symfony/security-bundle": "^7.4",
+        "symfony/translation": "^7.4",
+        "symfony/twig-bundle": "^7.4"
+    },
+    "autoload": {
+        "psr-4": { "Acme\\Notes\\": "src/" }
+    }
+}

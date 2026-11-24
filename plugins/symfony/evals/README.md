@@ -34,3 +34,15 @@ and its R4 is not scored.
   on nothing; a run that finds nothing fails. fixture-01 scores recall on the project's checks;
   this one scores the rubric's checks and what a reviewer that edits plans does to the parts
   that were right.
+
+## Skill evals
+
+`user-guide/fixture-01` + `expected-01.md` evaluates `docs:user-guide` in Review mode together
+with this plugin's `symfony:symfony-docs`, by the procedure of `plugins/docs/evals/README.md`, with
+`--plugin-dir` for `architecture`, `docs` and `symfony`. "Acme Notes" is a Symfony-shaped project
+with no `vendor/`; its guide for the workspace admin holds six seeded flaws that only the code
+decides: a staff screen behind a class-level `#[IsGranted]`, a path an `access_control` rule above
+`^/admin` closes, a link drawn only inside `is_granted('ROLE_STAFF')`, an edit a voter gives to the
+author alone, a role constant in the body, and a label that is not the catalogue's. Three decoys
+stand: a member's screen the admin holds through the role hierarchy, a flash message quoted as the
+catalogue has it, and the admin's own screen.

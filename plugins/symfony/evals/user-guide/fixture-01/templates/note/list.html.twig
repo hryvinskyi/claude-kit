@@ -1,0 +1,14 @@
+{% extends 'base.html.twig' %}
+
+{% block body %}
+<h1>{{ 'menu.notes'|trans }}</h1>
+<a href="{{ path('note_new') }}">{{ 'notes.new'|trans }}</a>
+{% for note in notes %}
+    <article>
+        <h2>{{ note.title }}</h2>
+        {% if is_granted('NOTE_EDIT', note) %}
+            <a href="{{ path('note_edit', {id: note.id}) }}">{{ 'notes.edit'|trans }}</a>
+        {% endif %}
+    </article>
+{% endfor %}
+{% endblock %}
