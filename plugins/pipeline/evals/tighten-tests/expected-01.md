@@ -29,7 +29,7 @@ Then, from the run's own files in `<run>/checkout/.tighten/`:
 | ID | Expectation | Check |
 |----|-------------|-------|
 | T10 | Every test that left is in the verdicts, and every `delete` is gone | `pipeline-suite diff --before .tighten/before.xml --after .tighten/after.xml --verdicts .tighten/verdicts.json --root .` exits 0 |
-| T11 | Every verdict that removed or changed a test carries its proof | `pipeline-suite check .tighten/verdicts.json --root . --ready` exits 0 |
+| T11 | Every verdict that removed or changed a test carries its proof | `pipeline-suite check .tighten/verdicts.json --root . --ready` exits 0 in the tree the verdicts were read in: the run's base commit (`git archive HEAD` of the copy) with the run's `.tighten/` copied beside it. In the edited tree it cannot pass, because the lines it quotes are the ones the run deleted |
 | T12 | Only tests changed | `git status --porcelain` lists paths under `tests/` and `.tighten/` only |
 | T13 | The report names each hole as a finding, what the defenders saved, and what was not judged | the session's answer in `run.json` |
 
@@ -41,3 +41,12 @@ level where there were 24, and both holes closed: that is what a full score look
 ## Calibration
 
 See `runs.log`, which the first run creates.
+
+- **First run, Opus (2026-11-24): FAIL on T6 alone.** The command moved the decoy *a state nobody
+  defined has no label page* from the route to a new unit test of the handler, proven by a mutation
+  run, and the suite still catches every defect the old one caught (T3). The key keeps that test at
+  the integration level as the one refusal of the label route; the run's judge and its defender read
+  it as a branch the handler decides alone, behind a route whose joining the `booked` row proves, and
+  `src/app.js` passes a handler's status through as it is. Which reading holds is a question about
+  the key, settled by a mutant that only the integration test catches or by the owner's word, never
+  by this run's result. Until then the key stands as written and the run is a FAIL.
