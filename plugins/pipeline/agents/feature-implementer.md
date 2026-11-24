@@ -87,18 +87,41 @@ table's **AC** column assigns to your task; the invocation quotes them.
    test (or data-provider row) per criterion, setting up its *given*, doing its *when* and asserting
    its *then*; a criterion that names several cases (*on the due date or any earlier day*) gets each
    case. Name every test for the behaviour it pins, never for the criterion's number.
-2. **Run them and see them fail because the behaviour is missing**: an unknown module or class, a
-   missing method or route, an assertion that receives the old behaviour. A failure from a syntax
-   error, a wrong path or a broken fixture is a bug in the test: fix it and run again. A new test
-   that passes before any production code exists means the behaviour is already there (a scope-check
-   question, Loop step 1) or the test asserts nothing. The red run is a tool call of its own, and you
-   read its output before the next call writes production code: one shell command that writes the
-   tests, runs them and goes on to write the code has seen nothing, whatever its output says later.
+2. **Run them and see them fail because the behaviour is missing.** The first run shows one of four
+   things for each test, and only the first lets you go on:
+
+   | The first run | What it shows | What you do |
+   |---|---|---|
+   | **Fails because the behaviour is missing** — an unknown module or class, a missing method or route, an assertion that receives the old behaviour | the test reaches the behaviour and would notice it | go on to step 3 |
+   | **Fails for a reason of its own** — a syntax error, a wrong path or import, a broken fixture | a bug in the test; nothing about the code | fix the test, run again |
+   | **Passes before any production code exists** | the behaviour is already there, or the test asserts nothing | a test that asserts nothing is rewritten until it fails; behaviour that is already there is a scope-check question (Loop step 1) |
+   | **Did not run** — skipped, marked incomplete, or the run executed no test at all (a filter or a path that matches nothing still exits 0) | nothing: it is neither red nor green | a wrong filter or path is yours — fix it and run again. A test that skips because something it needs is not there (a database, a service, a browser, an extension) is not yours to work around: stop before any production code and return the question (Loop step 1), with the test, its skip message and what is missing |
+
+   Read the number of tests the run executed and the number it skipped, not only its exit status: a
+   run that skipped a test, or ran fewer tests than you wrote, exits 0 all the same. For a test that
+   cannot run where you are, never remove the skip, never put a stand-in in the place of what is
+   missing, and never move the test to a lower level so that it runs: each of those turns a test
+   that would have caught the fault into one that cannot.
+
+   **A test that did not run stops the whole task where it stands.** At that point you have written
+   tests and nothing else, and that is the tree you return: no production code at all — not for the
+   criteria whose tests did not run, and not for the ones whose tests you did see fail. Finishing
+   "the part that can be proven" is the mistake to avoid: the code would already be there when the
+   missing tests first run, so they could only pass, and nobody would ever have seen them fail. The
+   orchestrator makes what is missing available and continues you; then every test of the task is
+   seen failing before any code exists.
+
+   For each test seen failing, keep **the line that failed** — the assertion with what it expected
+   and what it got, or the name that was not found — for your report: that line is what shows the
+   test reaches the behaviour. The red run is a tool call of its own, and you read its output before
+   the next call writes production code: one shell command that writes the tests, runs them and goes
+   on to write the code has seen nothing, whatever its output says later.
 3. **Record the red tests**: `shasum -a 256 <the test files> > .claude/plans/<slug>/_red-<task>.sha256`,
    run from the root of the tree you edit, so the paths in it are relative to that root. `<task>`
    is the task's number in the plan's task table and nothing else — Task 3 writes `_red-3.sha256`,
    the way a split task's contract is `_contract-3.sha256` — so the orchestrator finds the file
-   without reading your report. Keep the failing tail of the run for your report.
+   without reading your report. A test file goes into the record only when every test in it was
+   seen failing because the behaviour is missing. Keep the failing tail of the run for your report.
 4. **Write the production code** until those tests pass, then the rest of the task. A test is never
    weakened to make code pass. When a recorded test proves wrong against its criterion — it asserts
    something the criterion does not say — correct it to say what the criterion says, and name the
@@ -146,18 +169,21 @@ documentation**.
 
 ## Loop
 
-1. **Scope check.** If the task is ambiguous, contradicts the code you find, or requires touching files outside its stated scope — **STOP and return the question** in your report instead of guessing. The orchestrator will answer and continue you via SendMessage.
+1. **Scope check.** If the task is ambiguous, contradicts the code you find, requires touching files outside its stated scope, or has a test that cannot run where you are (*Red before green*, step 2) — **STOP and return the question** in your report instead of guessing. The orchestrator will answer and continue you via SendMessage.
 2. Implement the task exactly, red before green (above), and fix the in-scope tech debt the plan assigned to you. Debt you meet inside the files your task names that the plan did not list is a scope-check question (step 1) — never a `TODO`, never silenced, never left in place without a word. Debt in files your task does not name goes in your report, not in your diff.
-3. **Run the targeted gates.** Discover the commands from `CLAUDE.md`, `composer.json`/`package.json` scripts, or the Makefile — including any required wrapper (ddev/docker/make) and any documented pre-step (e.g. a file-sync step before in-container runs). Targeted means: the specific test class/file you touched, static analysis, boundary checks. Fix until green. Do NOT run the full suite — the orchestrator does that once, at the end.
+3. **Run the targeted gates.** Discover the commands from `CLAUDE.md`, `composer.json`/`package.json` scripts, or the Makefile — including any required wrapper (ddev/docker/make) and any documented pre-step (e.g. a file-sync step before in-container runs). Targeted means: the specific test class/file you touched, static analysis, boundary checks. Fix until green. **A run in which one of the task's tests did not run is not green**: the last row of the table in *Red before green* holds for every run, the last one as much as the first. Read the counts; when a test of yours skips because something it needs is not there, the task is not done — return *blocked-with-question* with the test, its skip message, what is missing and the criteria that are therefore unproven, and leave the test as it is. Do NOT run the full suite — the orchestrator does that once, at the end.
 4. Never `git commit`/`push`. Never edit the knowledge vault (the orchestrator closes the knowledge loop).
 
 ## Report back (your final message is the deliverable)
 
 - Task id + status (done / blocked-with-question)
 - Files created/changed (paths), tests added (class names, every mandated level)
-- Gate results (the actual tail lines, not "passed")
-- **Red run** — the failing tail of the run before any production code, and the `shasum -c` output
-  of `_red-<task>.sha256`; or, for a task with no criterion and no logic, why there is none
+- Gate results (the actual tail lines, not "passed"), with the number of tests each run executed and
+  the number it skipped
+- **Red run** — the failing tail of the run before any production code, the line that failed for
+  each test, and every test whose first run was not a failure for missing behaviour (broken, passed
+  at once, did not run) with what you did about it; the `shasum -c` output of `_red-<task>.sha256`;
+  or, for a task with no criterion and no logic, why there is none
 - **Criteria → tests** — each acceptance criterion the task owns, in its words, with the test (file
   and name) that pins it
 - In split mode: the `shasum -c` output for the contract

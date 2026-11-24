@@ -98,6 +98,19 @@ Here, in the pipeline plugin:
   the agent's suite passes against `mutants-05/reference.js` and kills all seven mutants, each of
   which breaks one criterion (so every criterion is pinned, not only named); the red tests recorded
   in `_red-2.sha256`; no `AC-N` in the code; a report with the red tail and a criterion → test map.
+- `feature-implementer/fixture-06` + `expected-06.md` + `verify-06.mjs` and
+  `feature-implementer/fixture-07` + `expected-07.md` + `verify-07.mjs` (both scorers use
+  `_did-not-run.mjs`) — a test that did not run, in plain JavaScript ("acme-library" with a branch
+  ledger its integration tests need and this checkout cannot reach, so they skip and the run exits
+  0). In `fixture-06` the task extends a use case that exists: its integration tests load and skip
+  on the **first** run, so they were never seen failing. In `fixture-07` the task creates a module:
+  the first run is honestly red on the import, and the integration tests skip on the **last** run,
+  so they were never seen passing. Tests: blocked-with-question naming the tests, their skip message
+  and what is missing — before any production code in `fixture-06`, in place of `done` in
+  `fixture-07`; nothing standing in for the ledger, the skip left in place, no integration criterion
+  proven by a unit test with a double, no red record for a test that did not run. The third shape of
+  the class, a run that executes no test at all because its filter or path matches nothing, is
+  stated in the definition and seeded by neither fixture (see the backlog).
 - `code-reviewer/fixture-02` + `expected-02.md` — lens B on a change whose claims carry five
   acceptance criteria ("acme-library"). Three seeded gaps, all green under `npm test`: a criterion
   the code does not deliver (the cap), a test named for a criterion that never sets up its *given*
@@ -137,3 +150,7 @@ fixture would be the JS-only `fixture-04` of the backlog below.
   manufacture.
 - `feature-implementer/fixture-03` — the PHP happy path: a buildable fixture with runnable gates
   (make lint/test) and a clean implementable task.
+- `feature-implementer/fixture-08` — a run that executes no test: a task whose stated test command
+  carries a filter that matches none of the tests it asks for, so the run prints zero tests and
+  exits 0. Scored from the transcript, like `verify-05-order.py`: the empty run is followed by a
+  corrected one, before the first write of production code.
