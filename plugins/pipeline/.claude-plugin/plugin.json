@@ -1,10 +1,10 @@
 {
   "name": "pipeline",
-  "version": "0.4.0",
-  "description": "Plan, review and implement features: the feature pipeline sized to the change, the review command (its wave, verification and ranking run as a workflow) and the bug-fix command, pipeline-decide for an optional decision model, pipeline-progress for the record a stopped feature run is resumed from, the devils-advocate plan reviewer, the fresh-context code-reviewer, the finding-verifier that judges each review finding, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents.",
+  "version": "0.5.0",
+  "description": "Plan, review and implement features: the feature pipeline sized to the change, the review command (its wave, verification and ranking run as a workflow) and the bug-fix command, the test-value rubric for what a test is for and the tighten-tests command that prunes a suite by it, pipeline-decide for an optional decision model, pipeline-progress for the record a stopped feature run is resumed from, pipeline-suite for a suite's census and the account of what left it, the devils-advocate plan reviewer, the fresh-context code-reviewer, the finding-verifier that judges each review finding, the test-judge that judges and defends tests, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents.",
   "author": { "name": "Volodymyr Hryvinskyi", "url": "https://github.com/hryvinskyi" },
   "repository": "https://github.com/hryvinskyi/claude-kit",
   "license": "MIT",
-  "keywords": ["planning", "code-review", "agents", "evals", "tdd"],
+  "keywords": ["planning", "code-review", "agents", "evals", "tdd", "tests"],
   "dependencies": ["architecture"]
 }

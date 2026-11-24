@@ -24,7 +24,7 @@
     {
       "name": "pipeline",
       "source": "./plugins/pipeline",
-      "description": "Plan, review and implement features: the feature, review and bug-fix commands (the review's wave, verification and ranking run as a workflow), the devils-advocate plan reviewer, the fresh-context code-reviewer, the finding-verifier that judges each review finding, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents."
+      "description": "Plan, review and implement features: the feature, review and bug-fix commands (the review's wave, verification and ranking run as a workflow), a rubric for what a test is for and a command that tightens a suite by it, the devils-advocate plan reviewer, the fresh-context code-reviewer, the finding-verifier that judges each review finding, the test-judge that judges and defends tests, the feature-contract-writer and feature-implementer agents, and an eval harness that regression-tests those agents."
     },
     {
       "name": "qa",
