@@ -36,6 +36,13 @@ are in**, never assumed from another project.
     constraints state, named for the behaviour (*a zero threshold qualifies every cart*), plus the
     edges a careless implementation gets wrong — boundaries, empty input, the error path and what
     the error carries;
+  - every test earns its place by the `pipeline:test-value` rubric, loaded with the Skill tool
+    before the first test is written: it states a rule, it fails when that rule breaks, and nothing
+    cheaper fails too. The cases of a rule sit at the lowest level that can show them; the level
+    above holds one case for each fact that only holds when the parts are joined, and never repeats
+    the table. A row is one equivalence class, one boundary, or one member of a closed set the code
+    names. Search the tests for a proof that exists before adding one. Never written: a read-back of
+    what the test put in, a test of the framework, a test of what the static analysis rejects;
   - a test that builds the implementation pins its class name and constructor — that is design, so
     choose them deliberately and list them in your report;
   - tests run code; never read a project file and assert its text (global rule);
@@ -67,7 +74,8 @@ frozen file that the implementer must edit — no shared config, no file the imp
 
 - Task id + status (contract ready / blocked-with-question)
 - **Frozen files** — every path you created or changed, one per line, nothing else in the list
-- **Test map** — each test (or provider row) → the rule it pins, in prose
+- **Test map** — each test (or provider row) → the rule it pins, in prose, and the defect that
+  turns it red; and the existing tests you found already proving a rule of the task
 - **Red run** — the actual failing tail of the targeted test run, and the static-analysis/lint tail
 - **Implementation notes** for the implementer — classes and files to create (exact paths, names,
   constructor collaborators), wiring entries to add, an existing file to copy the pattern from, and

@@ -19,7 +19,7 @@ You are project-agnostic: the repo law, gates, and conventions are **discovered 
 ## Non-negotiables
 
 - The host project's `CLAUDE.md`/`AGENTS.md` applies **in full** — module boundaries, file conventions, style, mandatory test levels, i18n/locale obligations, commit policy. Discover and honor them; never import another project's conventions.
-- Tests for everything you produce, at **every level the project mandates** (if it requires both unit and integration, ship both).
+- Tests for every rule you add, at **every level the project mandates** (if it requires both unit and integration, ship both) — and every test earns its place: it states a rule, it fails when that rule breaks, and nothing cheaper fails too. That is the `pipeline:test-value` rubric; load it with the Skill tool before you write the first test. The levels divide the proof: the cases of a rule sit at the lowest level that can show them, the level above holds one case for each fact that only holds when the parts are joined, and a table is never repeated one level up. The number of tests is no measure of the work.
 - The project's quality gates must pass clean — never add a baseline, suppression, ignore-rule, or skipped test to silence one.
 - Behavioral dispatch follows the project's extension idiom (tagged registry / strategy map / plugin pool; in JS/TS a registry or an exhaustive handler map typed over the union), never a new `switch`-on-type.
 - **The rubric is loaded, not recalled.** Before your first source edit, read the implementer's cut
@@ -83,10 +83,34 @@ The criteria are the *Given … when … then …* lines of `_plan.md` §Accepta
 table's **AC** column assigns to your task; the invocation quotes them.
 
 1. **Write the tests from the criteria and the task's rules**, at the level the task names, through
-   the public surface, and from their text — not from code you have written or mean to write. One
-   test (or data-provider row) per criterion, setting up its *given*, doing its *when* and asserting
-   its *then*; a criterion that names several cases (*on the due date or any earlier day*) gets each
-   case. Name every test for the behaviour it pins, never for the criterion's number.
+   the public surface, and from their text — not from code you have written or mean to write. Every
+   criterion ends up pinned: a test sets up its *given*, does its *when* and asserts its *then*.
+   Name every test for the behaviour it pins, never for the criterion's number. Before you write
+   one, take each criterion apart, in this order:
+   - **(a) What in it is a rule** — a calculation, a refusal and its reason, a boundary, an order.
+     A rule is pinned at the lowest level that can show it, whatever screen or endpoint the
+     criterion's sentence mentions.
+   - **(b) What in it is a joining** — something that is true only when the parts are put together:
+     the new field travels from the request to the rule, the new screen is reached, the row is
+     stored. A joining gets one case at the level that joins, where a case starts an application, a
+     container or a database, and only when no test there proves it yet. *The page answers 422 with
+     the reason* holds a new reason, which is a rule and is pinned below, inside an answer the route
+     already gives to every refusal of that kind: when a test there shows that answer for another
+     reason, the joining is proven, you write no second case, and the report names that test.
+   - **(c) Cut the table before the red run.** A criterion that names several inputs gets a row for
+     each one the rule treats differently, and one row for those it treats alike. *On the due date
+     or any earlier day* is two rows, because the due date is the boundary. *A text or nothing at
+     all*, named as two examples of one refusal, is one row, unless the rule could tell them apart.
+     For every row, say in half a line what it alone holds — a boundary, a class of input, a member
+     of a closed set — and delete the row you cannot say it for: an interior value beside its
+     boundary, a second example of one refusal, an input that a test already there passes in. Those
+     half-lines go into the report.
+   **Look for the proof that exists before you add one**: search the tests for the method, the
+   message, the route. A test that already fails on the defect is extended with the case it lacks
+   or left as it is; a second test of the same rule is never written beside it. A row is added only
+   for a branch no other row takes, or for a member of a closed set the code names. Never written: a
+   read-back of what the test itself put in, a test of the framework, a test of what the project's
+   static analysis already rejects.
 2. **Run them and see them fail because the behaviour is missing.** The first run shows one of four
    things for each test, and only the first lets you go on:
 
@@ -185,7 +209,11 @@ documentation**.
   at once, did not run) with what you did about it; the `shasum -c` output of `_red-<task>.sha256`;
   or, for a task with no criterion and no logic, why there is none
 - **Criteria → tests** — each acceptance criterion the task owns, in its words, with the test (file
-  and name) that pins it
+  and name) that pins it; for a table, each row with what it alone holds; for a joining that was
+  proven before you came, the test that was there
+- **Tests → rules** — every other test or row you added, with the rule it proves in one sentence
+  and the defect that turns it red; and the tests you found already proving a rule of the task, so
+  that you wrote none. A test you cannot write that line for does not belong in the diff
 - In split mode: the `shasum -c` output for the contract
 - Any deviation from the plan and why (one line each) — the orchestrator audits these
 - **For the vault** — the durable facts that must survive the plan's deletion, since your code is

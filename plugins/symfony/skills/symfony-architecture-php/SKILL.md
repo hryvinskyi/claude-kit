@@ -234,6 +234,26 @@ For simple read models, exposing an entity is a pragmatic shortcut — but the m
 - **Application tests** — exercise handlers against in-memory fake ports (a fake `OrderRepositoryInterface`); no DB needed to prove orchestration.
 - **Integration tests** — boot a real kernel + Postgres, exercise the adapter and wiring end-to-end; **do not mock the DB** (project rule). Run the suite with the parallel runner.
 
+**What each level is for.** With the `pipeline` plugin installed, `pipeline:test-value` is the rubric and this is its Symfony spelling. A domain or application test costs about a millisecond, a `KernelTestCase` test a tenth of a second or more, a `WebTestCase` request several tenths, and a kernel booted with a bundle set or an environment of its own costs a container compile, tens of seconds for each distinct set. So the cases of a rule — every refusal of a validator, every branch of a mapping, every state of a workflow — live in the first two kinds, and a kernel test holds **one case for each joining fact**:
+
+- the route reaches the controller, and the controller turns a refusal into this status and this body;
+- `#[IsGranted]` or the voter closes the address to whoever lacks the permission (with a valid CSRF token, or the token check answers first and the test proves nothing about the permission);
+- the form type maps the field, and the template prints it;
+- the query runs on the real database, and the constraint, the index or the row-level rule holds;
+- the transaction commits, and the listener or the message handler that is registered hears it;
+- a tagged service lands in its iterator; a decorator wraps what it should.
+
+What a kernel test never repeats: the validator's table through the route (one refusal proves the join, the table is one level down); a check the whole application already has once (translations present in every locale, the mapping in sync with the schema), copied into each package; a service fetched from the container to assert its class, which the container compile proves unless configuration chooses the class.
+
+A data provider on a kernel test boots the kernel once per row. Rows that only read the container are a loop inside one test, or a table one level down. A test that needs a container of its own (another environment, a bundle switched off) takes a set other tests already compile, when one answers the same question.
+
+| Candidate | Search | Innocent when |
+|---|---|---|
+| A table through the kernel | `rg -l 'extends (KernelTestCase\|WebTestCase\|ApiTestCase)' -g '*Test.php' \| xargs rg -c '#\[DataProvider'` | each row needs the container, the database or a request to take its branch |
+| A container of its own | `new \\?(App\\)?Kernel\(` in `**/tests/**` | the set differs in what the test is about, and no shared set answers the same question |
+| "The service exists" | `assertInstanceOf\(.*::class, .*(getContainer\(\)\|->get\()` | configuration chooses the class, and the test is about that choice |
+| A suite-wide check copied per package | `rg -o --no-filename 'function (test\w+)' -r '$1' -g '*Test.php' <test dirs> \| sort \| uniq -c \| sort -rn \| head -40` | each copy runs different production code |
+
 ```php
 // In-memory adapter makes application tests trivial and proves DIP
 final class InMemoryOrderRepository implements OrderRepositoryInterface

@@ -12,3 +12,7 @@ mean, and they bind as the standards do.
 ## Tests run code on Magento 2
 - Parsing `di.xml`/`config.xml`/layout XML in a test is reading a project file and asserting its structure.
 - The build step that compiles the container and proves the wiring is `setup:di:compile` (`bin/magento setup:di:compile`).
+
+## A test proves a rule on Magento 2
+- The cheapest level is a unit test with no application. An integration test bootstraps the application and applies its fixtures for every test method and for every data-provider row, so a table belongs in an integration test only when each row needs the application, the database or a request.
+- The gate that already proves wiring is `setup:di:compile`: a test that asks the object manager for a class and asserts its type proves what the compile proves, unless the type is chosen by the configuration the test is about.

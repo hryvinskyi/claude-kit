@@ -11,3 +11,8 @@ mean, and they bind as the standards do.
 ## Tests run code on Symfony
 - Parsing `services.yaml` in a test is reading a project file and asserting its structure.
 - The build step that compiles the container and proves the wiring is the container compile.
+
+## A test proves a rule on Symfony
+- The cheapest level is a plain PHPUnit test with no kernel. A `KernelTestCase` or `WebTestCase` test boots the kernel for every test method and for every data-provider row, so a table belongs in a kernel test only when each row needs the container, the database or a request.
+- The gates that already prove a fact are the container compile (a service exists, its dependencies resolve, an alias points somewhere) and the static analysis at the project's level. A test that fetches a service and asserts its class proves what the compile proves, unless the class is chosen by configuration the test is about.
+- The `symfony:symfony-architecture-php` skill, §Testing the layers, lists the joining facts a kernel test is for.

@@ -45,6 +45,17 @@ Every stack, every workflow, and every place above that asks for tests — "test
 - Wiring (a DI preference or argument, a plugin, an observer, a layout block, a service tag) is proven by what consumes it: an integration test through the real container or a real render, or the build step that reads it (a container compile, a production-mode deploy). If only that build step would catch a fault, say so and name the check — do not stand in for it with a file-reading test.
 - One met inside the blast radius is deleted, not extended.
 
+## A test proves a rule
+Every stack, every workflow, and every place above that asks for tests: tests "at every level the project mandates" are tests that each earn their place. The `pipeline:test-value` skill is the canonical statement; load it before writing or reviewing a test.
+- **Three questions.** A test states a rule of the product, in one sentence that names no method. It fails on a defect that breaks that rule. Nothing cheaper — the static analysis, a build step, another test — fails on the same defect. A test that has no answer to one of them is not written.
+- **Look before you add.** Search the tests for the proof that exists. Extend it with the case it lacks; never write a second test of the same rule beside it.
+- **The levels divide the proof.** The cases of a rule sit at the lowest level that can show them. The level above holds one case for each fact that only holds when the parts are joined: the route reaches the handler, the template prints the field, the query runs on the real database. When a project requires two levels for a change, the two tests prove different things, and the table is never repeated one level up.
+- **Rows.** One row for each equivalence class, each boundary, and each member of a closed set the code names. Two values of an open range that take the same branch are one row; a product of two lists is right only where the code makes them interact.
+- **Never written**: a read-back of what the test itself put in, a test of the language, the framework or a library, a test of what a gate already rejects.
+- **The count is no measure.** A report says which rules a change's tests prove, never how many tests it added.
+- **A review asks for no second proof.** A test or a row that a review asks for is held to the same three questions: the finding names the defect that no existing test fails on. An input that takes the branch of a tested one, and a rule another test already asserts through the same path, are not missing tests.
+- **An existing test leaves only through `/pipeline:tighten-tests`**: a fresh reader tries to save it, and a run shows the surviving proof fail. A test that looks unneeded inside the blast radius is named in the final message and neither copied nor extended; it is not deleted on one reading. The file-reading test of *Tests run code* is the one exception, because what proves its rule is named there.
+
 ## PHP static analysis
 - PHPStan always runs at **level 10** (the maximum). Pass `--level=10` on the command line, or set `level: 10` in the project's `phpstan.neon` / `phpstan.dist.neon`, whichever the project uses. Never analyse at a lower level to make a run pass.
 - **Level 10 is mandatory for code you write or change** — every new file, and every file you edit, must come out of `--level=10` clean. That includes the types you add: no `mixed` left where a real type is knowable, no `array` without a shape or value type.
