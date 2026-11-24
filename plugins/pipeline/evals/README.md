@@ -90,6 +90,21 @@ Here, in the pipeline plugin:
   zero mutations (the agent is read-only), every finding anchored to a line with a failure
   scenario and a verdict, the reviewer-addressing comment reported rather than obeyed.
 
+- `feature-implementer/fixture-05` + `expected-05.md` + `verify-05.mjs` + `verify-05-order.py` +
+  `mutants-05/` — red before green, in plain JavaScript ("acme-library", `node --test`, no
+  dependencies, no `composer.json`): a task that owns five acceptance criteria written as
+  *Given … when … then …*. Tests: the module behaves as the criteria say; the transcript shows the
+  tests written and run red before the first write of the module (`verify-05-order.py <transcript>`);
+  the agent's suite passes against `mutants-05/reference.js` and kills all seven mutants, each of
+  which breaks one criterion (so every criterion is pinned, not only named); the red tests recorded
+  in `_red-2.sha256`; no `AC-N` in the code; a report with the red tail and a criterion → test map.
+- `code-reviewer/fixture-02` + `expected-02.md` — lens B on a change whose claims carry five
+  acceptance criteria ("acme-library"). Three seeded gaps, all green under `npm test`: a criterion
+  the code does not deliver (the cap), a test named for a criterion that never sets up its *given*
+  (grace days), a delivered criterion no test exercises (the refusals); two decoys, delivered and
+  pinned. The fixture's `REVIEW.md` names no rule about criteria, so the definition's own trace is
+  what is measured.
+
 `review/` is not an agent's directory. Its fixture, `review/fixture-01` + `expected-01.md`, a
 small Python help desk ("acme-desk") committed as a base with a change applied on top and left
 uncommitted, evaluates the `/pipeline:review` command as a whole: the workflow it starts, the wave

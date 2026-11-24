@@ -73,6 +73,45 @@ failing tests in those files are your specification.
   *blocked-with-question*, and when you wrote nothing: the output is the proof the contract left
   your hands untouched, so a blocked report without it is incomplete.
 
+## Red before green
+
+A test written after the code takes the code as its oracle: it pins what was written, bugs included,
+and an edge the code forgot is an edge the test forgets too. So, unless the invocation lists frozen
+files (split mode, where the contract writer did this step), every acceptance criterion your task
+owns and every rule of logic it adds gets its test **before** the production code that satisfies it.
+The criteria are the *Given … when … then …* lines of `_plan.md` §Acceptance criteria that the task
+table's **AC** column assigns to your task; the invocation quotes them.
+
+1. **Write the tests from the criteria and the task's rules**, at the level the task names, through
+   the public surface, and from their text — not from code you have written or mean to write. One
+   test (or data-provider row) per criterion, setting up its *given*, doing its *when* and asserting
+   its *then*; a criterion that names several cases (*on the due date or any earlier day*) gets each
+   case. Name every test for the behaviour it pins, never for the criterion's number.
+2. **Run them and see them fail because the behaviour is missing**: an unknown module or class, a
+   missing method or route, an assertion that receives the old behaviour. A failure from a syntax
+   error, a wrong path or a broken fixture is a bug in the test: fix it and run again. A new test
+   that passes before any production code exists means the behaviour is already there (a scope-check
+   question, Loop step 1) or the test asserts nothing. The red run is a tool call of its own, and you
+   read its output before the next call writes production code: one shell command that writes the
+   tests, runs them and goes on to write the code has seen nothing, whatever its output says later.
+3. **Record the red tests**: `shasum -a 256 <the test files> > .claude/plans/<slug>/_red-<task>.sha256`,
+   run from the root of the tree you edit, so the paths in it are relative to that root. `<task>`
+   is the task's number in the plan's task table and nothing else — Task 3 writes `_red-3.sha256`,
+   the way a split task's contract is `_contract-3.sha256` — so the orchestrator finds the file
+   without reading your report. Keep the failing tail of the run for your report.
+4. **Write the production code** until those tests pass, then the rest of the task. A test is never
+   weakened to make code pass. When a recorded test proves wrong against its criterion — it asserts
+   something the criterion does not say — correct it to say what the criterion says, and name the
+   change and its reason under deviations in your report.
+5. **Before reporting**, run `shasum -a 256 -c .claude/plans/<slug>/_red-<task>.sha256` from the same
+   root and quote its output. Every `FAILED` line is a test changed after it was seen red, and is
+   named under deviations with its reason.
+
+A task that owns no criterion and adds no logic of its own — a translation file, a template's
+wording, a rename or move that keeps behaviour — writes no hash file and says why in its report. A
+refactor that keeps behaviour runs the existing tests green before its first edit and after its last
+instead, and quotes both tails.
+
 ## Comment scope — the code outlives the plan
 
 `.claude/plans/<slug>/` is deleted once the feature ships. Every comment that points at it becomes a
@@ -82,7 +121,7 @@ documentation**.
 - **Never** name plan artifacts anywhere in the tree you produce — docblocks, inline comments, config
   `comment=` attributes, test docblocks: no `Task 4` / `task-7b`, no plan slug, no `_plan.md` /
   `_devils_advocate.md`, no "per the plan", "the review decided", and no numbered plan items
-  (`invariant 3`, `decision 2`). The numbering exists only inside the plan.
+  (`invariant 3`, `decision 2`, `AC-3`). The numbering exists only inside the plan.
 - **Restate, don't cite.** Write what the code actually guarantees, in terms a reader with only the
   repo can check: *"an unregistered code fails loudly rather than silently yielding an empty set"* —
   not *"(invariant 3)"*.
@@ -103,12 +142,12 @@ documentation**.
 - **Self-check before reporting** (a hit on an added line is a defect — rewrite it, don't explain it).
   It reads tracked changes, staged or not, against `HEAD`, and every untracked file you created; the
   plan directory is left out, since its own text holds these words:
-  `{ git diff -U0 HEAD -- . ':!.claude/plans' | grep -nEi '^\+.*(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)'; git ls-files -z --others --exclude-standard -- . ':!.claude/plans' | xargs -0 grep -nEi -e '(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil)' -- /dev/null; }`
+  `{ git diff -U0 HEAD -- . ':!.claude/plans' | grep -nEi '^\+.*(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil|[^[:alnum:]_]ac[- ]?[0-9])'; git ls-files -z --others --exclude-standard -- . ':!.claude/plans' | xargs -0 grep -nEi -e '(task[ -]?[0-9]|invariant [0-9]|decision [0-9]|per the plan|_plan\.md|devil|(^|[^[:alnum:]_])ac[- ]?[0-9])' -- /dev/null; }`
 
 ## Loop
 
 1. **Scope check.** If the task is ambiguous, contradicts the code you find, or requires touching files outside its stated scope — **STOP and return the question** in your report instead of guessing. The orchestrator will answer and continue you via SendMessage.
-2. Implement the task exactly and fix the in-scope tech debt the plan assigned to you. Debt you meet inside the files your task names that the plan did not list is a scope-check question (step 1) — never a `TODO`, never silenced, never left in place without a word. Debt in files your task does not name goes in your report, not in your diff.
+2. Implement the task exactly, red before green (above), and fix the in-scope tech debt the plan assigned to you. Debt you meet inside the files your task names that the plan did not list is a scope-check question (step 1) — never a `TODO`, never silenced, never left in place without a word. Debt in files your task does not name goes in your report, not in your diff.
 3. **Run the targeted gates.** Discover the commands from `CLAUDE.md`, `composer.json`/`package.json` scripts, or the Makefile — including any required wrapper (ddev/docker/make) and any documented pre-step (e.g. a file-sync step before in-container runs). Targeted means: the specific test class/file you touched, static analysis, boundary checks. Fix until green. Do NOT run the full suite — the orchestrator does that once, at the end.
 4. Never `git commit`/`push`. Never edit the knowledge vault (the orchestrator closes the knowledge loop).
 
@@ -117,6 +156,10 @@ documentation**.
 - Task id + status (done / blocked-with-question)
 - Files created/changed (paths), tests added (class names, every mandated level)
 - Gate results (the actual tail lines, not "passed")
+- **Red run** — the failing tail of the run before any production code, and the `shasum -c` output
+  of `_red-<task>.sha256`; or, for a task with no criterion and no logic, why there is none
+- **Criteria → tests** — each acceptance criterion the task owns, in its words, with the test (file
+  and name) that pins it
 - In split mode: the `shasum -c` output for the contract
 - Any deviation from the plan and why (one line each) — the orchestrator audits these
 - **For the vault** — the durable facts that must survive the plan's deletion, since your code is

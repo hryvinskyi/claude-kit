@@ -1,0 +1,42 @@
+--- /dev/null
++++ b/src/late-fee.js
+@@ -0,0 +1,18 @@
++import { assertMinorUnits } from './money.js';
++import { daysBetween } from './calendar-days.js';
++
++/**
++ * The fee a member pays for returning a loan late: each day after the due date costs the daily
++ * rate, the first grace days are free, and a loan returned on or before its due date costs nothing.
++ *
++ * @param {{ dueOn: string, returnedOn: string, dailyRateMinor: number, graceDays: number, capMinor: number }} loan
++ * @returns {number} the fee in minor units
++ * @throws {RangeError} when the rate, the grace days or the cap is not a whole non-negative number
++ */
++export function lateFee({ dueOn, returnedOn, dailyRateMinor, graceDays, capMinor }) {
++  assertMinorUnits(dailyRateMinor, 'dailyRateMinor');
++  assertMinorUnits(graceDays, 'graceDays');
++  assertMinorUnits(capMinor, 'capMinor');
++  const chargedDays = Math.max(0, daysBetween(dueOn, returnedOn) - graceDays);
++  return chargedDays * dailyRateMinor;
++}
+--- /dev/null
++++ b/test/late-fee.test.js
+@@ -0,0 +1,18 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { lateFee } from '../src/late-fee.js';
++
++const loan = { dueOn: '2026-03-10', dailyRateMinor: 50, graceDays: 0, capMinor: 500 };
++
++test('a loan returned on or before its due date costs nothing', () => {
++  assert.equal(lateFee({ ...loan, returnedOn: '2026-03-10' }), 0);
++  assert.equal(lateFee({ ...loan, returnedOn: '2026-03-02' }), 0);
++});
++
++test('grace days are not charged', () => {
++  assert.equal(lateFee({ ...loan, returnedOn: '2026-03-15' }), 250);
++});
++
++test('a loan returned inside its grace period costs nothing', () => {
++  assert.equal(lateFee({ ...loan, graceDays: 3, returnedOn: '2026-03-12' }), 0);
++});
